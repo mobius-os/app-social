@@ -55,8 +55,8 @@ export const getReplies = (postId) =>
   call(`board/${encodeURIComponent(postId)}/replies`)
 export const postReply = (postId, text) =>
   call('reply', { method: 'POST', body: JSON.stringify({ post_id: postId, text }) })
-export const searchPeople = (q) => call(`people?q=${encodeURIComponent(q)}`)
-export const getPeer = (host) => call(`peer/${encodeURIComponent(host)}`)
+export const searchPeople = (q, signal) => call(`people?q=${encodeURIComponent(q)}`, { signal })
+export const getPeer = (host, signal) => call(`peer/${encodeURIComponent(host)}`, { signal })
 export async function getAppIcon(appId) {
   const response = await fetch(`/api/apps/${appId}/icon`, {
     headers: { Authorization: `Bearer ${bearer}` },
@@ -69,17 +69,17 @@ export const getPeerAvatar = (host) =>
 
 // ── conversation storage (each side keeps only its own copy) ────────────────
 
-export async function listConversations() {
+async function listMetadata(prefix) {
   const store = window.mobius?.storage
-  if (!store) return []
-  const entries = await store.list('conversations/')
-  const dirs = entries.filter((e) => e.type === 'dir')
-  const metas = await Promise.all(
-    dirs.map((d) => store.get(`conversations/${d.name}/meta.json`).catch(() => null))
-  )
-  return metas
-    .filter(Boolean)
-    .sort((a, b) => (b.last_at || 0) - (a.last_at || 0))
+  if (!store) throw new Error('Conversation storage is unavailable.')
+  const entries = await store.list(prefix)
+  const directories = entries.filter(entry => entry.type === 'directory')
+  const records = await Promise.all(directories.map(entry => store.get(`${prefix}${entry.name}/meta.json`)))
+  return records.filter(Boolean)
+}
+
+export async function listConversations() {
+  return (await listMetadata('conversations/')).sort((a, b) => (b.last_at || 0) - (a.last_at || 0))
 }
 
 export async function listMessages(peer) {
@@ -92,18 +92,23 @@ export async function listMessages(peer) {
   return loaded.filter(Boolean).sort((a, b) => (a.sent_at || 0) - (b.sent_at || 0))
 }
 
-export async function clearUnread(peer) {
+async function markConversationRead(path) {
   const store = window.mobius?.storage
   if (!store) return
-  const path = `conversations/${peer}/meta.json`
-  const meta = await store.get(path).catch(() => null)
-  if (meta && meta.unread) await store.set(path, { ...meta, unread: 0 })
+  const { value: meta, version } = await store.getWithVersion(path)
+  if (meta?.unread) await store.durableWrite(path, { ...meta, unread: 0 }, { ifMatch: version })
 }
+
+export const clearUnread = peer => markConversationRead(`conversations/${peer}/meta.json`)
 
 // ── groups ──────────────────────────────────────────────────────────────────
 
 export const createGroup = (name, members) =>
   call('groups', { method: 'POST', body: JSON.stringify({ name, members }) })
+export const addGroupMember = (gid, host) =>
+  call(`groups/${encodeURIComponent(gid)}/members`, { method: 'POST', body: JSON.stringify({ host }) })
+export const deleteGroup = (gid) =>
+  call(`groups/${encodeURIComponent(gid)}`, { method: 'DELETE' })
 export const sendGroupMessage = (gid, text, attachment, replyTo) =>
   call(`groups/${encodeURIComponent(gid)}/send`, {
     method: 'POST',
@@ -114,15 +119,16 @@ export const sendGroupMessage = (gid, text, attachment, replyTo) =>
     }),
   })
 
-export async function listGroups() {
+export const listGroups = () => listMetadata('groups/')
+
+export async function getGroup(gid) {
+  // Creation writes metadata on the server. Read that exact record fresh;
+  // neither a cached directory nor a background refresh owns navigation.
   const store = window.mobius?.storage
-  if (!store) return []
-  const entries = await store.list('groups/')
-  const dirs = entries.filter((e) => e.type === 'dir')
-  const metas = await Promise.all(
-    dirs.map((d) => store.get(`groups/${d.name}/meta.json`).catch(() => null))
-  )
-  return metas.filter(Boolean)
+  if (!store) throw new Error('Conversation storage is unavailable.')
+  const { value } = await store.getWithVersion(`groups/${gid}/meta.json`)
+  if (!value || value.gid !== gid) throw new Error('The group was saved, but could not be opened. Try opening it again.')
+  return value
 }
 
 export async function listGroupMessages(gid) {
@@ -130,18 +136,15 @@ export async function listGroupMessages(gid) {
   if (!store) return []
   const entries = await store.list(`groups/${gid}/msgs/`, { includeContent: true })
   const loaded = await Promise.all(
-    entries.map((e) => (e.content !== undefined ? e.content : store.get(e.path).catch(() => null)))
+    entries.map((e) => (e.content !== undefined ? e.content : store.get(e.path)))
   )
   return loaded.filter(Boolean).sort((a, b) => (a.sent_at || 0) - (b.sent_at || 0))
 }
 
-export async function clearGroupUnread(gid) {
-  const store = window.mobius?.storage
-  if (!store) return
-  const path = `groups/${gid}/meta.json`
-  const meta = await store.get(path).catch(() => null)
-  if (meta && meta.unread) await store.set(path, { ...meta, unread: 0 })
-}
+export const clearGroupUnread = gid => markConversationRead(`groups/${gid}/meta.json`)
+
+// The creator removes a deleted group from Messages; other members retain history.
+export const groupIsVisible = (group, ownHost) => !group.deleted_at || group.host !== ownHost
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import {
   SHARED_COMMUNITY_HOST,
-  isPrivateLocalCommunity,
+  isSeparateLocalCommunity,
   prepareCommunity,
   shouldAdoptSharedCommunity,
 } from '../community.js'
@@ -29,13 +29,13 @@ test('an already joined local community is never changed silently', async () => 
 
   assert.strictEqual(prepared, profile)
   assert.deepEqual(writes, [])
-  assert.equal(isPrivateLocalCommunity(profile), true)
+  assert.equal(isSeparateLocalCommunity(profile), true)
 })
 
 test('a chosen third-party community remains selected', () => {
   const profile = { ...freshRemoteProfile, community_host: 'friends.example' }
   assert.equal(shouldAdoptSharedCommunity(profile), false)
-  assert.equal(isPrivateLocalCommunity({ ...profile, joined: true }), false)
+  assert.equal(isSeparateLocalCommunity({ ...profile, joined: true }), false)
 })
 
 test('the shared host owner keeps its local community without a redundant write', () => {

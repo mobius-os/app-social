@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Search, Telescope } from '@openai/apps-sdk-ui/components/Icon'
 import { searchPeople, getPeer } from '../api.js'
 import { Avatar } from './Board.jsx'
+import { useModalFocus } from './modalFocus.js'
 
 const monthYear = new Intl.DateTimeFormat(undefined, {
   month: 'short', year: 'numeric', timeZone: 'UTC',
@@ -34,51 +35,58 @@ export default function People({ me, canMessage, onMessage, showToast, requested
   const [state, setState] = useState('loading')
   const [profile, setProfile] = useState(null)
   const [profileState, setProfileState] = useState('idle')
-  const debounce = useRef(null)
-
-  async function runSearch(q) {
-    try {
-      const found = await searchPeople(q)
-      setResults(found.users)
-      setState('ready')
-    } catch (error) {
-      window.mobius?.signal?.('error', { message: error.message, source: 'people' })
-      setState('error')
-    }
-  }
+  const [searchAttempt, setSearchAttempt] = useState(0)
+  const [selectedHost, setSelectedHost] = useState(null)
+  const [profileAttempt, setProfileAttempt] = useState(0)
+  const closeProfile = () => setSelectedHost(null)
+  const profileRef = useModalFocus(Boolean(selectedHost), closeProfile)
 
   useEffect(() => {
-    runSearch('')
-  }, [])
+    const controller = new AbortController()
+    let active = true
+    setState('loading')
+    setResults(null)
+    // Debounce belongs to this query; cleanup invalidates both timer and response.
+    const timer = setTimeout(async () => {
+      try {
+        const found = await searchPeople(query, controller.signal)
+        if (!active) return
+        setResults(found.users)
+        setState('ready')
+      } catch (error) {
+        if (!active) return
+        window.mobius?.signal?.('error', { message: error.message, source: 'people' })
+        setState('error')
+      }
+    }, query ? 250 : 0)
+    return () => { active = false; clearTimeout(timer); controller.abort() }
+  }, [query, searchAttempt])
 
   useEffect(() => {
     if (requestedProfile) {
-      openProfile(requestedProfile)
+      setSelectedHost(requestedProfile)
       onProfileRequestHandled?.()
     }
   }, [requestedProfile])
 
-  function onQuery(value) {
-    setQuery(value)
-    clearTimeout(debounce.current)
-    debounce.current = setTimeout(() => runSearch(value), 250)
-  }
-
-  async function openProfile(host) {
+  useEffect(() => {
+    if (!selectedHost) return
+    const controller = new AbortController()
+    let active = true
+    setProfile(null)
     setProfileState('loading')
-    setProfile({ host })
-    try {
-      const actor = await getPeer(host)
+    getPeer(selectedHost, controller.signal).then(actor => {
+      if (!active) return
       setProfile(actor)
       setProfileState('ready')
-    } catch (error) {
-      setProfile({ host, error: error.message })
-      setProfileState('error')
-    }
-  }
+    }).catch(() => {
+      if (active) setProfileState('error')
+    })
+    return () => { active = false; controller.abort() }
+  }, [selectedHost, profileAttempt])
 
-  const profileTenure = profileState === 'ready' ? tenureLine(profile) : ''
-  const profileApps = profileState === 'ready' && Array.isArray(profile.apps)
+  const profileTenure = profileState === 'ready' && profile ? tenureLine(profile) : ''
+  const profileApps = profileState === 'ready' && Array.isArray(profile?.apps)
     ? profile.apps
       .map((app) => ({
         name: String(app?.name || '').trim(),
@@ -88,29 +96,32 @@ export default function People({ me, canMessage, onMessage, showToast, requested
     : []
 
   return (
-    <div className="cn-content cn-screen">
-      <label className="cn-search">
+    <div className={`cn-content cn-screen${selectedHost ? ' has-dialog' : ''}`}>
+      <div className="cn-view-heading"><div><h2>People</h2><p>Find someone by their Möbius handle.</p></div></div>
+      <div className="cn-search">
         <Search aria-hidden="true" />
         <input
           value={query}
-          onChange={(e) => onQuery(e.target.value)}
+          onChange={(e) => setQuery(e.target.value)}
+          type="search" autoComplete="off" spellCheck={false}
           placeholder="Search people by handle"
           aria-label="Search people"
         />
-      </label>
+        {query && <button className="cn-search-clear" onClick={() => setQuery('')} aria-label="Clear people search">Clear</button>}
+      </div>
 
-      {state === 'loading' && <div className="cn-center"><div className="cn-spinner" /></div>}
+      {state === 'loading' && <p className="cn-search-status" role="status">Searching people…</p>}
       {state === 'error' && (
         <div className="cn-empty">
           <div className="cn-empty-title">Directory unavailable</div>
           <p className="cn-empty-text">Your community host couldn’t be reached right now.</p>
-          <button className="cn-btn cn-btn-secondary" onClick={() => runSearch(query)}>Try again</button>
+          <button className="cn-btn cn-btn-secondary" onClick={() => setSearchAttempt(attempt => attempt + 1)}>Try again</button>
         </div>
       )}
 
       <div className="cn-people-list">
         {(results || []).map((user) => (
-          <button className="cn-row" key={user.host} onClick={() => openProfile(user.host)}>
+          <button className="cn-row" key={user.host} onClick={() => setSelectedHost(user.host)}>
             <Avatar name={user.handle} host={user.host} />
             <span className="cn-row-copy">
               <span className="cn-row-top">
@@ -131,11 +142,15 @@ export default function People({ me, canMessage, onMessage, showToast, requested
         )}
       </div>
 
-      {profile && (
+      {selectedHost && (
         <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="Profile"
-             onClick={() => setProfile(null)}>
-          <div className="cn-sheet" onClick={(e) => e.stopPropagation()}>
-            {profileState === 'loading' && <div className="cn-center"><div className="cn-spinner" /></div>}
+             onClick={closeProfile}>
+          <div ref={profileRef} tabIndex={-1} className="cn-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="cn-dialog-head">
+              <h3 className="cn-sheet-title">Profile</h3>
+              <button className="cn-btn cn-btn-ghost" onClick={closeProfile}>Close</button>
+            </div>
+            {profileState === 'loading'  && <div className="cn-center"><div className="cn-spinner" /></div>}
             {profileState === 'error' && (
               <>
                 <h3 className="cn-sheet-title">Profile unavailable</h3>
@@ -143,11 +158,11 @@ export default function People({ me, canMessage, onMessage, showToast, requested
                   This person couldn’t be reached. They may be offline right now.
                 </p>
                 <div className="cn-sheet-actions">
-                  <button className="cn-btn cn-btn-secondary" onClick={() => setProfile(null)}>Close</button>
+                  <button className="cn-btn cn-btn-secondary" onClick={() => setProfileAttempt(attempt => attempt + 1)}>Try again</button>
                 </div>
               </>
             )}
-            {profileState === 'ready' && (
+            {profileState === 'ready' && profile && (
               <>
                 <div className="cn-profile-head">
                   <Avatar name={profile.handle} host={profile.host} size="large" />
@@ -176,11 +191,10 @@ export default function People({ me, canMessage, onMessage, showToast, requested
                   </section>
                 )}
                 <div className="cn-sheet-actions">
-                  <button className="cn-btn cn-btn-secondary" onClick={() => setProfile(null)}>Close</button>
                   {canMessage && profile.host !== me?.host && (
                     <button
                       className="cn-btn cn-btn-primary"
-                      onClick={() => { const p = profile; setProfile(null); onMessage(p.host, p.handle) }}
+                      onClick={() => { const p = profile; closeProfile(); onMessage(p.host, p.handle) }}
                     >
                       Message
                     </button>

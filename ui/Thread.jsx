@@ -28,7 +28,7 @@ export default function Thread({
 
   useEffect(() => {
     refresh()
-    clearUnread(peer)
+    clearUnread(peer).catch(() => {})
   }, [peer])
 
   useEffect(() => {
@@ -41,7 +41,7 @@ export default function Thread({
   }, [peer])
 
   useEffect(() => {
-    if (version > 0) { refresh(); clearUnread(peer) }
+    if (version > 0) { refresh(); clearUnread(peer).catch(() => {}) }
   }, [version])
 
   useEffect(() => {

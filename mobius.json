@@ -10,7 +10,22 @@
   "icon": "icon.png",
   "offline_capable": false,
   "permissions": {},
-  "source_files": ["api.js", "community.js", "reconciliation.js", "theme.js", "ui/Board.jsx", "ui/Messages.jsx", "ui/Thread.jsx", "ui/GroupThread.jsx", "ui/People.jsx", "ui/Media.jsx", "ui/MessageBubble.jsx", "ui/landingImage.js"],
+  "source_files": [
+    "api.js",
+    "community.js",
+    "reconciliation.js",
+    "theme.js",
+    "ui/Board.jsx",
+    "ui/Messages.jsx",
+    "ui/Thread.jsx",
+    "ui/GroupThread.jsx",
+    "ui/People.jsx",
+    "ui/Media.jsx",
+    "ui/MessageBubble.jsx",
+    "ui/landingImage.js",
+    "ui/modalFocus.js",
+    "ui/GroupDetails.jsx"
+  ],
   "store": {
     "tagline": "Your people, across every Möbius.",
     "description": "Social gives every Möbius a direct way to reach people on other instances. Find someone by handle, send private one-to-one messages, create group conversations, or post to a shared community board.\n\nMessages travel directly between each person's Möbius and each side keeps its own copy. The People directory is opt-in, and the community host can be changed without moving private conversations through a third party.",

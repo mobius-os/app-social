@@ -9,16 +9,16 @@ import GroupThread from './ui/GroupThread.jsx'
 import People from './ui/People.jsx'
 import { Lightbox } from './ui/Media.jsx'
 import {
-  SHARED_COMMUNITY_HOST, isPrivateLocalCommunity, prepareCommunity,
+  SHARED_COMMUNITY_HOST, isSeparateLocalCommunity, prepareCommunity,
 } from './community.js'
 
 function ParticipationNotice({ me, busy, onJoin, onConnect, onCheck, onUseShared }) {
-  if (isPrivateLocalCommunity(me)) {
+  if (isSeparateLocalCommunity(me)) {
     return (
       <section className="cn-welcome" aria-labelledby="cn-welcome-title">
         <span className="cn-welcome-mark" aria-hidden="true"><Globe /></span>
         <div className="cn-welcome-copy">
-          <h2 id="cn-welcome-title">Your community is private</h2>
+          <h2 id="cn-welcome-title">You’re in a separate community</h2>
           <p>
             This Möbius is hosting its own board and directory, so you’ll only see
             people who joined it directly. Switch to Social’s shared community to
@@ -83,6 +83,8 @@ export default function App({ appId, token }) {
   const [feedState, setFeedState] = useState('loading')
   const [conversations, setConversations] = useState([])
   const [groups, setGroups] = useState([])
+  const [messagesState, setMessagesState] = useState('loading')
+  const conversationLoad = useRef(0)
   const [thread, setThread] = useState(null) // { kind: 'dm'|'group', peer?, name?, group? }
   const [version, setVersion] = useState(0)
   const [toast, setToast] = useState(null)
@@ -130,19 +132,24 @@ export default function App({ appId, token }) {
   }, [])
 
   async function loadConversations() {
+    const request = ++conversationLoad.current
     try {
       const [loaded, loadedGroups] = await Promise.all([
         api.listConversations(), api.listGroups(),
       ])
+      if (request !== conversationLoad.current) return
       setConversations(loaded)
       setGroups(loadedGroups)
+      setMessagesState('ready')
       if (!readySignalled.current) {
         readySignalled.current = true
         window.mobius?.signal?.('app_ready', {
           item_count: loaded.length + loadedGroups.length,
         })
       }
-    } catch { /* storage unavailable — views show empty states */ }
+    } catch {
+      if (request === conversationLoad.current) setMessagesState('error')
+    }
   }
 
   useEffect(() => {
@@ -202,9 +209,11 @@ export default function App({ appId, token }) {
   const openGroup = (group) => openAnyThread({ kind: 'group', group })
 
   async function openCreatedGroup(gid) {
-    await loadConversations()
-    const created = (await api.listGroups()).find((g) => g.gid === gid)
-    if (created) openGroup(created)
+    const created = await api.getGroup(gid)
+    // An older list response must not remove the group we just opened.
+    conversationLoad.current += 1
+    setGroups(prior => [created, ...prior.filter(group => group.gid !== gid)])
+    openGroup(created)
   }
 
   function closeThread() {
@@ -260,9 +269,10 @@ export default function App({ appId, token }) {
     }
   }
 
+  const visibleGroups = groups.filter(group => api.groupIsVisible(group, me?.host))
   const unread =
     conversations.reduce((sum, c) => sum + (c.unread || 0), 0) +
-    groups.reduce((sum, g) => sum + (g.unread || 0), 0)
+    visibleGroups.reduce((sum, g) => sum + (g.unread || 0), 0)
   const canParticipate = Boolean(me?.joined && me?.name)
 
   // ── render ────────────────────────────────────────────────────────────────
@@ -278,10 +288,9 @@ export default function App({ appId, token }) {
     return (
       <div className="cn-root"><style>{CSS}</style>
         <div className="cn-empty" style={{ margin: 'auto' }}>
-          <div className="cn-empty-title">Social needs its server side</div>
+          <div className="cn-empty-title">Social couldn’t connect</div>
           <p className="cn-empty-text">
-            The federation service isn’t active on this Möbius yet. It switches on
-            with the next server restart — then reopen this app.
+            Your profile couldn’t be loaded. Check your connection and try again.
           </p>
           <button className="cn-btn cn-btn-secondary" onClick={loadMe}>Try again</button>
         </div>
@@ -294,6 +303,7 @@ export default function App({ appId, token }) {
       <div className="cn-root"><style>{CSS}</style>
         {thread.kind === 'group' ? (
           <GroupThread
+            key={thread.group.gid}
             group={groups.find((g) => g.gid === thread.group.gid) || thread.group}
             me={me}
             version={version}
@@ -334,6 +344,19 @@ export default function App({ appId, token }) {
         </div>
       </header>
 
+      <nav className="cn-nav" aria-label="Main navigation">
+        <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-current={tab === 'board' ? 'page' : undefined} onClick={() => setTab('board')}>
+          <Globe aria-hidden="true" /><span>Board</span>
+        </button>
+        <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} aria-current={tab === 'messages' ? 'page' : undefined} onClick={() => setTab('messages')}>
+          {unread > 0 && <span className="cn-badge">{unread}</span>}
+          <Chat aria-hidden="true" /><span>Messages</span>
+        </button>
+        <button className={`cn-nav-item${tab === 'people' ? ' is-active' : ''}`} aria-current={tab === 'people' ? 'page' : undefined} onClick={() => setTab('people')}>
+          <Users aria-hidden="true" /><span>People</span>
+        </button>
+      </nav>
+
       <div className="cn-scroll">
         <div className="cn-content">
           <ParticipationNotice
@@ -357,7 +380,8 @@ export default function App({ appId, token }) {
         )}
         {tab === 'messages' && (
           canParticipate ? (
-            <Messages me={me} conversations={conversations} groups={groups}
+            <Messages me={me} conversations={conversations} groups={visibleGroups}
+                      loadState={messagesState} onRetry={loadConversations}
                       creating={creatingGroup} setCreating={setCreatingGroup}
                       onOpenThread={(peer) => openThread(peer)}
                       onOpenGroup={openGroup}
@@ -387,27 +411,9 @@ export default function App({ appId, token }) {
 
       {tab === 'board' && canParticipate && (
         <button className="cn-fab" onClick={() => setComposing(true)} aria-label="New post">
-          <Plus aria-hidden="true" />
+          <Plus aria-hidden="true" /><span>New post</span>
         </button>
       )}
-      {tab === 'messages' && canParticipate && (
-        <button className="cn-fab" onClick={() => setCreatingGroup(true)} aria-label="New group">
-          <Plus aria-hidden="true" />
-        </button>
-      )}
-
-      <nav className="cn-nav" aria-label="Main navigation">
-        <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} onClick={() => setTab('board')}>
-          <Globe aria-hidden="true" /><span>Board</span>
-        </button>
-        <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} onClick={() => setTab('messages')}>
-          {unread > 0 && <span className="cn-badge">{unread}</span>}
-          <Chat aria-hidden="true" /><span>Messages</span>
-        </button>
-        <button className={`cn-nav-item${tab === 'people' ? ' is-active' : ''}`} onClick={() => setTab('people')}>
-          <Users aria-hidden="true" /><span>People</span>
-        </button>
-      </nav>
 
       {toast && <div className={`cn-toast${toast.kind ? ` is-${toast.kind}` : ''}`} role="status">{toast.text}</div>}
       <Lightbox image={lightbox} onClose={() => setLightbox(null)} />

@@ -15,8 +15,8 @@ export const CSS = `
   word-break: break-word; overflow-wrap: anywhere;
 }
 /* /mobius-ui:Root */
-.cn-scroll { padding: 2px 16px 88px; }
-.cn-content { width: 100%; max-width: 620px; margin: 0 auto; }
+.cn-scroll { order: 1; padding: 2px 16px 88px; }
+.cn-content { width: 100%; max-width: 680px; margin: 0 auto; }
 .cn-screen { animation: cn-screen-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .cn-screen.has-dialog { animation: none; transform: none; }
 @keyframes cn-screen-in {
@@ -24,21 +24,21 @@ export const CSS = `
   to { opacity: 1; transform: none; }
 }
 
-/* ── Top bar: translucent, blurred, minimal ─────────────────────────────── */
+/* ── Top bar: aligned with the reading column ─────────────────────────────── */
 .cn-header {
   flex: 0 0 auto; position: relative; z-index: 20;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  min-height: 58px; padding: 10px 18px 8px;
-  background: color-mix(in srgb, var(--bg) 86%, transparent);
-  backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px);
+  min-height: 68px; padding: 12px 16px;
+  width: min(100%, 712px); margin-inline: auto;
+  background: var(--bg);
 }
 .cn-header::after {
-  content: ""; position: absolute; left: 18px; right: 18px; bottom: 0;
+  content: ""; position: absolute; left: 16px; right: 16px; bottom: 0;
   height: 1px; background: var(--border); opacity: 0.7;
 }
 .cn-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .cn-app-icon {
-  flex: 0 0 auto; width: 42px; height: 42px; display: block;
+  flex: 0 0 auto; width: 36px; height: 36px; display: block;
   object-fit: contain; user-select: none;
 }
 .cn-mark {
@@ -63,11 +63,11 @@ export const CSS = `
 .cn-mark-orbit::before { top: -3px; left: 2px; }
 .cn-mark-orbit::after { right: -3px; bottom: 1px; }
 .cn-title {
-  margin: 0; font-size: 19px; font-weight: 780; letter-spacing: -0.03em;
+  margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.03em;
 }
 .cn-header-chip {
   display: inline-flex; align-items: center; gap: 8px;
-  min-height: 40px; padding: 4px 12px 4px 5px; border-radius: 21px;
+  min-height: 44px; max-width: 55%; padding: 4px 12px 4px 5px; border-radius: 21px;
   background: color-mix(in srgb, var(--surface) 82%, transparent);
   border: 1px solid var(--border); font-size: 12.5px; font-weight: 650;
   color: var(--muted);
@@ -76,9 +76,9 @@ export const CSS = `
 /* Compact list header (messenger-style) */
 .cn-list-top {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 0 6px; min-height: 40px;
+  padding: 22px 0 14px; min-height: 56px;
 }
-.cn-list-title { margin: 0; font-size: 21px; font-weight: 780; letter-spacing: -0.03em; }
+.cn-list-title { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -0.03em; }
 
 /* ── Avatars: dimensional gradient discs ────────────────────────────────── */
 .cn-avatar {
@@ -109,7 +109,7 @@ export const CSS = `
 }
 
 /* ── Board: hero pulse card + compose trigger ───────────────────────────── */
-.cn-post { padding: 18px 0 13px; position: relative; }
+.cn-post { padding: 24px 0 20px; position: relative; }
 .cn-post + .cn-post::before {
   content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
   background: var(--border); opacity: 0.65;
@@ -123,7 +123,7 @@ export const CSS = `
 .cn-person-name { font-size: 14.5px; font-weight: 720; line-height: 1.25; letter-spacing: -0.01em; }
 .cn-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .cn-post-copy {
-  font-size: 15px; line-height: 1.52; margin: 11px 0 0;
+  font-size: 16px; line-height: 1.6; margin: 14px 0 0;
   letter-spacing: -0.004em; white-space: pre-wrap;
 }
 
@@ -145,7 +145,7 @@ export const CSS = `
 .cn-react:disabled { opacity: 0.46; cursor: default; transform: none; }
 /* ── Rows (conversations, people) ───────────────────────────────────────── */
 .cn-row {
-  width: 100%; min-height: 74px; padding: 13px 4px; display: flex; align-items: center; gap: 13px;
+  width: 100%; min-height: 82px; padding: 16px 8px; display: flex; align-items: center; gap: 13px;
   background: transparent; border: 0; border-radius: 14px;
   text-align: left; color: inherit; font-family: var(--font); cursor: pointer;
   position: relative; transition: background 0.15s ease;
@@ -168,6 +168,18 @@ export const CSS = `
   width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto;
   background: var(--accent);
 }
+
+.cn-view-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 24px 0 18px; }
+.cn-view-heading h2 { margin: 0; font-size: 25px; line-height: 1.2; font-weight: 700; letter-spacing: -0.025em; }
+.cn-view-heading p { margin: 6px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.cn-view-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cn-view-actions svg { width: 18px; height: 18px; }
+.cn-directory-error { padding: 12px 0; color: var(--muted); font-size: 14px; }
+.cn-directory-error p { margin: 0 0 8px; }
+.cn-search-clear { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-height: 44px; padding: 0 6px; border: 0; background: transparent; color: var(--muted); font: 600 13px var(--font); cursor: pointer; }
+.cn-search-status { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+.cn-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.cn-dialog-head .cn-sheet-title { margin: 0; }
 
 /* ── Search field ───────────────────────────────────────────────────────── */
 .cn-search {
@@ -376,6 +388,7 @@ export const CSS = `
 .cn-media-state svg { width: 24px; height: 24px; opacity: 0.55; }
 .cn-message-image { max-height: 320px; border-radius: 15px; }
 .cn-board-image { max-height: 520px; margin-top: 12px; border-radius: 14px; }
+.cn-board-image img { object-fit: contain; }
 
 @media (hover: none) {
   .cn-bubble-reply { display: none; }
@@ -424,8 +437,8 @@ export const CSS = `
 
 /* ── Standard bottom tab bar ────────────────────────────────────────────── */
 .cn-nav {
-  flex: 0 0 auto; display: flex;
-  padding: 4px 8px max(6px, env(safe-area-inset-bottom));
+  order: 2; flex: 0 0 auto; display: flex; gap: 4px;
+  padding: 6px 16px max(6px, env(safe-area-inset-bottom));
   background: color-mix(in srgb, var(--bg) 92%, transparent);
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
   border-top: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
@@ -438,7 +451,7 @@ export const CSS = `
 }
 .cn-nav-item svg { width: 26px; height: 26px; }
 .cn-nav-item:hover { color: var(--text); }
-.cn-nav-item.is-active { color: var(--accent); }
+.cn-nav-item.is-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .cn-badge {
   position: absolute; top: 5px; right: calc(50% - 22px);
   min-width: 16px; height: 16px; padding: 0 4px;
@@ -451,7 +464,7 @@ export const CSS = `
   position: absolute; right: 16px;
   bottom: calc(76px + env(safe-area-inset-bottom));
   z-index: 30;
-  width: 54px; height: 54px; border-radius: 16px; border: 0;
+  width: auto; min-width: 54px; height: 54px; padding: 0 18px; gap: 8px; border-radius: 16px; border: 0;
   display: flex; align-items: center; justify-content: center; cursor: pointer;
   background: var(--accent);
   color: var(--accent-fg); font-size: 26px;
@@ -460,6 +473,10 @@ export const CSS = `
 }
 .cn-fab:hover { filter: brightness(1.07); }
 .cn-fab:active { transform: scale(0.92); }
+
+.cn-fab span { font: 650 14px/1 var(--font); }
+.cn-fab svg { width: 22px; height: 22px; }
+.cn-header-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── First-use and community context ────────────────────────────────────── */
 .cn-welcome {
@@ -717,6 +734,30 @@ export const CSS = `
 }
 /* /mobius-ui:ReducedMotion */
 
+/* Wide panes get a top navigation strip; narrow panes retain thumb-reachable tabs.
+   Breakpoints use the app frame, so tiled desktop panes behave like small screens. */
+@media (min-width: 720px) {
+  .cn-header { min-height: 80px; }
+  .cn-scrim { align-items: center; padding: 24px; }
+  .cn-sheet { border-radius: 16px; max-width: 540px; max-height: min(85vh, 760px); box-shadow: 0 18px 60px rgba(0,0,0,.25); }
+  .cn-grabber { display: none; }
+  .cn-reply-sheet { height: min(680px, 85vh); }
+  .cn-nav {
+    order: 0; width: min(100% - 32px, 680px); margin: 8px auto 0;
+    padding: 4px 0 12px; border-top: 0; background: var(--bg);
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  .cn-nav-item { flex: 0 1 auto; min-height: 44px; padding: 0 20px; flex-direction: row; gap: 8px; font-size: 14px; }
+  .cn-nav-item svg { width: 20px; height: 20px; }
+  .cn-badge { top: 0; right: 4px; }
+  .cn-fab { right: max(24px, calc((100% - 680px) / 2)); bottom: 24px; }
+  .cn-thread-bar { padding-inline: max(16px, calc((100% - 680px) / 2)); background: var(--bg); }
+  .cn-thread-bar::after { left: max(16px, calc((100% - 680px) / 2)); right: max(16px, calc((100% - 680px) / 2)); }
+  .cn-thread-msgs { padding-inline: max(16px, calc((100% - 680px) / 2)); }
+  .cn-compose-shell { width: min(100%, 712px); margin-inline: auto; }
+  .cn-toast { max-width: 648px; margin-inline: auto; }
+}
+
 @media (max-width: 480px) {
   .cn-welcome { padding: 14px; }
   .cn-welcome > .cn-btn, .cn-welcome-actions { grid-column: 1 / -1; width: 100%; }
@@ -733,4 +774,30 @@ export const CSS = `
   width: 19px; height: 19px; accent-color: var(--accent); flex: 0 0 auto;
 }
 .cn-member-row .cn-row-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+
+/* The group task keeps its action visible while a long directory scrolls. */
+.cn-group-create { display: flex; flex-direction: column; overflow: hidden; padding: 20px; max-height: min(85dvh, 720px); }
+.cn-group-create .cn-grabber { flex-shrink: 0; }
+.cn-group-create-body { overflow-y: auto; min-height: 0; padding: 4px; }
+.cn-group-create .cn-sheet-title { font-size: 22px; margin-bottom: 8px; }
+.cn-field-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.cn-group-members-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 24px 0 10px; }
+.cn-group-members-head h4 { margin: 0; font-size: 14px; }
+.cn-group-members-head > span { color: var(--muted); font-size: 13px; }
+.cn-group-member-list { margin-top: 10px; }
+.cn-group-member-list strong { font-size: 14px; }
+.cn-group-member-list .cn-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-group-status { padding-block: 16px; font-size: 14px; color: var(--muted); }
+.cn-group-create-footer { flex-shrink: 0; padding: 12px 4px max(0px, env(safe-area-inset-bottom)); border-top: 1px solid var(--border); }
+.cn-group-create-footer .cn-sheet-actions { margin-top: 0; }
+.cn-group-create-footer .cn-directory-error { margin-bottom: 12px; }
+
+.cn-thread-heading { min-width: 0; flex: 1; }
+.cn-thread-heading .cn-person-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-group-detail-name { margin: 0 0 8px; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.cn-member-static { cursor: default; }
+.cn-group-management { display: flex; gap: 8px; flex-wrap: wrap; margin: 24px 0 16px; }
+.cn-danger-text { color: var(--danger); }
+.cn-group-closed { padding: 18px 24px max(18px, env(safe-area-inset-bottom)); text-align: center; font-size: 14px; line-height: 1.5; color: var(--muted); border-top: 1px solid var(--border); }
+.cn-directory-error li { overflow-wrap: anywhere; }
 `

@@ -2,15 +2,20 @@ import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeft, ArrowUp, Check, Clock, ImageSquare, Warning,
 } from '@openai/apps-sdk-ui/components/Icon'
-import { listGroupMessages, sendGroupMessage, clearGroupUnread, clockTime } from '../api.js'
+import { listGroupMessages, sendGroupMessage, clearGroupUnread, clockTime, getGroup } from '../api.js'
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
+import GroupDetails from './GroupDetails.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
 
 export default function GroupThread({
   group, me, version, onBack, showToast, onOpenImage,
 }) {
+  const [details, setDetails] = useState(false)
+  const [currentGroup, setCurrentGroup] = useState(group)
+  const [loadError, setLoadError] = useState('')
+  const refreshRequest = useRef(0)
   const [messages, setMessages] = useState(null)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
@@ -23,13 +28,21 @@ export default function GroupThread({
   const gid = group.gid
 
   async function refresh() {
-    setMessages(await listGroupMessages(gid))
+    const request = ++refreshRequest.current
+    try {
+      const [loaded, metadata] = await Promise.all([listGroupMessages(gid), getGroup(gid)])
+      if (request !== refreshRequest.current) return
+      setMessages(loaded); setCurrentGroup(metadata); setLoadError('')
+    } catch (error) {
+      if (request === refreshRequest.current) setLoadError('Messages couldn’t be refreshed. Your saved history hasn’t been removed.')
+    }
   }
 
-  useEffect(() => { refresh(); clearGroupUnread(gid) }, [gid])
   useEffect(() => {
-    if (version > 0) { refresh(); clearGroupUnread(gid) }
-  }, [version])
+    refresh()
+    clearGroupUnread(gid).catch(() => {})
+    return () => { refreshRequest.current += 1 }
+  }, [gid, version])
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
@@ -55,7 +68,7 @@ export default function GroupThread({
     const text = draft.trim()
     const image = selectedImage
     const reply = replyTarget
-    if ((!text && !image) || sending || processingImage) return
+    if ((!text && !image) || sending || processingImage || currentGroup.deleted_at) return
 
     setSending(true)
     setMessages((prior) => [...(prior || []), {
@@ -105,7 +118,7 @@ export default function GroupThread({
     }
   }
 
-  const memberCount = (group.members || []).length
+  const memberCount = (currentGroup.members || []).length
   let lastDay = ''
   let lastAuthor = null
   const rendered = []
@@ -163,19 +176,21 @@ export default function GroupThread({
   }
 
   return (
-    <div className="cn-thread">
+    <div className={`cn-thread cn-screen${details ? ' has-dialog' : ''}`}>
       <div className="cn-thread-bar">
         <button className="cn-btn cn-btn-ghost cn-btn-icon" onClick={onBack} aria-label="Back">
           <ArrowLeft />
         </button>
-        <GroupAvatar name={group.name} />
-        <span style={{ minWidth: 0 }}>
-          <span className="cn-person-name" style={{ display: 'block' }}>{group.name}</span>
-          <span className="cn-meta">{memberCount} {memberCount === 1 ? 'person' : 'people'}</span>
+        <GroupAvatar name={currentGroup.name} />
+        <span className="cn-thread-heading">
+          <span className="cn-person-name">{currentGroup.name}</span>
+          <span className="cn-meta">{currentGroup.deleted_at ? 'Group closed' : `${memberCount} ${memberCount === 1 ? 'person' : 'people'}`}</span>
         </span>
+        <button className="cn-btn cn-btn-secondary" onClick={() => setDetails(true)} aria-label="Group details">Details</button>
       </div>
       <div className="cn-thread-msgs" ref={scrollRef}>
-        {messages === null && <div className="cn-center"><div className="cn-spinner" /></div>}
+        {loadError && <div className="cn-directory-error" role="alert"><p>{loadError}</p><button className="cn-btn cn-btn-secondary" onClick={refresh}>Try again</button></div>}
+        {messages === null && !loadError && <div className="cn-center"><div className="cn-spinner" /></div>}
         {messages !== null && messages.length === 0 && (
           <div className="cn-empty">
             <div className="cn-empty-title">Say hello</div>
@@ -186,7 +201,7 @@ export default function GroupThread({
         )}
         {rendered}
       </div>
-      <div className="cn-compose-shell">
+      {currentGroup.deleted_at ? <div className="cn-group-closed" role="status">This group has been closed. You can still read its earlier messages.</div> : <div className="cn-compose-shell">
         <ReplyTarget reply={replyTarget} onDismiss={() => setReplyTarget(null)} />
         <SelectedImageStrip selected={selectedImage} onRemove={() => setSelectedImage(null)} />
         <form className="cn-compose-bar" onSubmit={send}>
@@ -203,7 +218,10 @@ export default function GroupThread({
             <ArrowUp />
           </button>
         </form>
-      </div>
+      </div>}
+      {details && <GroupDetails group={currentGroup} me={me} onClose={() => setDetails(false)}
+        onUpdated={updated => { refreshRequest.current += 1; setCurrentGroup(updated) }}
+        onDeleted={() => { showToast('Group deleted', 'success'); onBack() }} />}
     </div>
   )
 }
