@@ -9,6 +9,7 @@ import {
 import {
   boardRefreshDelay, optimisticLikeChange, reconcileReplies, threadRefreshDelay,
 } from '../reconciliation.js'
+import { useModalFocus } from './modalFocus.js'
 import { LANDING_DATA_URL } from './landingImage.js'
 import { BoardImage, prepareImage, SelectedImageStrip } from './Media.jsx'
 
@@ -90,6 +91,8 @@ export default function Board({
   const replySendingRef = useRef(false)
   const lastActivityAt = useRef(Date.now())
   const fileRef = useRef(null)
+  const composeRef = useModalFocus(composing && canInteract, () => { if (!posting) setComposing(false) })
+  const repliesRef = useModalFocus(Boolean(replyPost), () => { if (!replySending) closeReplies() })
   replySendingRef.current = replySending
 
   function countFor(post) {
@@ -403,7 +406,7 @@ export default function Board({
       {composing && canInteract && (
         <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="New post"
              onClick={posting ? null : () => setComposing(false)}>
-          <div className="cn-sheet" onClick={(e) => e.stopPropagation()}>
+          <div ref={composeRef} tabIndex={-1} className="cn-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="cn-grabber" aria-hidden="true" />
             <h3 className="cn-sheet-title">New post</h3>
             <p className="cn-sheet-body">Posting to everyone on your community board.</p>
@@ -414,7 +417,7 @@ export default function Board({
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 placeholder="What would you like to share?"
-                autoFocus
+                aria-label="Post text"
               />
               <input ref={fileRef} className="cn-file-input" type="file" accept="image/*"
                      onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
@@ -439,7 +442,7 @@ export default function Board({
       {replyPost && (
         <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="Conversation on post"
              onClick={replySending ? null : closeReplies}>
-          <div className="cn-sheet cn-reply-sheet" onClick={(e) => e.stopPropagation()}>
+          <div ref={repliesRef} tabIndex={-1} className="cn-sheet cn-reply-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="cn-grabber" aria-hidden="true" />
             <div className="cn-reply-sheet-head">
               <div>

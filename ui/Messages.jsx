@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Mail, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import { timeAgo, initials, createGroup, searchPeople } from '../api.js'
 import { Avatar } from './Board.jsx'
+import { useModalFocus } from './modalFocus.js'
 
 function GroupAvatar({ name }) {
   return (
@@ -22,7 +23,7 @@ function lastMessagePreview(item) {
 
 export default function Messages({
   me, conversations, groups, onOpenThread, onOpenGroup, onFindPeople,
-  onGroupsChanged, showToast, creating, setCreating,
+  onGroupsChanged, showToast, creating, setCreating, loadState, onRetry,
 }) {
 
   const merged = [
@@ -31,15 +32,26 @@ export default function Messages({
   ].sort((a, b) => b.at - a.at)
 
   return (
-    <div className="cn-content cn-screen">
-      {merged.length === 0 ? (
+    <div className={`cn-content cn-screen${creating ? ' has-dialog' : ''}`}>
+      <div className="cn-view-heading">
+        <div><h2>Messages</h2><p>Your conversations, together.</p></div>
+        <div className="cn-view-actions">
+          <button className="cn-btn cn-btn-primary" onClick={onFindPeople}>New message</button>
+          <button className="cn-btn cn-btn-secondary" onClick={() => setCreating(true)}><Plus aria-hidden="true" /> New group</button>
+        </div>
+      </div>
+      {loadState === 'error' && <div className="cn-directory-error" role="alert">
+        <p>Conversations couldn’t be loaded. Your saved messages haven’t been removed.</p>
+        <button className="cn-btn cn-btn-secondary" onClick={onRetry}>Try again</button>
+      </div>}
+      {loadState === 'loading' && <div className="cn-center" role="status">Loading conversations…</div>}
+      {merged.length === 0 && loadState === 'ready' ? (
         <div className="cn-empty">
           <div className="cn-empty-mark" aria-hidden="true"><Mail /></div>
           <div className="cn-empty-title">No conversations yet</div>
           <p className="cn-empty-text">
             Find someone in People and say hello — your message goes straight to their server.
           </p>
-          <button className="cn-btn cn-btn-primary" onClick={onFindPeople}>Find people</button>
         </div>
       ) : (
         <div>
@@ -67,11 +79,11 @@ export default function Messages({
                     <span className="cn-time">{timeAgo(item.last_at)}</span>
                   </span>
                   <span className="cn-preview">
-                    {lastMessagePreview(item)
+                    {item.deleted_at ? 'Group closed' : lastMessagePreview(item)
                       ? `${item.last_dir === 'out'
                         ? 'You'
                         : item.last_from_handle ? `@${item.last_from_handle}` : 'Someone'}: ${lastMessagePreview(item)}`
-                      : `${(item.members || []).length} people`}
+                      : `${(item.members || []).length} ${(item.members || []).length === 1 ? 'person' : 'people'}`}
                   </span>
                 </span>
                 {item.unread > 0 && <span className="cn-unread-dot" aria-label="Unread" />}
@@ -85,7 +97,7 @@ export default function Messages({
         <NewGroupSheet
           me={me}
           onClose={() => setCreating(false)}
-          onCreated={(gid) => { setCreating(false); onGroupsChanged(gid) }}
+          onCreated={async (gid) => { await onGroupsChanged(gid); setCreating(false) }}
           showToast={showToast}
         />
       )}
@@ -97,77 +109,97 @@ function NewGroupSheet({ me, onClose, onCreated, showToast }) {
   const [name, setName] = useState('')
   const [people, setPeople] = useState(null)
   const [selected, setSelected] = useState({})
+  const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
+  const [created, setCreated] = useState(null)
+  const [error, setError] = useState('')
+  const [peopleError, setPeopleError] = useState(false)
+  const [peopleAttempt, setPeopleAttempt] = useState(0)
+  const submitting = useRef(false)
+  const sheetRef = useModalFocus(true, () => { if (!submitting.current) onClose() })
 
   useEffect(() => {
-    searchPeople('')
-      .then((found) => setPeople(found.users.filter((u) => u.host !== me?.host)))
-      .catch(() => setPeople([]))
-  }, [])
+    const controller = new AbortController()
+    setPeopleError(false)
+    setPeople(null)
+    searchPeople('', controller.signal)
+      .then(found => { if (!controller.signal.aborted) setPeople(found.users.filter(user => user.host !== me?.host)) })
+      .catch(() => { if (!controller.signal.aborted) { setPeople([]); setPeopleError(true) } })
+    return () => controller.abort()
+  }, [me?.host, peopleAttempt])
 
-  async function create() {
+  async function create(event) {
+    event.preventDefault()
     const groupName = name.trim()
-    if (!groupName) return
+    if ((!groupName && !created) || submitting.current) return
+    submitting.current = true
     setBusy(true)
+    setError('')
+    let saved = created
     try {
-      const result = await createGroup(groupName, Object.keys(selected).filter((h) => selected[h]))
-      window.mobius?.signal?.('item_created', { type: 'group' })
-      const unreachable = Object.entries(result.invited || {})
-        .filter(([, ok]) => !ok).map(([h]) => h)
-      if (unreachable.length) {
-        const count = unreachable.length
-        showToast(`Created — ${count} ${count === 1 ? 'person' : 'people'} couldn’t be reached yet.`, 'error')
-      } else {
-        showToast('Group created', 'success')
+      if (!saved) {
+        saved = await createGroup(groupName, Object.keys(selected).filter(host => selected[host]))
+        setCreated(saved)
+        window.mobius?.signal?.('item_created', { type: 'group' })
       }
-      onCreated(result.gid)
-    } catch (error) {
-      window.mobius?.signal?.('error', { message: error.message, source: 'create_group' })
-      showToast(error.message, 'error')
+      await onCreated(saved.gid)
+      const failed = Object.values(saved.invited || {}).filter(ok => !ok).length
+      showToast(failed ? `Group created. ${failed} invitation${failed === 1 ? '' : 's'} could not be delivered.` : 'Group created', failed ? 'error' : 'success')
+    } catch (failure) {
+      window.mobius?.signal?.('error', { message: failure.message, source: 'group_create' })
+      setError(saved
+        ? 'Your group was created, but couldn’t be opened. Open it again below—this won’t create a duplicate.'
+        : failure.message || 'The group couldn’t be created. Please try again.')
+    } finally {
+      submitting.current = false
       setBusy(false)
     }
   }
 
+  const selectedCount = Object.values(selected).filter(Boolean).length
+  const visiblePeople = (people || []).filter(user => `${user.handle || ''} ${user.host}`.toLowerCase().includes(query.trim().toLowerCase()))
   return (
-    <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="New group"
-         onClick={busy ? null : onClose}>
-      <div className="cn-sheet" onClick={(e) => e.stopPropagation()}>
+    <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="New group" onClick={busy ? undefined : onClose}>
+      <form ref={sheetRef} tabIndex={-1} className="cn-sheet cn-group-create" onClick={event => event.stopPropagation()} onSubmit={create}>
         <div className="cn-grabber" aria-hidden="true" />
-        <h3 className="cn-sheet-title">New group</h3>
-        <p className="cn-sheet-body">
-          The group lives on your server; members’ servers each keep their own copy.
-        </p>
-        <input className="cn-input" value={name} onChange={(e) => setName(e.target.value)}
-               placeholder="Group name" autoFocus />
-        <div style={{ marginTop: 14 }}>
-          {people === null && <div className="cn-center"><div className="cn-spinner" /></div>}
-          {people !== null && people.length === 0 && (
-            <p className="cn-sheet-body">
-              No one else is in your directory yet — you can still create the
-              group and add people later.
-            </p>
-          )}
-          {(people || []).map((user) => (
-            <label className="cn-member-row" key={user.host}>
-              <input
-                type="checkbox"
-                checked={!!selected[user.host]}
-                onChange={(e) => setSelected({ ...selected, [user.host]: e.target.checked })}
-              />
-              <Avatar name={user.handle} host={user.host} size="small" />
-              <span className="cn-row-copy">
-                <strong style={{ fontSize: 14 }}>{user.handle ? `@${user.handle}` : 'Social member'}</strong>
-              </span>
-            </label>
-          ))}
+        <div className="cn-group-create-body">
+          <h3 className="cn-sheet-title">New group</h3>
+          <p className="cn-sheet-body">A shared conversation for your people. Start with a name, then choose who to invite.</p>
+          <label className="cn-field-label" htmlFor="cn-group-name">Group name</label>
+          <input id="cn-group-name" className="cn-input" value={name} onChange={event => setName(event.target.value)} maxLength={80}
+                 placeholder="e.g. Weekend plans" aria-label="Group name" disabled={busy || !!created} required />
+          <div className="cn-group-members-head">
+            <h4>Invite people</h4><span>{selectedCount ? `${selectedCount} selected` : 'Optional'}</span>
+          </div>
+          {people === null && <div className="cn-group-status" role="status">Loading people…</div>}
+          {peopleError && <div className="cn-directory-error" role="alert">
+            <p>People couldn’t be loaded. Try again, or create a group with just yourself.</p>
+            <button type="button" className="cn-btn cn-btn-secondary" onClick={() => setPeopleAttempt(value => value + 1)}>Try again</button>
+          </div>}
+          {!peopleError && people?.length === 0 && <p className="cn-sheet-body">No one else is in your directory yet. You can still start a group with just yourself.</p>}
+          {!!people?.length && <>
+            <input className="cn-input" type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Find someone" aria-label="Find group members" disabled={busy || !!created} />
+            <div className="cn-group-member-list">
+              {visiblePeople.map(user => <label className="cn-member-row" key={user.host}>
+                <input type="checkbox" checked={!!selected[user.host]} disabled={busy || !!created}
+                       onChange={event => setSelected(prior => ({ ...prior, [user.host]: event.target.checked }))} />
+                <Avatar name={user.handle} host={user.host} size="small" />
+                <span className="cn-row-copy"><strong>{user.handle ? `@${user.handle}` : 'Social member'}</strong><span className="cn-meta">{user.host}</span></span>
+              </label>)}
+              {visiblePeople.length === 0 && <p className="cn-group-status">No matching people in this directory.</p>}
+            </div>
+          </>}
         </div>
-        <div className="cn-sheet-actions">
-          <button className="cn-btn cn-btn-secondary" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="cn-btn cn-btn-primary" onClick={create} disabled={busy || !name.trim()}>
-            {busy ? 'Creating…' : 'Create group'}
-          </button>
+        <div className="cn-group-create-footer">
+          {error && <div className="cn-directory-error" role="alert">{error}</div>}
+          <div className="cn-sheet-actions">
+            <button type="button" className="cn-btn cn-btn-secondary" onClick={onClose} disabled={busy}>Cancel</button>
+            <button className="cn-btn cn-btn-primary" type="submit" disabled={busy || (!created && !name.trim())}>
+              {busy ? (created ? 'Opening…' : 'Creating…') : created ? 'Open group' : 'Create group'}
+            </button>
+          </div>
         </div>
-      </div>
+      </form>
     </div>
   )
 }

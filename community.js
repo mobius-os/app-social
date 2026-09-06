@@ -4,7 +4,7 @@ function normalized(value) {
   return String(value || '').trim().toLowerCase()
 }
 
-export function isPrivateLocalCommunity(profile) {
+export function isSeparateLocalCommunity(profile) {
   const ownHost = normalized(profile?.host)
   return Boolean(
     profile?.joined
