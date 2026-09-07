@@ -4,28 +4,41 @@ function normalized(value) {
   return String(value || '').trim().toLowerCase()
 }
 
-export function isSeparateLocalCommunity(profile) {
-  const ownHost = normalized(profile?.host)
-  return Boolean(
-    profile?.joined
-      && ownHost
-      && ownHost !== SHARED_COMMUNITY_HOST
-      && normalized(profile?.community_host) === ownHost,
-  )
-}
-
-export function shouldAdoptSharedCommunity(profile) {
-  const ownHost = normalized(profile?.host)
-  return Boolean(
-    !profile?.joined
-      && ownHost
-      && ownHost !== SHARED_COMMUNITY_HOST
-      && normalized(profile?.community_host) === ownHost,
-  )
+export function needsGlobalJoin(profile) {
+  return Boolean(profile?.joined && normalized(profile.community_host) !== SHARED_COMMUNITY_HOST)
 }
 
 export async function prepareCommunity(profile, saveProfile) {
-  if (!shouldAdoptSharedCommunity(profile)) return profile
+  // Browsing may select the global directory; publishing an existing member's
+  // profile to a different audience still requires their explicit Join action.
+  if (profile?.joined || normalized(profile?.community_host) === SHARED_COMMUNITY_HOST) return profile
   await saveProfile({ community_host: SHARED_COMMUNITY_HOST })
   return { ...profile, community_host: SHARED_COMMUNITY_HOST }
+}
+
+export async function joinGlobalCommunity(profile, saveProfile, join) {
+  let result
+  if (normalized(profile?.community_host) !== SHARED_COMMUNITY_HOST) {
+    const saved = await saveProfile({ community_host: SHARED_COMMUNITY_HOST })
+    // The existing server re-registers joined profiles when their destination changes.
+    if (profile?.joined) result = saved
+  }
+  if (!result) result = await join()
+  if (result.directory !== 'registered') {
+    throw new Error('Your profile is not listed in global Social yet. Try joining again; your saved conversations are unchanged.')
+  }
+  return result
+}
+
+export async function checkGlobalRegistration(profile, searchPeople) {
+  if (!profile.joined || needsGlobalJoin(profile)) return 'not_joined'
+  try {
+    // Read the owning directory after reload instead of trusting joined_at,
+    // which older servers save even when remote registration fails.
+    const result = await searchPeople(profile.host)
+    return result.users.some(user => normalized(user.host) === normalized(profile.host))
+      ? 'registered' : 'missing'
+  } catch {
+    return 'unavailable'
+  }
 }

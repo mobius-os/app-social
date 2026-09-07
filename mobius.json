@@ -1,7 +1,7 @@
 {
   "id": "common",
   "name": "Social",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Federated social for Möbius people — private messages between instances, a community board, and people search.",
   "author": "hamzamerzic",
   "license": "MIT",
@@ -28,7 +28,7 @@
   ],
   "store": {
     "tagline": "Your people, across every Möbius.",
-    "description": "Social gives every Möbius a direct way to reach people on other instances. Find someone by handle, send private one-to-one messages, create group conversations, or post to a shared community board.\n\nMessages travel directly between each person's Möbius and each side keeps its own copy. The People directory is opt-in, and the community host can be changed without moving private conversations through a third party.",
+    "description": "Social gives every Möbius a direct way to reach people on other instances. Find someone by handle, send private one-to-one messages, create group conversations, or post to a shared community board.\n\nMessages travel directly between each person's Möbius and each side keeps its own copy. Everyone browses one global board and opt-in People directory. Private conversations stay on the participants’ own instances.",
     "screenshots": [
       {
         "src": "static/store/messages.png",

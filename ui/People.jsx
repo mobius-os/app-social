@@ -114,7 +114,7 @@ export default function People({ me, canMessage, onMessage, showToast, requested
       {state === 'error' && (
         <div className="cn-empty">
           <div className="cn-empty-title">Directory unavailable</div>
-          <p className="cn-empty-text">Your community host couldn’t be reached right now.</p>
+          <p className="cn-empty-text">The global directory couldn’t be reached right now.</p>
           <button className="cn-btn cn-btn-secondary" onClick={() => setSearchAttempt(attempt => attempt + 1)}>Try again</button>
         </div>
       )}
@@ -136,7 +136,7 @@ export default function People({ me, canMessage, onMessage, showToast, requested
             <div className="cn-empty-mark" aria-hidden="true"><Telescope /></div>
             <div className="cn-empty-title">No one found</div>
             <p className="cn-empty-text">
-              Try a different name or handle.
+              Try a different handle. If your friend is missing, ask them to join global Social.
             </p>
           </div>
         )}

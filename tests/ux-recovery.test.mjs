@@ -35,3 +35,16 @@ test('Social modal focus owns initial focus so it can restore the actual opener'
     assert.doesNotMatch(source, /autoFocus/)
   }
 })
+
+test('handle search accepts the displayed @handle form and surrounding spaces', async () => {
+  const original = globalThis.fetch
+  let url
+  globalThis.fetch = async path => {
+    url = path
+    return { ok: true, json: async () => ({ users: [] }) }
+  }
+  try {
+    await searchPeople(' @example ')
+    assert.equal(url, '/api/common/people?q=example')
+  } finally { globalThis.fetch = original }
+})

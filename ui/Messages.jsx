@@ -22,7 +22,7 @@ function lastMessagePreview(item) {
 }
 
 export default function Messages({
-  me, conversations, groups, onOpenThread, onOpenGroup, onFindPeople,
+  canCreate, me, conversations, groups, onOpenThread, onOpenGroup, onFindPeople,
   onGroupsChanged, showToast, creating, setCreating, loadState, onRetry,
 }) {
 
@@ -37,7 +37,7 @@ export default function Messages({
         <div><h2>Messages</h2><p>Your conversations, together.</p></div>
         <div className="cn-view-actions">
           <button className="cn-btn cn-btn-primary" onClick={onFindPeople}>New message</button>
-          <button className="cn-btn cn-btn-secondary" onClick={() => setCreating(true)}><Plus aria-hidden="true" /> New group</button>
+          <button className="cn-btn cn-btn-secondary" disabled={!canCreate} onClick={() => setCreating(true)}><Plus aria-hidden="true" /> New group</button>
         </div>
       </div>
       {loadState === 'error' && <div className="cn-directory-error" role="alert">
