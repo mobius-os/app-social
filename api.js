@@ -55,7 +55,7 @@ export const getReplies = (postId) =>
   call(`board/${encodeURIComponent(postId)}/replies`)
 export const postReply = (postId, text) =>
   call('reply', { method: 'POST', body: JSON.stringify({ post_id: postId, text }) })
-export const searchPeople = (q, signal) => call(`people?q=${encodeURIComponent(q)}`, { signal })
+export const searchPeople = (q, signal) => call(`people?q=${encodeURIComponent(q.trim().replace(/^@/, ''))}`, { signal })
 export const getPeer = (host, signal) => call(`peer/${encodeURIComponent(host)}`, { signal })
 export async function getAppIcon(appId) {
   const response = await fetch(`/api/apps/${appId}/icon`, {

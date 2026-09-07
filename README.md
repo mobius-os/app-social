@@ -2,16 +2,22 @@
 
 Federated social for Möbius people. Three surfaces:
 
-- **Board** — a public community feed. Fresh installs browse Social's shared
-  community by default; an existing joined or explicitly selected community is
-  never changed silently.
-- **Messages** — private 1:1 conversations delivered directly between Möbius
-  instances. Each side stores only its own copy; no third party ever holds a
-  conversation.
-- **People** — search the community host's opt-in directory, or reach anyone
-  directly by their instance address. Browsing stays available before joining;
-  joining shares the owner's handle and profile picture and unlocks posting and
-  messages.
+- **Board** — one global community feed for every Social installation.
+- **Messages** — private conversations delivered directly between Möbius
+  instances. Each side keeps its own copy; changing directory never moves them.
+- **People** — one opt-in global directory, hosted at `mobius.hamzamerzic.info`.
+  Fresh installs browse it before joining. Joining shares the owner's handle
+  and profile picture and enables posting and new conversations.
+
+Older installations that joined a separate directory see **Join global Social**,
+not an apparently empty global board. This explicit action preserves their
+publication consent; Social no longer offers multiple community destinations.
+Existing conversations remain accessible before joining the global directory.
+Registration is checked against the global directory whenever the profile loads,
+so a failed join remains discoverable after reopening. **Try joining again** repairs
+a missing listing; an unavailable directory is shown separately from a missing
+registration. Handle search accepts both `name` and `@name`. Other installations must receive this app update;
+changing one instance does not update a friend's copy.
 
 The server side lives in the platform's `/api/common` federation router
 (protocol `common/0`): Ed25519-signed envelopes, a public actor card per
