@@ -9,10 +9,15 @@ import GroupThread from './ui/GroupThread.jsx'
 import People from './ui/People.jsx'
 import { Lightbox } from './ui/Media.jsx'
 import {
-  needsGlobalJoin, prepareCommunity, joinGlobalCommunity, checkGlobalRegistration,
+  needsGlobalJoin, joinGlobalCommunity, checkGlobalRegistration,
 } from './community.js'
+import {
+  accountHandoff, clearParticipationIntent, loadParticipationIntent,
+  participationActionLabel, participationIntentMatches, participationStep,
+  saveParticipationIntent,
+} from './participation.js'
 
-function ParticipationNotice({ me, busy, onJoin, onConnect, onCheck }) {
+function ParticipationNotice({ me, busy, onJoin, onAccount, onCheck }) {
   if (needsGlobalJoin(me)) {
     return (
       <section className="cn-welcome" aria-labelledby="cn-welcome-title">
@@ -20,8 +25,8 @@ function ParticipationNotice({ me, busy, onJoin, onConnect, onCheck }) {
         <div className="cn-welcome-copy">
           <h2 id="cn-welcome-title">Join global Social</h2>
           <p>
-            Social now has one global board and people directory. Join to share your
-            handle and profile picture there. Your existing private conversations stay here.
+            You’re browsing global Social. Join to move future public
+            participation to global Social. Your existing private conversations stay here.
           </p>
         </div>
         <button className="cn-btn cn-btn-primary" onClick={onJoin} disabled={busy}>
@@ -50,17 +55,18 @@ function ParticipationNotice({ me, busy, onJoin, onConnect, onCheck }) {
   }
 
   const connected = me?.connected
+  const step = participationStep(me)
   return (
     <section className="cn-welcome" aria-labelledby="cn-welcome-title">
       <span className="cn-welcome-mark" aria-hidden="true"><Globe /></span>
       <div className="cn-welcome-copy">
         <h2 id="cn-welcome-title">
-          {connected ? `Welcome, @${me.handle}` : 'Explore Social first'}
+          {connected ? `Browse as @${me.handle}` : 'Browse without signing in'}
         </h2>
         <p>
           {connected
-            ? 'Browse the global board and people now. Join when you’re ready to post or message.'
-            : 'The global board and directory are open to browse. Connect your Möbius profile when you want to post or message.'}
+            ? 'The board and people directory are public. Join only when you want to post, reply, react or message.'
+            : 'The board and people directory are open. Use Möbius · You only when you want to participate.'}
         </p>
         {connected && (
           <span className="cn-welcome-privacy">
@@ -75,8 +81,8 @@ function ParticipationNotice({ me, busy, onJoin, onConnect, onCheck }) {
           </button>
         ) : (
           <>
-            <button className="cn-btn cn-btn-primary" onClick={onConnect} disabled={!me?.identity_app_id}>
-              Connect profile
+            <button className="cn-btn cn-btn-ghost" onClick={onAccount}>
+              {participationActionLabel(step)}
             </button>
             <button className="cn-btn cn-btn-ghost" onClick={onCheck} disabled={busy}>
               Check again
@@ -107,6 +113,8 @@ export default function App({ appId, token }) {
   const [profileRequest, setProfileRequest] = useState(null)
   const [composing, setComposing] = useState(false)
   const [creatingGroup, setCreatingGroup] = useState(false)
+  const [participationIntent, setParticipationIntent] = useState(null)
+  const [intentState, setIntentState] = useState('loading')
   const [appIconUrl, setAppIconUrl] = useState(null)
   const navHandle = useRef(null)
   const toastTimer = useRef(null)
@@ -118,10 +126,10 @@ export default function App({ appId, token }) {
     toastTimer.current = setTimeout(() => setToast(null), 2600)
   }
 
-  async function loadMe() {
+  async function loadMe({ background = false } = {}) {
     try {
       const loaded = await api.getMe()
-      const profile = await prepareCommunity(loaded, api.saveMe)
+      const profile = loaded
       const registration = await checkGlobalRegistration(profile, api.searchPeople)
       const checked = { ...profile, registration }
       setMe(checked)
@@ -129,8 +137,19 @@ export default function App({ appId, token }) {
       return checked
     } catch (error) {
       window.mobius?.signal?.('error', { message: error.message, source: 'me' })
-      setMeState('error')
+      if (!background) setMeState('error')
       return null
+    }
+  }
+
+  async function loadSavedParticipationIntent() {
+    setIntentState('loading')
+    try {
+      const intent = await loadParticipationIntent(window.mobius?.storage)
+      setParticipationIntent(intent)
+      setIntentState('ready')
+    } catch {
+      setIntentState('error')
     }
   }
 
@@ -169,13 +188,39 @@ export default function App({ appId, token }) {
 
   useEffect(() => {
     loadMe().then((profile) => {
-      if (profile && !needsGlobalJoin(profile)) loadFeed()
+      if (profile) loadFeed()
     })
     loadConversations()
+    loadSavedParticipationIntent()
     api.getAppIcon(appId)
       .then((blob) => setAppIconUrl(URL.createObjectURL(blob)))
       .catch(() => {})
   }, [])
+
+  // Identity linking happens in Möbius · You. When the owner returns, read the
+  // authoritative profile again; never infer success from the app switch and
+  // never turn a completed sign-in into an automatic directory join or post.
+  useEffect(() => {
+    let refreshing = false
+    const refreshAfterHandoff = async () => {
+      if (document.visibilityState === 'hidden' || refreshing) return
+      refreshing = true
+      try {
+        const profile = await loadMe({ background: true })
+        if (profile) await loadFeed(true)
+      } finally {
+        refreshing = false
+      }
+    }
+    document.addEventListener('visibilitychange', refreshAfterHandoff)
+    window.addEventListener('focus', refreshAfterHandoff)
+    window.addEventListener('pageshow', refreshAfterHandoff)
+    return () => {
+      document.removeEventListener('visibilitychange', refreshAfterHandoff)
+      window.removeEventListener('focus', refreshAfterHandoff)
+      window.removeEventListener('pageshow', refreshAfterHandoff)
+    }
+  }, [loadFeed])
 
   // Incoming federation deliveries bump state/version.json on the server.
   // Poll it while visible (get() revalidates in the background and notifies
@@ -220,7 +265,7 @@ export default function App({ appId, token }) {
     setThread(next)
   }
 
-  const openThread = (peer, name) => openAnyThread({ kind: 'dm', peer, name })
+  const openThread = (peer, name, request = false) => openAnyThread({ kind: 'dm', peer, name, request })
   const openGroup = (group) => openAnyThread({ kind: 'group', group })
 
   async function openCreatedGroup(gid) {
@@ -243,9 +288,7 @@ export default function App({ appId, token }) {
   const [joinError, setJoinError] = useState(null)
 
   function openIdentityApp() {
-    if (me?.identity_app_id) {
-      window.parent.postMessage({ type: 'moebius:open-app', appId: me.identity_app_id }, '*')
-    }
+    accountHandoff(me, (message, target) => window.parent.postMessage(message, target))
   }
 
   async function join() {
@@ -254,20 +297,53 @@ export default function App({ appId, token }) {
     try {
       await joinGlobalCommunity(me, api.saveMe, api.join)
       const profile = await loadMe()
-      if (!profile) return
+      if (!profile) return false
       await loadFeed()
       if (profile.registration === 'registered') showToast('Welcome to global Social', 'success')
+      return profile.registration === 'registered'
     } catch (error) {
       setJoinError(error.message)
+      return false
     } finally {
       setSaving(false)
     }
   }
 
-  const visibleGroups = groups.filter(group => api.groupIsVisible(group, me?.host))
+  async function requestParticipation(intent) {
+    const saved = await saveParticipationIntent(window.mobius?.storage, intent)
+    if (!saved) throw new Error('Social couldn’t save this draft. Try again before leaving.')
+    setParticipationIntent(intent)
+    if (participationStep(me) === 'join') {
+      const joined = await join()
+      if (!joined) throw new Error('Social couldn’t finish joining. Your draft is still saved.')
+      return true
+    }
+    openIdentityApp()
+    return true
+  }
+
+  async function completeParticipationIntent(kind, postId, completedIntent) {
+    if (!participationIntent || participationIntent.kind !== kind) return
+    if (postId && participationIntent.post_id !== postId) return
+    if (completedIntent && !participationIntentMatches(participationIntent, completedIntent)) return
+    try {
+      await clearParticipationIntent(window.mobius?.storage, participationIntent)
+      setParticipationIntent(await loadParticipationIntent(window.mobius?.storage))
+    } catch {
+      // The explicit action already succeeded. A stale saved draft remains
+      // harmless because Social never auto-submits restored intent.
+    }
+  }
+
+  const activeConversations = conversations.filter(item => api.requestStatus(item) === 'accepted')
+  const pendingConversations = conversations.filter(item => api.requestStatus(item) === 'pending')
+  const activeGroups = groups.filter(group =>
+    api.requestStatus(group) === 'accepted' && api.groupIsVisible(group, me?.host))
+  const pendingGroups = groups.filter(group =>
+    api.requestStatus(group) === 'pending' && !group.deleted_at)
   const unread =
-    conversations.reduce((sum, c) => sum + (c.unread || 0), 0) +
-    visibleGroups.reduce((sum, g) => sum + (g.unread || 0), 0)
+    activeConversations.reduce((sum, c) => sum + (c.unread || 0), 0) +
+    activeGroups.reduce((sum, g) => sum + (g.unread || 0), 0)
   const needsJoin = needsGlobalJoin(me)
   const canParticipate = Boolean(me?.joined && me?.name && !needsJoin)
 
@@ -275,7 +351,9 @@ export default function App({ appId, token }) {
   if (meState === 'loading') {
     return (
       <div className="cn-root"><style>{CSS}</style>
-        <div className="cn-center" style={{ flex: 1 }}><div className="cn-spinner" /></div>
+        <div className="cn-center" style={{ flex: 1 }} role="status" aria-label="Loading Social">
+          <div className="cn-spinner" aria-hidden="true" />
+        </div>
       </div>
     )
   }
@@ -309,10 +387,12 @@ export default function App({ appId, token }) {
           />
         ) : (
           <Thread
+            key={thread.peer}
             peer={thread.peer}
             peerHandle={thread.name || conversations.find((c) => c.peer === thread.peer)?.peer_handle}
             me={me}
             version={version}
+            request={thread.request}
             onBack={closeThread}
             showToast={showToast}
             onOpenImage={(url, alt) => setLightbox({ url, alt })}
@@ -359,7 +439,7 @@ export default function App({ appId, token }) {
             me={me}
             busy={saving}
             onJoin={join}
-            onConnect={openIdentityApp}
+            onAccount={openIdentityApp}
             onCheck={() => loadMe()}
           />
           {joinError && <div className="cn-directory-error" role="alert">
@@ -369,19 +449,27 @@ export default function App({ appId, token }) {
             <p className="cn-inline-error" role="status">{me.account_error}</p>
           )}
         </div>
-        {tab === 'board' && !needsJoin && (
+        {tab === 'board' && (
           <Board me={me} feed={feed} feedState={feedState} onRefresh={loadFeed}
                  composing={composing} setComposing={setComposing}
                  canInteract={canParticipate}
+                 participationIntent={participationIntent}
+                 intentState={intentState}
+                 participationBusy={saving}
+                 onRetryIntent={loadSavedParticipationIntent}
+                 onRequestParticipation={requestParticipation}
+                 onCompleteParticipation={completeParticipationIntent}
                  onOpenPerson={(host) => { setProfileRequest(host); setTab('people') }} showToast={showToast}
                  onOpenImage={(url, alt) => setLightbox({ url, alt })} />
         )}
         {tab === 'messages' && (
           me?.joined && me?.name ? (
-            <Messages canCreate={canParticipate} me={me} conversations={conversations} groups={visibleGroups}
+            <Messages canCreate={canParticipate} me={me} conversations={activeConversations} groups={activeGroups}
+                      messageRequests={pendingConversations} groupRequests={pendingGroups}
                       loadState={messagesState} onRetry={loadConversations}
                       creating={creatingGroup} setCreating={setCreatingGroup}
                       onOpenThread={(peer) => openThread(peer)}
+                      onOpenMessageRequest={(peer, name) => openThread(peer, name, true)}
                       onOpenGroup={openGroup}
                       onFindPeople={() => setTab('people')}
                       onGroupsChanged={openCreatedGroup}
@@ -399,7 +487,7 @@ export default function App({ appId, token }) {
             </div>
           )
         )}
-        {tab === 'people' && !needsJoin && (
+        {tab === 'people' && (
           <People me={me} onMessage={(host, name) => openThread(host, name)} showToast={showToast}
                   canMessage={canParticipate}
                   requestedProfile={profileRequest}
@@ -407,7 +495,7 @@ export default function App({ appId, token }) {
         )}
       </div>
 
-      {tab === 'board' && canParticipate && (
+      {tab === 'board' && (
         <button className="cn-fab" onClick={() => setComposing(true)} aria-label="New post">
           <Plus aria-hidden="true" /><span>New post</span>
         </button>

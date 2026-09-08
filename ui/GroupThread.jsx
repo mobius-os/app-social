@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeft, ArrowUp, Check, Clock, ImageSquare, Warning,
 } from '@openai/apps-sdk-ui/components/Icon'
-import { listGroupMessages, sendGroupMessage, clearGroupUnread, clockTime, getGroup } from '../api.js'
+import {
+  acceptGroupInvitation, clearGroupUnread, clockTime, declineGroupInvitation,
+  getGroup, listGroupMessages, requestStatus, sendGroupMessage,
+} from '../api.js'
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
@@ -22,6 +25,8 @@ export default function GroupThread({
   const [processingImage, setProcessingImage] = useState(false)
   const [selectedImage, setSelectedImage] = useState(null)
   const [replyTarget, setReplyTarget] = useState(null)
+  const [requestBusy, setRequestBusy] = useState('')
+  const [requestError, setRequestError] = useState('')
   const scrollRef = useRef(null)
   const inputRef = useRef(null)
   const fileRef = useRef(null)
@@ -40,13 +45,13 @@ export default function GroupThread({
 
   useEffect(() => {
     refresh()
-    clearGroupUnread(gid).catch(() => {})
+    if (requestStatus(currentGroup) === 'accepted') clearGroupUnread(gid).catch(() => {})
     return () => { refreshRequest.current += 1 }
   }, [gid, version])
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages?.length, selectedImage, replyTarget])
+    if (el) el.scrollTop = requestStatus(currentGroup) === 'pending' ? 0 : el.scrollHeight
+  }, [messages?.length, selectedImage, replyTarget, currentGroup.request_status])
 
   async function chooseImage(event) {
     const file = event.target.files?.[0]
@@ -60,6 +65,27 @@ export default function GroupThread({
     } finally {
       setProcessingImage(false)
       inputRef.current?.focus()
+    }
+  }
+
+  async function decideInvitation(action) {
+    if (requestBusy) return
+    setRequestBusy(action)
+    setRequestError('')
+    try {
+      if (action === 'accept') {
+        await acceptGroupInvitation(gid)
+        const accepted = await getGroup(gid)
+        setCurrentGroup(accepted)
+        showToast('Joined group', 'success')
+      } else {
+        await declineGroupInvitation(gid)
+        onBack()
+      }
+    } catch (error) {
+      setRequestError(error.message || 'This invitation couldn’t be updated. Try again.')
+    } finally {
+      setRequestBusy('')
     }
   }
 
@@ -158,13 +184,13 @@ export default function GroupThread({
         mine={mine}
         tick={tick}
         avatar={!mine && firstOfCluster
-          ? <Avatar name={message.author_handle} host={message.author} size="small" />
+          ? <Avatar name={message.author_handle} host={requestStatus(currentGroup) === 'pending' ? undefined : message.author} size="small" />
           : null}
         indent={!mine && !firstOfCluster}
         conversationPath={`groups/${gid}`}
         onOpenImage={onOpenImage}
         onImageUnavailable={() => showToast('This photo couldn’t be loaded.', 'error')}
-        onReply={() => setReplyTarget(replyTargetFor(
+        onReply={requestStatus(currentGroup) === 'pending' ? undefined : () => setReplyTarget(replyTargetFor(
           message,
           mine ? me?.handle : message.author_handle || 'Social member',
         ))}
@@ -189,6 +215,24 @@ export default function GroupThread({
         <button className="cn-btn cn-btn-secondary" onClick={() => setDetails(true)} aria-label="Group details">Details</button>
       </div>
       <div className="cn-thread-msgs" ref={scrollRef}>
+        {requestStatus(currentGroup) === 'pending' && <section className="cn-request-panel" aria-labelledby="cn-group-request-title">
+          <div>
+            <strong id="cn-group-request-title">Group invitation</strong>
+            <p>
+              {currentGroup.invited_by_handle ? `@${currentGroup.invited_by_handle}` : currentGroup.host} invited you to join.
+              Messages stay quiet, and previewing them doesn’t join the group.
+            </p>
+          </div>
+          {requestError && <p className="cn-request-error" role="alert">{requestError}</p>}
+          <div className="cn-request-actions">
+            <button className="cn-btn cn-btn-primary" type="button" disabled={!!requestBusy}
+                    onClick={() => decideInvitation('accept')}>
+              {requestBusy === 'accept' ? 'Joining…' : 'Accept and join'}
+            </button>
+            <button className="cn-btn cn-btn-secondary" type="button" disabled={!!requestBusy}
+                    onClick={() => decideInvitation('decline')}>Decline</button>
+          </div>
+        </section>}
         {loadError && <div className="cn-directory-error" role="alert"><p>{loadError}</p><button className="cn-btn cn-btn-secondary" onClick={refresh}>Try again</button></div>}
         {messages === null && !loadError && <div className="cn-center"><div className="cn-spinner" /></div>}
         {messages !== null && messages.length === 0 && (
@@ -201,7 +245,9 @@ export default function GroupThread({
         )}
         {rendered}
       </div>
-      {currentGroup.deleted_at ? <div className="cn-group-closed" role="status">This group has been closed. You can still read its earlier messages.</div> : <div className="cn-compose-shell">
+      {currentGroup.deleted_at ? <div className="cn-group-closed" role="status">This group has been closed. You can still read its earlier messages.</div>
+        : requestStatus(currentGroup) === 'pending' ? <div className="cn-request-quiet" role="status">Accept this invitation to send messages.</div>
+        : <div className="cn-compose-shell">
         <ReplyTarget reply={replyTarget} onDismiss={() => setReplyTarget(null)} />
         <SelectedImageStrip selected={selectedImage} onRemove={() => setSelectedImage(null)} />
         <form className="cn-compose-bar" onSubmit={send}>

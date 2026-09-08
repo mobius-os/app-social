@@ -45,6 +45,6 @@ test('handle search accepts the displayed @handle form and surrounding spaces', 
   }
   try {
     await searchPeople(' @example ')
-    assert.equal(url, '/api/common/people?q=example')
+    assert.equal(new URL(url, 'https://local.example').searchParams.get('q'), 'example')
   } finally { globalThis.fetch = original }
 })

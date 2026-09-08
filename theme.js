@@ -174,6 +174,27 @@ export const CSS = `
 .cn-view-heading p { margin: 6px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .cn-view-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .cn-view-actions svg { width: 18px; height: 18px; }
+.cn-message-tabs {
+  display: inline-flex; min-height: 44px; margin: 0 0 10px; padding: 3px; gap: 2px;
+  border-radius: 13px; background: var(--surface2, var(--surface));
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.cn-message-tabs button {
+  min-height: 38px; padding: 7px 14px; border: 0; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  background: transparent; color: var(--muted); font: 650 13.5px var(--font);
+  cursor: pointer; transition: background 0.15s ease, color 0.15s ease;
+}
+.cn-message-tabs button:hover { color: var(--text); }
+.cn-message-tabs button.is-active {
+  background: var(--bg); color: var(--text); box-shadow: 0 2px 7px rgba(0,0,0,0.14);
+}
+.cn-request-count {
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent);
+  font-size: 11px; font-variant-numeric: tabular-nums;
+}
 .cn-directory-error { padding: 12px 0; color: var(--muted); font-size: 14px; }
 .cn-directory-error p { margin: 0 0 8px; }
 .cn-search-clear { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-height: 44px; padding: 0 6px; border: 0; background: transparent; color: var(--muted); font: 600 13px var(--font); cursor: pointer; }
@@ -225,6 +246,25 @@ export const CSS = `
 .cn-thread-msgs {
   flex: 1; min-height: 0; overflow-y: auto; padding: 18px 16px;
   display: flex; flex-direction: column; gap: 8px;
+}
+.cn-request-panel {
+  width: 100%; margin: 0 0 10px; padding: 16px;
+  border-radius: 14px; background: var(--surface);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 34%, var(--border));
+}
+.cn-request-panel strong { display: block; font-size: 16px; letter-spacing: -0.01em; }
+.cn-request-panel p {
+  margin: 5px 0 0; color: var(--muted); font-size: 13.5px; line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.cn-request-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.cn-request-actions .cn-btn { flex: 1 1 auto; }
+.cn-btn-ghost.is-danger { color: var(--danger); }
+.cn-request-error { color: var(--danger) !important; }
+.cn-request-quiet {
+  flex: 0 0 auto; padding: 16px 20px max(16px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border); color: var(--muted);
+  background: var(--bg); text-align: center; font-size: 13.5px; line-height: 1.5;
 }
 .cn-day { display: flex; justify-content: center; margin: 8px 0 4px; }
 .cn-day span {
@@ -506,6 +546,21 @@ export const CSS = `
 .cn-inline-error {
   margin: -3px 0 12px; color: var(--danger); font-size: 13px; line-height: 1.45;
 }
+.cn-intent-status {
+  margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4;
+}
+.cn-intent-notice {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  margin: 14px 0 2px; padding: 13px 14px; border-radius: 14px;
+  background: color-mix(in srgb, var(--surface2, var(--surface)) 72%, transparent);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.cn-intent-notice > div { min-width: 0; }
+.cn-intent-notice strong, .cn-intent-notice span { display: block; }
+.cn-intent-notice strong { font-size: 14px; line-height: 1.35; letter-spacing: -0.01em; }
+.cn-intent-notice span { margin-top: 3px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.cn-intent-notice .cn-btn { flex: 0 0 auto; }
+.cn-intent-notice.is-error { color: var(--danger); }
 
 /* mobius-ui:Sheet v1 — keep in sync; library candidate. Diverge below the marker only. */
 .cn-scrim {
@@ -617,10 +672,11 @@ export const CSS = `
 .cn-reply-composer input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .cn-reply-composer input:disabled { opacity: 0.58; }
 .cn-reply-gate {
-  margin: 0; padding-top: 14px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-  color: var(--muted); font-size: 13.5px; line-height: 1.5; text-align: center;
+  flex: 1 0 100%; margin: 0; color: var(--muted);
+  font-size: 12px; line-height: 1.45; text-align: start;
 }
+.cn-reply-composer.is-gated { flex-wrap: wrap; }
+.cn-reply-account { flex: 0 0 auto; }
 .cn-reply-send {
   width: 46px; height: 46px; flex: 0 0 auto; border: 0; border-radius: 50%;
   display: flex; align-items: center; justify-content: center; cursor: pointer;
@@ -762,6 +818,10 @@ export const CSS = `
   .cn-welcome { padding: 14px; }
   .cn-welcome > .cn-btn, .cn-welcome-actions { grid-column: 1 / -1; width: 100%; }
   .cn-welcome-actions .cn-btn { flex: 1 1 auto; }
+  .cn-intent-notice { align-items: stretch; flex-direction: column; }
+  .cn-intent-notice .cn-btn { width: 100%; }
+  .cn-reply-composer.is-gated input { flex-basis: 100%; }
+  .cn-reply-account { width: 100%; }
 }
 
 /* Member picker rows */

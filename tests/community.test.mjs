@@ -1,33 +1,37 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SHARED_COMMUNITY_HOST, needsGlobalJoin, prepareCommunity, joinGlobalCommunity } from '../community.js'
+import { SHARED_COMMUNITY_HOST, needsGlobalJoin, joinGlobalCommunity } from '../community.js'
 
 const fresh = { host: 'fresh.example', community_host: 'fresh.example', joined: false }
 
-for (const previous of ['fresh.example', 'friends.example', '']) {
-  test(`unjoined installs browse global Social instead of ${previous || 'an absent default'}`, async () => {
-    const writes = []
-    const prepared = await prepareCommunity({ ...fresh, community_host: previous }, async value => writes.push(value))
-    assert.equal(prepared.community_host, SHARED_COMMUNITY_HOST)
-    assert.deepEqual(writes, [{ community_host: SHARED_COMMUNITY_HOST }])
-  })
-}
-
-for (const previous of ['fresh.example', 'friends.example']) {
-  test(`an existing ${previous} membership requires consent before global publication`, async () => {
-    const profile = { ...fresh, joined: true, community_host: previous }
-    const prepared = await prepareCommunity(profile, () => assert.fail('must not publish silently'))
-    assert.strictEqual(prepared, profile)
-    assert.equal(needsGlobalJoin(profile), true)
-  })
-}
-
-test('global members and browsing installations need no redundant write', async () => {
-  for (const joined of [false, true]) {
-    const profile = { ...fresh, joined, community_host: SHARED_COMMUNITY_HOST }
-    assert.strictEqual(await prepareCommunity(profile, () => assert.fail('redundant write')), profile)
-    assert.equal(needsGlobalJoin(profile), false)
+test('all public browsing uses one global host without membership writes', async () => {
+  const api = await import('../api.js')
+  const previous = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: new URL(url, 'https://local.example'), options })
+    return { ok: true, json: async () => ({}), blob: async () => new Blob() }
   }
+  try {
+    await api.getFeed()
+    await api.searchPeople('@someone')
+    await api.getReplies('post-1')
+    await api.getBoardMedia('post-1')
+    assert.deepEqual(calls.map(c => c.url.pathname), [
+      '/api/common/feed', '/api/common/people', '/api/common/replies/post-1',
+      '/api/common/board-media/post-1',
+    ])
+    for (const { url, options } of calls) {
+      assert.equal(url.searchParams.get('community_host'), SHARED_COMMUNITY_HOST)
+      assert.equal(options.method || 'GET', 'GET')
+      assert.equal(options.body, undefined)
+    }
+  } finally { globalThis.fetch = previous }
+})
+
+test('legacy members still require explicit consent before global publication', () => {
+  assert.equal(needsGlobalJoin({ ...fresh, joined: true }), true)
+  assert.equal(needsGlobalJoin({ ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }), false)
 })
 
 test('explicit migration registers an existing member once at the global destination', async () => {

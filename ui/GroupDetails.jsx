@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { addGroupMember, deleteGroup, searchPeople, getGroup } from '../api.js'
+import { addGroupMember, deleteGroup, searchPeople, getGroup, requestStatus } from '../api.js'
 import { Avatar } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
 
@@ -16,7 +16,8 @@ export default function GroupDetails({ group, me, onClose, onUpdated, onDeleted 
   const [deleted, setDeleted] = useState(false)
   const [failedNotices, setFailedNotices] = useState([])
   const submitting = useRef(false)
-  const canManage = group.host === me?.host && !group.deleted_at
+  const accepted = requestStatus(group) === 'accepted'
+  const canManage = accepted && group.host === me?.host && !group.deleted_at
   const close = () => { if (!submitting.current) { if (deleted) onDeleted(); else onClose() } }
   const sheetRef = useModalFocus(true, close)
 
@@ -87,7 +88,7 @@ export default function GroupDetails({ group, me, onClose, onUpdated, onDeleted 
           <p className="cn-sheet-body">{group.deleted_at ? 'The creator closed this group. Your existing messages are still here.' : canManage ? 'You created this group. Manage its members here.' : 'Only the group creator can add people or delete this group.'}</p>
           <div className="cn-group-members-head"><h4>Members</h4><span>{members.length} / 64</span></div>
           <div className="cn-group-member-list">{members.map(member => <div className="cn-member-row cn-member-static" key={member.host}>
-            <Avatar name={member.handle} host={member.host} size="small" />
+            <Avatar name={member.handle} host={accepted ? member.host : undefined} size="small" />
             <span className="cn-row-copy"><strong>{member.handle ? `@${member.handle}` : 'Social member'}{member.host === me?.host ? ' (you)' : ''}</strong><span className="cn-meta">{member.host}</span></span>
             {member.host === group.host && <span className="cn-meta">Creator</span>}
           </div>)}</div>
@@ -102,7 +103,7 @@ export default function GroupDetails({ group, me, onClose, onUpdated, onDeleted 
           <input id="cn-invite-address" className="cn-input" value={address} onChange={event => setAddress(event.target.value)} placeholder="friend.example.com" autoComplete="off" autoCapitalize="none" spellCheck={false} disabled={busy} required />
           {directoryError && <div className="cn-directory-error"><p>The directory couldn’t be loaded. You can still enter an address.</p><button className="cn-btn cn-btn-secondary" type="button" onClick={() => setAttempt(value => value + 1)}>Retry directory</button></div>}
           <div className="cn-group-member-list">{matches.map(person => <button type="button" className="cn-row" key={person.host} disabled={busy} onClick={() => setAddress(person.host)}>
-            <Avatar name={person.handle} host={person.host} size="small" /><span className="cn-row-copy"><strong>{person.handle ? `@${person.handle}` : 'Social member'}</strong><span className="cn-meta">{person.host}</span></span>
+            <Avatar name={person.handle} host={accepted ? person.host : undefined} size="small" /><span className="cn-row-copy"><strong>{person.handle ? `@${person.handle}` : 'Social member'}</strong><span className="cn-meta">{person.host}</span></span>
             {members.some(member => member.host === person.host) && <span className="cn-meta">Member</span>}
           </button>)}</div>
           {notice && <p className="cn-group-status" role="status">{notice}</p>}

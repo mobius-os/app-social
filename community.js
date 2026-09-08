@@ -8,14 +8,6 @@ export function needsGlobalJoin(profile) {
   return Boolean(profile?.joined && normalized(profile.community_host) !== SHARED_COMMUNITY_HOST)
 }
 
-export async function prepareCommunity(profile, saveProfile) {
-  // Browsing may select the global directory; publishing an existing member's
-  // profile to a different audience still requires their explicit Join action.
-  if (profile?.joined || normalized(profile?.community_host) === SHARED_COMMUNITY_HOST) return profile
-  await saveProfile({ community_host: SHARED_COMMUNITY_HOST })
-  return { ...profile, community_host: SHARED_COMMUNITY_HOST }
-}
-
 export async function joinGlobalCommunity(profile, saveProfile, join) {
   let result
   if (normalized(profile?.community_host) !== SHARED_COMMUNITY_HOST) {
