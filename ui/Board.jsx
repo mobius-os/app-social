@@ -12,6 +12,9 @@ import {
 import { useModalFocus } from './modalFocus.js'
 import { LANDING_DATA_URL } from './landingImage.js'
 import { BoardImage, prepareImage, SelectedImageStrip } from './Media.jsx'
+import {
+  createParticipationIntent, participationActionLabel, participationStep,
+} from '../participation.js'
 
 const avatarCache = new Map()
 
@@ -74,7 +77,9 @@ export { Avatar }
 
 export default function Board({
   me, feed, feedState, onRefresh, onOpenPerson, showToast, onOpenImage,
-  composing, setComposing, canInteract,
+  composing, setComposing, canInteract, participationIntent, intentState,
+  participationBusy, onRetryIntent, onRequestParticipation,
+  onCompleteParticipation,
 }) {
   const [draft, setDraft] = useState('')
   const [posting, setPosting] = useState(false)
@@ -87,11 +92,14 @@ export default function Board({
   const [replyError, setReplyError] = useState('')
   const [replyDraft, setReplyDraft] = useState('')
   const [replySending, setReplySending] = useState(false)
+  const [handoffBusy, setHandoffBusy] = useState(false)
   const replyRequest = useRef(0)
   const replySendingRef = useRef(false)
   const lastActivityAt = useRef(Date.now())
   const fileRef = useRef(null)
-  const composeRef = useModalFocus(composing && canInteract, () => { if (!posting) setComposing(false) })
+  const composeRef = useModalFocus(composing, () => {
+    if (!posting && !handoffBusy) setComposing(false)
+  })
   const repliesRef = useModalFocus(Boolean(replyPost), () => { if (!replySending) closeReplies() })
   replySendingRef.current = replySending
 
@@ -132,11 +140,11 @@ export default function Board({
     }
   }
 
-  function openReplies(post) {
+  function openReplies(post, restoredDraft = '') {
     markActivity()
     setReplyPost(post)
     setReplies([])
-    setReplyDraft('')
+    setReplyDraft(restoredDraft)
     loadReplies(post)
   }
 
@@ -222,9 +230,16 @@ export default function Board({
 
   async function sendReply(event) {
     event.preventDefault()
+    const completedIntent = createParticipationIntent('reply', {
+      postId: replyPost?.id, text: replyDraft,
+    })
     const text = replyDraft.trim()
     const post = replyPost
-    if (!text || !post || replySending) return
+    if (!text || !post || replySending || handoffBusy) return
+    if (!canInteract) {
+      await continueParticipation('reply', { postId: post.id, text: replyDraft })
+      return
+    }
 
     const localId = `local-${Date.now()}`
     const optimistic = {
@@ -247,6 +262,7 @@ export default function Board({
       )))
       await loadReplies(post, { background: true })
       window.mobius?.signal?.('item_created', { type: 'board_reply' })
+      onCompleteParticipation?.('reply', post.id, completedIntent)
       onRefresh(true)
     } catch (error) {
       setReplies((prior) => prior.filter((reply) => reply.id !== localId))
@@ -277,10 +293,62 @@ export default function Board({
           return nextOverrides
         })
       }
+      onCompleteParticipation?.('like', post.id)
     } catch (error) {
       setLikeOverrides((prior) => ({ ...prior, [post.id]: current }))
       showToast(error.message, 'error')
     }
+  }
+
+  async function continueParticipation(kind, values) {
+    if (handoffBusy || participationBusy) return
+    const intent = createParticipationIntent(kind, values)
+    if (!intent) {
+      showToast('This draft couldn’t be prepared. Check it and try again.', 'error')
+      return
+    }
+    setHandoffBusy(true)
+    try {
+      await onRequestParticipation(intent)
+    } catch (error) {
+      showToast(error.message || 'Social couldn’t continue to your account.', 'error')
+    } finally {
+      setHandoffBusy(false)
+    }
+  }
+
+  function resumeParticipation() {
+    const intent = participationIntent
+    if (!intent) return
+    if (!canInteract) {
+      void continueParticipation(intent.kind, {
+        postId: intent.post_id,
+        text: intent.text,
+        attachment: intent.attachment,
+      })
+      return
+    }
+    if (intent.kind === 'post') {
+      setDraft(intent.text || '')
+      setSelectedImage(intent.attachment ? {
+        payload: intent.attachment,
+        previewUrl: `data:${intent.attachment.mime};base64,${intent.attachment.data_b64}`,
+      } : null)
+      setComposing(true)
+      return
+    }
+    const post = feed.find(item => item.id === intent.post_id)
+    if (!post) {
+      showToast('That post isn’t in this view. Refresh the board and try again.', 'error')
+      return
+    }
+    if (intent.kind === 'reply') {
+      openReplies(post, intent.text || '')
+      return
+    }
+    const button = document.getElementById(`cn-like-${post.id}`)
+    button?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    button?.focus?.()
   }
 
   async function chooseImage(event) {
@@ -298,6 +366,9 @@ export default function Board({
   }
 
   async function publish() {
+    const completedIntent = createParticipationIntent('post', {
+      text: draft, attachment: selectedImage?.payload,
+    })
     const text = draft.trim()
     const image = selectedImage
     if (!text && !image) return
@@ -306,6 +377,7 @@ export default function Board({
     try {
       await publishPost(text, image?.payload)
       window.mobius?.signal?.('item_created', { type: 'board_post' })
+      onCompleteParticipation?.('post', null, completedIntent)
       setDraft('')
       setSelectedImage(null)
       setComposing(false)
@@ -326,9 +398,43 @@ export default function Board({
 
   return (
     <div className={`cn-content cn-screen${composing || replyPost ? ' has-dialog' : ''}`}>
-
-
-      {feedState === 'loading' && <div className="cn-center"><div className="cn-spinner" /></div>}
+      {intentState === 'loading' && (
+        <p className="cn-intent-status" role="status">Checking for a saved draft…</p>
+      )}
+      {intentState === 'error' && (
+        <div className="cn-intent-notice is-error" role="alert">
+          <div>
+            <strong>Saved draft unavailable</strong>
+            <span>Keep Social open while you continue, or try loading it again.</span>
+          </div>
+          <button className="cn-btn cn-btn-secondary" onClick={onRetryIntent}>Try again</button>
+        </div>
+      )}
+      {participationIntent && (
+        <section className="cn-intent-notice" aria-label="Pending board action">
+          <div>
+            <strong>{participationIntent.kind === 'post'
+              ? 'Your post draft is saved'
+              : participationIntent.kind === 'reply'
+                ? 'Your reply draft is saved'
+                : 'Your reaction is waiting'}</strong>
+            <span>{canInteract
+              ? 'Nothing was shared automatically. Review the action when you’re ready.'
+              : 'Nothing was shared. Continue with your account when you’re ready.'}</span>
+          </div>
+          <button className="cn-btn cn-btn-secondary" onClick={resumeParticipation}
+                  disabled={handoffBusy || participationBusy}>
+            {handoffBusy || participationBusy
+              ? 'Please wait…'
+              : participationActionLabel(participationStep(me), participationIntent.kind)}
+          </button>
+        </section>
+      )}
+      {feedState === 'loading' && (
+        <div className="cn-center" role="status" aria-label="Loading the board">
+          <div className="cn-spinner" aria-hidden="true" />
+        </div>
+      )}
       {feedState === 'error' && (
         <div className="cn-empty">
           <div className="cn-empty-title">The board is unreachable</div>
@@ -380,10 +486,15 @@ export default function Board({
               />
               <div className="cn-post-actions">
                 <button
+                  id={`cn-like-${post.id}`}
                   className={`cn-react${like.liked ? ' is-liked' : ''}`}
-                  onClick={() => toggleLike(post)}
-                  disabled={!canInteract}
-                  aria-label={canInteract ? (like.liked ? 'Unlike' : 'Like') : 'Join Social to like'}
+                  onClick={() => canInteract
+                    ? toggleLike(post)
+                    : continueParticipation('like', { postId: post.id })}
+                  disabled={handoffBusy || participationBusy}
+                  aria-label={canInteract
+                    ? (like.liked ? 'Unlike' : 'Like')
+                    : participationActionLabel(participationStep(me), 'like')}
                 >
                   {like.liked ? <HeartFilled aria-hidden="true" /> : <Heart aria-hidden="true" />}
                   {like.count > 0 && <span>{like.count}</span>}
@@ -403,13 +514,17 @@ export default function Board({
       </div>
 
 
-      {composing && canInteract && (
+      {composing && (
         <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="New post"
-             onClick={posting ? null : () => setComposing(false)}>
+             onClick={posting || handoffBusy ? null : () => setComposing(false)}>
           <div ref={composeRef} tabIndex={-1} className="cn-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="cn-grabber" aria-hidden="true" />
             <h3 className="cn-sheet-title">New post</h3>
-            <p className="cn-sheet-body">Posting to everyone on your community board.</p>
+            <p className="cn-sheet-body">{canInteract
+              ? 'Posting to everyone on your community board.'
+              : participationStep(me) === 'join'
+                ? 'Joining shares your handle and profile picture. You’ll still review this post before sharing it.'
+                : 'Write now, then continue in Möbius · You. Nothing will be posted automatically.'}</p>
             <SelectedImageStrip selected={selectedImage} onRemove={() => setSelectedImage(null)} />
             <div className="cn-post-compose">
               <textarea
@@ -418,6 +533,7 @@ export default function Board({
                 onChange={(e) => setDraft(e.target.value)}
                 placeholder="What would you like to share?"
                 aria-label="Post text"
+                maxLength={4000}
               />
               <input ref={fileRef} className="cn-file-input" type="file" accept="image/*"
                      onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
@@ -427,12 +543,18 @@ export default function Board({
               </button>
             </div>
             <div className="cn-post-sheet-actions">
-              <button className="cn-btn cn-btn-secondary" onClick={() => setComposing(false)} disabled={posting}>
+              <button className="cn-btn cn-btn-secondary" onClick={() => setComposing(false)} disabled={posting || handoffBusy}>
                 Cancel
               </button>
-              <button className="cn-btn cn-btn-primary" onClick={publish}
-                      disabled={posting || processingImage || (!draft.trim() && !selectedImage)}>
-                {posting ? 'Posting…' : 'Post'}
+              <button className="cn-btn cn-btn-primary" onClick={() => canInteract
+                        ? publish()
+                        : continueParticipation('post', {
+                          text: draft, attachment: selectedImage?.payload,
+                        })}
+                      disabled={posting || handoffBusy || participationBusy || processingImage || (!draft.trim() && !selectedImage)}>
+                {posting ? 'Posting…' : handoffBusy || participationBusy
+                  ? 'Please wait…'
+                  : canInteract ? 'Post' : participationActionLabel(participationStep(me), 'post')}
               </button>
             </div>
           </div>
@@ -479,7 +601,11 @@ export default function Board({
             </article>
 
             <div className="cn-reply-list" aria-live="polite">
-              {replyState === 'loading' && <div className="cn-center"><div className="cn-spinner" /></div>}
+              {replyState === 'loading' && (
+                <div className="cn-center" role="status" aria-label="Loading replies">
+                  <div className="cn-spinner" aria-hidden="true" />
+                </div>
+              )}
               {replyState === 'error' && (
                 <div className="cn-reply-empty">
                   <p>{replyError}</p>
@@ -505,25 +631,34 @@ export default function Board({
               ))}
             </div>
 
-            {canInteract ? (
-              <form className="cn-reply-composer" onSubmit={sendReply}>
-                <input
-                  value={replyDraft}
-                  onChange={(e) => setReplyDraft(e.target.value)}
-                  placeholder="Write a reply"
-                  aria-label="Write a reply"
-                  autoComplete="off"
-                  disabled={replySending}
-                />
+            <form className={`cn-reply-composer${canInteract ? '' : ' is-gated'}`} onSubmit={sendReply}>
+              <input
+                value={replyDraft}
+                onChange={(e) => setReplyDraft(e.target.value)}
+                placeholder="Write a reply"
+                aria-label="Write a reply"
+                autoComplete="off"
+                maxLength={1000}
+                disabled={replySending || handoffBusy || participationBusy}
+              />
+              {canInteract ? (
                 <button className="cn-reply-send" type="submit"
                         disabled={replySending || !replyDraft.trim()}
                         aria-label="Send reply">
                   <ArrowUp aria-hidden="true" />
                 </button>
-              </form>
-            ) : (
-              <p className="cn-reply-gate">Join Social to reply to this conversation.</p>
-            )}
+              ) : (
+                <button className="cn-btn cn-btn-primary cn-reply-account" type="submit"
+                        disabled={handoffBusy || participationBusy || !replyDraft.trim()}>
+                  {handoffBusy || participationBusy
+                    ? 'Please wait…'
+                    : participationActionLabel(participationStep(me), 'reply')}
+                </button>
+              )}
+              {!canInteract && (
+                <span className="cn-reply-gate">Your draft stays here. Nothing is sent automatically.</span>
+              )}
+            </form>
           </div>
         </div>
       )}

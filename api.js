@@ -1,3 +1,5 @@
+import { SHARED_COMMUNITY_HOST } from './community.js'
+
 // Common — calls to this instance's federation endpoints. The backend owns
 // signing, delivery, and peer verification; the app only ever talks to its
 // own server.
@@ -46,16 +48,17 @@ export const publishPost = (text, attachment) =>
     method: 'POST',
     body: JSON.stringify({ text, ...(attachment ? { attachment } : {}) }),
   })
-export const getFeed = () => call('feed')
+const browseQuery = `community_host=${encodeURIComponent(SHARED_COMMUNITY_HOST)}`
+export const getFeed = () => call(`feed?${browseQuery}`)
 export const getBoardMedia = (postId) =>
-  call(`board-media/${encodeURIComponent(postId)}`, {}, 'blob')
+  call(`board-media/${encodeURIComponent(postId)}?${browseQuery}`, {}, 'blob')
 export const likePost = (postId) =>
   call('like', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
 export const getReplies = (postId) =>
-  call(`board/${encodeURIComponent(postId)}/replies`)
+  call(`replies/${encodeURIComponent(postId)}?${browseQuery}`)
 export const postReply = (postId, text) =>
   call('reply', { method: 'POST', body: JSON.stringify({ post_id: postId, text }) })
-export const searchPeople = (q, signal) => call(`people?q=${encodeURIComponent(q.trim().replace(/^@/, ''))}`, { signal })
+export const searchPeople = (q, signal) => call(`people?q=${encodeURIComponent(q.trim().replace(/^@/, ''))}&${browseQuery}`, { signal })
 export const getPeer = (host, signal) => call(`peer/${encodeURIComponent(host)}`, { signal })
 export async function getAppIcon(appId) {
   const response = await fetch(`/api/apps/${appId}/icon`, {
@@ -100,6 +103,12 @@ async function markConversationRead(path) {
 }
 
 export const clearUnread = peer => markConversationRead(`conversations/${peer}/meta.json`)
+export const acceptMessageRequest = peer =>
+  call(`requests/dm/${encodeURIComponent(peer)}/accept`, { method: 'POST', body: JSON.stringify({}) })
+export const declineMessageRequest = peer =>
+  call(`requests/dm/${encodeURIComponent(peer)}/decline`, { method: 'POST', body: JSON.stringify({}) })
+export const blockMessageRequest = peer =>
+  call(`requests/dm/${encodeURIComponent(peer)}/block`, { method: 'POST', body: JSON.stringify({}) })
 
 // ── groups ──────────────────────────────────────────────────────────────────
 
@@ -118,6 +127,10 @@ export const sendGroupMessage = (gid, text, attachment, replyTo) =>
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
   })
+export const acceptGroupInvitation = gid =>
+  call(`groups/${encodeURIComponent(gid)}/accept`, { method: 'POST', body: JSON.stringify({}) })
+export const declineGroupInvitation = gid =>
+  call(`groups/${encodeURIComponent(gid)}/decline`, { method: 'POST', body: JSON.stringify({}) })
 
 export const listGroups = () => listMetadata('groups/')
 
@@ -145,6 +158,15 @@ export const clearGroupUnread = gid => markConversationRead(`groups/${gid}/meta.
 
 // The creator removes a deleted group from Messages; other members retain history.
 export const groupIsVisible = (group, ownHost) => !group.deleted_at || group.host !== ownHost
+
+// Metadata without an explicit state predates Message Requests and is an
+// established conversation. This deliberate interpretation prevents an
+// upgrade from moving existing chats back behind consent.
+export function requestStatus(item) {
+  return ['pending', 'accepted', 'declined', 'blocked'].includes(item?.request_status)
+    ? item.request_status
+    : 'accepted'
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 

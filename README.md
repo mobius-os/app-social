@@ -9,6 +9,20 @@ Federated social for Möbius people. Three surfaces:
   Fresh installs browse it before joining. Joining shares the owner's handle
   and profile picture and enables posting and new conversations.
 
+The Board and People surfaces stay readable while the owner is signed out or
+has not joined the public directory. Posting, replying, and reacting remain
+account actions. Social saves the exact pending action (including a post photo)
+in app-scoped storage, then asks the shell to open the installed **Möbius · You**
+app. If that app is absent, Social opens the App Store with its supported
+`app:identity` intent so the exact listing owns installation and capability
+review. Möbius · You currently owns sign-in from its own account screen; it does
+not expose an app intent that may open or complete sign-in directly.
+
+Returning to Social refreshes the authoritative profile and offers the saved
+action again. Sign-in never joins the directory, and neither sign-in nor join
+publishes the saved post/reply/reaction. Each transition still needs its own
+explicit button. Cancelled sign-in leaves the draft waiting.
+
 Older installations that joined a separate directory see **Join global Social**,
 not an apparently empty global board. This explicit action preserves their
 publication consent; Social no longer offers multiple community destinations.
@@ -27,6 +41,19 @@ client UI; it only ever talks to its own server.
 Conversation data lives in this app's per-app storage
 (`conversations/<peer-host>/…`); incoming deliveries bump `state/version.json`,
 which the open app watches to refresh live.
+
+### Integration boundary for public browsing
+
+This release requires the companion backend read-host contract. Feed, people,
+board media and `/api/common/replies/{post_id}` accept `community_host` for
+app-authenticated public reads. The app selects the one global host for every
+read without changing saved membership or registering the owner. Remote replies
+are fetched through the same DNS-pinned transport as other federation reads.
+
+Writes continue through the owner-authenticated publish/like/reply routes and
+the saved, explicitly joined community. Browsing never joins or submits an
+interaction. Activate this app only with the companion backend; older backends
+do not provide the reply proxy or explicit browse-host semantics.
 
 ### Group conversations
 

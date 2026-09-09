@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { listGroups, listConversations, getGroup } from '../api.js'
+import { listGroups, listConversations, getGroup, requestStatus } from '../api.js'
 
 test.afterEach(() => { delete globalThis.window })
 
@@ -47,4 +47,13 @@ test('missing or different group metadata cannot silently close the creation flo
     globalThis.window = { mobius: { storage: { async getWithVersion() { return { value } } } } }
     await assert.rejects(() => getGroup('new-group'), /could not be opened/)
   }
+})
+
+test('request metadata is persistent while legacy conversations remain accepted', () => {
+  assert.equal(requestStatus({ request_status: 'pending' }), 'pending')
+  assert.equal(requestStatus({ request_status: 'declined' }), 'declined')
+  assert.equal(requestStatus({ request_status: 'blocked' }), 'blocked')
+  assert.equal(requestStatus({ request_status: 'accepted' }), 'accepted')
+  assert.equal(requestStatus({ peer: 'legacy.example', unread: 2 }), 'accepted')
+  assert.equal(requestStatus(null), 'accepted')
 })

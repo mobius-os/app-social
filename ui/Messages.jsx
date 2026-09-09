@@ -23,52 +23,80 @@ function lastMessagePreview(item) {
 
 export default function Messages({
   canCreate, me, conversations, groups, onOpenThread, onOpenGroup, onFindPeople,
+  messageRequests, groupRequests, onOpenMessageRequest,
   onGroupsChanged, showToast, creating, setCreating, loadState, onRetry,
 }) {
+  const [view, setView] = useState('chats')
 
   const merged = [
     ...conversations.map((c) => ({ kind: 'dm', key: c.peer, at: c.last_at || 0, item: c })),
     ...groups.map((g) => ({ kind: 'group', key: g.gid, at: g.last_at || 0, item: g })),
   ].sort((a, b) => b.at - a.at)
+  const requests = [
+    ...(messageRequests || []).map((item) => ({
+      kind: 'dm', key: item.peer, at: item.last_at || 0, item,
+    })),
+    ...(groupRequests || []).map((item) => ({
+      kind: 'group', key: item.gid, at: item.last_at || 0, item,
+    })),
+  ].sort((a, b) => b.at - a.at)
+  const showingRequests = view === 'requests'
+  const rows = showingRequests ? requests : merged
 
   return (
     <div className={`cn-content cn-screen${creating ? ' has-dialog' : ''}`}>
       <div className="cn-view-heading">
-        <div><h2>Messages</h2><p>Your conversations, together.</p></div>
-        <div className="cn-view-actions">
+        <div><h2>{showingRequests ? 'Message requests' : 'Messages'}</h2><p>{showingRequests
+          ? 'Quiet until you choose. Previewing never accepts a request.'
+          : 'Your accepted conversations, together.'}</p></div>
+        {!showingRequests && <div className="cn-view-actions">
           <button className="cn-btn cn-btn-primary" onClick={onFindPeople}>New message</button>
           <button className="cn-btn cn-btn-secondary" disabled={!canCreate} onClick={() => setCreating(true)}><Plus aria-hidden="true" /> New group</button>
-        </div>
+        </div>}
+      </div>
+      <div className="cn-message-tabs" role="tablist" aria-label="Message inbox">
+        <button type="button" role="tab" aria-selected={!showingRequests}
+                className={!showingRequests ? 'is-active' : ''} onClick={() => setView('chats')}>
+          Chats
+        </button>
+        <button type="button" role="tab" aria-selected={showingRequests}
+                className={showingRequests ? 'is-active' : ''} onClick={() => setView('requests')}>
+          Requests{requests.length ? <span className="cn-request-count">{requests.length}</span> : null}
+        </button>
       </div>
       {loadState === 'error' && <div className="cn-directory-error" role="alert">
         <p>Conversations couldn’t be loaded. Your saved messages haven’t been removed.</p>
         <button className="cn-btn cn-btn-secondary" onClick={onRetry}>Try again</button>
       </div>}
       {loadState === 'loading' && <div className="cn-center" role="status">Loading conversations…</div>}
-      {merged.length === 0 && loadState === 'ready' ? (
+      {rows.length === 0 && loadState === 'ready' ? (
         <div className="cn-empty">
           <div className="cn-empty-mark" aria-hidden="true"><Mail /></div>
-          <div className="cn-empty-title">No conversations yet</div>
+          <div className="cn-empty-title">{showingRequests ? 'No message requests' : 'No conversations yet'}</div>
           <p className="cn-empty-text">
-            Find someone in People and say hello — your message goes straight to their server.
+            {showingRequests
+              ? 'Messages and group invitations from unfamiliar people will wait here without notifying you.'
+              : 'Find someone in People and say hello — your message goes straight to their server.'}
           </p>
         </div>
       ) : (
         <div>
-          {merged.map(({ kind, key, item }) => (
+          {rows.map(({ kind, key, item }) => (
             kind === 'dm' ? (
-              <button className="cn-row" key={`dm-${key}`} onClick={() => onOpenThread(item.peer)}>
-                <Avatar name={item.peer_handle} host={item.peer} />
+              <button className="cn-row" key={`dm-${key}`} onClick={() => showingRequests
+                ? onOpenMessageRequest(item.peer, item.peer_handle)
+                : onOpenThread(item.peer)}>
+                <Avatar name={item.peer_handle} host={showingRequests ? undefined : item.peer} />
                 <span className="cn-row-copy">
                   <span className="cn-row-top">
                     <strong>{item.peer_handle ? `@${item.peer_handle}` : 'Direct message'}</strong>
                     <span className="cn-time">{timeAgo(item.last_at)}</span>
                   </span>
                   <span className="cn-preview">
-                    {item.last_dir === 'out' ? 'You: ' : ''}{lastMessagePreview(item)}
+                    {showingRequests ? 'Wants to message you · ' : item.last_dir === 'out' ? 'You: ' : ''}{lastMessagePreview(item)}
                   </span>
                 </span>
-                {item.unread > 0 && <span className="cn-unread-dot" aria-label="Unread" />}
+                {!showingRequests && item.unread > 0 && <span className="cn-unread-dot" aria-label="Unread" />}
               </button>
             ) : (
               <button className="cn-row" key={`g-${key}`} onClick={() => onOpenGroup(item)}>
@@ -79,14 +107,16 @@ export default function Messages({
                     <span className="cn-time">{timeAgo(item.last_at)}</span>
                   </span>
                   <span className="cn-preview">
-                    {item.deleted_at ? 'Group closed' : lastMessagePreview(item)
+                    {showingRequests ? `${item.invited_by_handle ? `@${item.invited_by_handle}` : item.host} invited you · ${
+                      (item.members || []).length} ${(item.members || []).length === 1 ? 'person' : 'people'
+                    }` : item.deleted_at ? 'Group closed' : lastMessagePreview(item)
                       ? `${item.last_dir === 'out'
                         ? 'You'
                         : item.last_from_handle ? `@${item.last_from_handle}` : 'Someone'}: ${lastMessagePreview(item)}`
                       : `${(item.members || []).length} ${(item.members || []).length === 1 ? 'person' : 'people'}`}
                   </span>
                 </span>
-                {item.unread > 0 && <span className="cn-unread-dot" aria-label="Unread" />}
+                {!showingRequests && item.unread > 0 && <span className="cn-unread-dot" aria-label="Unread" />}
               </button>
             )
           ))}

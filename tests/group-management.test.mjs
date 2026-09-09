@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { addGroupMember, deleteGroup, groupIsVisible, clearGroupUnread, clearUnread, setToken } from '../api.js'
+import {
+  acceptGroupInvitation, acceptMessageRequest, addGroupMember, blockMessageRequest,
+  clearGroupUnread, clearUnread, declineGroupInvitation, declineMessageRequest,
+  deleteGroup, groupIsVisible, setToken,
+} from '../api.js'
 
 const originalFetch = globalThis.fetch
 test.afterEach(() => { globalThis.fetch = originalFetch; delete globalThis.window })
@@ -32,6 +36,46 @@ test('deleting uses the group authority, never a local storage wipe', async () =
 test('a failed delete remains a failure rather than claiming the group disappeared', async () => {
   globalThis.fetch = async () => Response.json({ detail: 'Only the creator can delete this group.' }, { status: 403 })
   await assert.rejects(() => deleteGroup('group-id'), error => error.status === 403 && /creator/.test(error.message))
+})
+
+test('message-request decisions use server-owned authenticated actions', async () => {
+  setToken('scoped-test')
+  const expected = [
+    ['/api/common/requests/dm/peer.example/accept', { status: 'accepted' }],
+    ['/api/common/requests/dm/peer.example/decline', { status: 'declined' }],
+    ['/api/common/requests/dm/peer.example/block', { status: 'blocked' }],
+  ]
+  globalThis.fetch = async (url, options) => {
+    const [nextUrl, receipt] = expected.shift()
+    assert.equal(url, nextUrl)
+    assert.equal(options.method, 'POST')
+    assert.equal(options.headers.Authorization, 'Bearer scoped-test')
+    return Response.json(receipt)
+  }
+  assert.deepEqual(await acceptMessageRequest('peer.example'), { status: 'accepted' })
+  assert.deepEqual(await declineMessageRequest('peer.example'), { status: 'declined' })
+  assert.deepEqual(await blockMessageRequest('peer.example'), { status: 'blocked' })
+  assert.equal(expected.length, 0)
+})
+
+test('group invitations are accepted or declined through group authority', async () => {
+  setToken('scoped-test')
+  const expected = [
+    ['/api/common/groups/group-id/accept', { status: 'accepted' }],
+    ['/api/common/groups/group-id/decline', { status: 'declined', host_notified: false }],
+  ]
+  globalThis.fetch = async (url, options) => {
+    const [nextUrl, receipt] = expected.shift()
+    assert.equal(url, nextUrl)
+    assert.equal(options.method, 'POST')
+    assert.equal(options.headers.Authorization, 'Bearer scoped-test')
+    return Response.json(receipt)
+  }
+  assert.deepEqual(await acceptGroupInvitation('group-id'), { status: 'accepted' })
+  assert.deepEqual(await declineGroupInvitation('group-id'), {
+    status: 'declined', host_notified: false,
+  })
+  assert.equal(expected.length, 0)
 })
 
 test('deletion hides only the creator’s group and preserves other members’ readable history', () => {
