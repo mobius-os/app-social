@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SHARED_COMMUNITY_HOST, needsGlobalJoin, joinGlobalCommunity } from '../community.js'
+import { SHARED_COMMUNITY_HOST, joinGlobalCommunity } from '../community.js'
 
 const fresh = { host: 'fresh.example', community_host: 'fresh.example', joined: false }
 
-test('all public browsing uses one global host without membership writes', async () => {
+test('all public browsing uses the canonical community host without membership writes', async () => {
   const api = await import('../api.js')
   const previous = globalThis.fetch
   const calls = []
@@ -29,22 +29,7 @@ test('all public browsing uses one global host without membership writes', async
   } finally { globalThis.fetch = previous }
 })
 
-test('legacy members still require explicit consent before global publication', () => {
-  assert.equal(needsGlobalJoin({ ...fresh, joined: true }), true)
-  assert.equal(needsGlobalJoin({ ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }), false)
-})
-
-test('explicit migration registers an existing member once at the global destination', async () => {
-  const writes = []
-  const result = await joinGlobalCommunity({ ...fresh, joined: true }, async value => {
-    writes.push(value)
-    return { directory: 'registered' }
-  }, () => assert.fail('profile update already registers joined members'))
-  assert.equal(result.directory, 'registered')
-  assert.deepEqual(writes, [{ community_host: SHARED_COMMUNITY_HOST }])
-})
-
-test('fresh join selects the global destination before publishing', async () => {
+test('joining automatically sets the canonical community destination', async () => {
   const calls = []
   await joinGlobalCommunity(fresh, async value => {
     calls.push(value)
@@ -53,17 +38,17 @@ test('fresh join selects the global destination before publishing', async () => 
   assert.deepEqual(calls, [{ community_host: SHARED_COMMUNITY_HOST }, 'join'])
 })
 
-test('a failed global registration stays a retryable failure, never success', async () => {
+test('a failed registration stays a retryable failure, never success', async () => {
   await assert.rejects(joinGlobalCommunity({ ...fresh, joined: true }, async () => ({ directory: 'unreachable' }), () => assert.fail()), /Try joining again/)
   const profile = { ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }
   assert.equal((await joinGlobalCommunity(profile, () => assert.fail(), async () => ({ directory: 'registered' }))).directory, 'registered')
 })
 
-test('a failed destination write prevents joining the old directory', async () => {
+test('a failed destination write prevents joining', async () => {
   await assert.rejects(joinGlobalCommunity(fresh, async () => { throw new Error('offline') }, () => assert.fail('wrong audience')), /offline/)
 })
 
-test('reopening detects a saved join that never reached the global directory', async () => {
+test('reopening detects a saved join that never reached the directory', async () => {
   const { checkGlobalRegistration } = await import('../community.js')
   const profile = { ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }
   assert.equal(await checkGlobalRegistration(profile, async q => {
@@ -78,9 +63,7 @@ test('directory outage is not misreported as missing membership', async () => {
   assert.equal(await checkGlobalRegistration({ ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }, async () => { throw Error('offline') }), 'unavailable')
 })
 
-test('browsers and separate-community members do not publish or check global membership', async () => {
+test('browsers do not check membership when unjoined', async () => {
   const { checkGlobalRegistration } = await import('../community.js')
-  for (const joined of [false, true]) {
-    assert.equal(await checkGlobalRegistration({ ...fresh, joined }, () => assert.fail('no global membership')), 'not_joined')
-  }
+  assert.equal(await checkGlobalRegistration(fresh, () => assert.fail('no check when unjoined')), 'not_joined')
 })
