@@ -138,6 +138,15 @@ export default function People({ me, canMessage, onMessage, showToast, requested
             <p className="cn-empty-text">
               Try a different handle. If your friend is missing, ask them to join global Social.
             </p>
+            {query && query.includes('.') && (
+              <button
+                className="cn-btn cn-btn-primary"
+                style={{ marginTop: '0.75rem' }}
+                onClick={() => setSelectedHost(query.trim().replace(/^@/, ''))}
+              >
+                Connect with {query.trim()} directly
+              </button>
+            )}
           </div>
         )}
       </div>
