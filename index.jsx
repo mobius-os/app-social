@@ -18,31 +18,13 @@ import {
 } from './participation.js'
 
 function ParticipationNotice({ me, busy, onJoin, onAccount, onCheck }) {
-  if (needsGlobalJoin(me)) {
-    return (
-      <section className="cn-welcome" aria-labelledby="cn-welcome-title">
-        <span className="cn-welcome-mark" aria-hidden="true"><Globe /></span>
-        <div className="cn-welcome-copy">
-          <h2 id="cn-welcome-title">Join global Social</h2>
-          <p>
-            You’re browsing global Social. Join to move future public
-            participation to global Social. Your existing private conversations stay here.
-          </p>
-        </div>
-        <button className="cn-btn cn-btn-primary" onClick={onJoin} disabled={busy}>
-          {busy ? 'Joining…' : 'Join global Social'}
-        </button>
-      </section>
-    )
-  }
-
   if (me?.joined && me?.name) {
     if (me.registration === 'registered') return null
     const missing = me.registration === 'missing'
     return (
       <section className="cn-welcome" aria-labelledby="cn-registration-title">
         <div className="cn-welcome-copy">
-          <h2 id="cn-registration-title">{missing ? 'Finish joining global Social' : 'Global directory unavailable'}</h2>
+          <h2 id="cn-registration-title">{missing ? 'Finish joining Social' : 'Directory unavailable'}</h2>
           <p>{missing
             ? 'Your profile is not listed yet. Try joining again so people can find you. Your saved conversations are unchanged.'
             : 'We couldn’t check whether your profile is listed. Your saved conversations are still available.'}</p>
@@ -344,8 +326,7 @@ export default function App({ appId, token }) {
   const unread =
     activeConversations.reduce((sum, c) => sum + (c.unread || 0), 0) +
     activeGroups.reduce((sum, g) => sum + (g.unread || 0), 0)
-  const needsJoin = needsGlobalJoin(me)
-  const canParticipate = Boolean(me?.joined && me?.name && !needsJoin)
+  const canParticipate = Boolean(me?.joined && me?.name)
 
   // ── render ────────────────────────────────────────────────────────────────
   if (meState === 'loading') {

@@ -72,9 +72,6 @@ test('participation keeps account linking, directory consent and final action se
   assert.equal(participationStep({ connected: false, joined: false, identity_app_id: 8 }), 'identity')
   assert.equal(participationStep({ connected: true, joined: false, name: 'Ada' }), 'join')
   assert.equal(participationStep({
-    connected: true, joined: true, name: 'Ada', community_host: 'old.example',
-  }), 'join')
-  assert.equal(participationStep({
     connected: true, joined: true, name: 'Ada', community_host: SHARED_COMMUNITY_HOST,
   }), 'ready')
 })
