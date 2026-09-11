@@ -1,4 +1,4 @@
-export const SHARED_COMMUNITY_HOST = 'mobius.hamzamerzic.info'
+export const SHARED_COMMUNITY_HOST = 'www.mobius.you'
 
 function normalized(value) {
   return String(value || '').trim().toLowerCase()

@@ -5,7 +5,7 @@ Federated social for Möbius people. Three surfaces:
 - **Board** — one global community feed for every Social installation.
 - **Messages** — private conversations delivered directly between Möbius
   instances. Each side keeps its own copy; changing directory never moves them.
-- **People** — one opt-in global directory, hosted at `mobius.hamzamerzic.info`.
+- **People** — one opt-in global directory, hosted at `www.mobius.you`.
   Fresh installs browse it before joining. Joining shares the owner's handle
   and profile picture and enables posting and new conversations.
 
