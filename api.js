@@ -1,14 +1,13 @@
 import { SHARED_COMMUNITY_HOST } from './community.js'
 
-// Common — calls to this instance's federation endpoints. The backend owns
-// signing, delivery, and peer verification; the app only ever talks to its
-// own server.
+// Social owns signing, delivery, persistence, and peer verification behind
+// the platform's reviewed app-service boundary.
 
 let bearer = null
 export function setToken(token) { bearer = token }
 
 async function call(path, options = {}, responseType = 'json') {
-  const response = await fetch(`/api/common/${path}`, {
+  const response = await fetch(`/api/services/common/${path}`, {
     ...options,
     headers: {
       Authorization: `Bearer ${bearer}`,

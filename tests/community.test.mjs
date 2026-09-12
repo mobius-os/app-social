@@ -18,8 +18,8 @@ test('all public browsing uses the canonical community host without membership w
     await api.getReplies('post-1')
     await api.getBoardMedia('post-1')
     assert.deepEqual(calls.map(c => c.url.pathname), [
-      '/api/common/feed', '/api/common/people', '/api/common/replies/post-1',
-      '/api/common/board-media/post-1',
+      '/api/services/common/feed', '/api/services/common/people', '/api/services/common/replies/post-1',
+      '/api/services/common/board-media/post-1',
     ])
     for (const { url, options } of calls) {
       assert.equal(url.searchParams.get('community_host'), SHARED_COMMUNITY_HOST)
