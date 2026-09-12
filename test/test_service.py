@@ -136,7 +136,7 @@ class SocialServiceTests(unittest.TestCase):
         self.assertEqual(
           client.get("/api/app-services/common/directory").json(), {"users": []},
         )
-        self.assertEqual(client.get("/api/common/directory").json(), {"users": []})
+        self.assertEqual(client.get("/api/common/directory").status_code, 404)
         self.assertEqual(client.get("/docs").status_code, 404)
 
 

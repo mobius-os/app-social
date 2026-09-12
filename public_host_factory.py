@@ -85,7 +85,5 @@ def create_app(data_dir: str | Path, *, source_sha: str) -> FastAPI:
   current, _ = create_public_router(
     store, verifier, prefix="/api/app-services/common",
   )
-  legacy, _ = create_public_router(store, verifier, prefix="/api/common")
   application.include_router(current)
-  application.include_router(legacy)
   return application
