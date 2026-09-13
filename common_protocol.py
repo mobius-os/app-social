@@ -24,6 +24,7 @@ from common_transport import federation_request
 from service_io import atomic_write, read_capped_body
 
 PROTOCOL = "common/0"
+PUBLIC_SERVICE_PATH = "/api/app-services/common"
 MAX_TEXT_CHARS = 4000
 MAX_REPLY_TEXT_CHARS = 1000
 MAX_NAME_CHARS = 80
@@ -63,6 +64,14 @@ def valid_id(value: Any) -> bool:
 def peer_base_url(host: str) -> str:
   """Return the public HTTPS origin for an already-validated peer host."""
   return f"https://{host}"
+
+
+def peer_service_url(host: str, path: str = "") -> str:
+  """Return one peer-facing URL on Social's public app service."""
+  suffix = path.lstrip("/")
+  return f"{peer_base_url(host)}{PUBLIC_SERVICE_PATH}" + (
+    f"/{suffix}" if suffix else ""
+  )
 
 
 def canonical(payload: dict) -> bytes:
@@ -260,7 +269,7 @@ class ActorVerifier:
         return cached
     try:
       response = await federation_request(
-        "GET", f"{peer_base_url(host)}/api/common/actor",
+        "GET", peer_service_url(host, "actor"),
         max_response_bytes=MAX_ENVELOPE_BYTES,
         timeout_seconds=OUTBOUND_TIMEOUT_S,
       )
@@ -317,8 +326,9 @@ __all__ = [
   "CLOCK_SKEW_S", "MAX_ATTACHMENT_BYTES", "MAX_ATTACHMENT_DIMENSION",
   "MAX_ATTACHMENT_ENVELOPE_BYTES", "MAX_AVATAR_BYTES", "MAX_BIO_CHARS",
   "MAX_ENVELOPE_BYTES", "MAX_NAME_CHARS", "MAX_REPLY_TEXT_CHARS",
-  "MAX_TEXT_CHARS", "OUTBOUND_TIMEOUT_S", "PROTOCOL", "canonical",
-  "peer_base_url", "read_envelope", "sign", "valid_host", "valid_id",
+  "MAX_TEXT_CHARS", "OUTBOUND_TIMEOUT_S", "PROTOCOL", "PUBLIC_SERVICE_PATH",
+  "canonical", "peer_base_url", "peer_service_url", "read_envelope", "sign",
+  "valid_host", "valid_id",
   "validate_attachment", "validate_reply_to", "validate_text_or_attachment",
   "verify",
 ]
