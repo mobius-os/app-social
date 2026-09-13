@@ -3,7 +3,7 @@
 A group lives on its creator's instance, the **group host**. The host owns the
 authoritative membership record; members keep their own copy of every message,
 exactly like 1:1 conversations. Six signed envelope types extend the
-protocol, all delivered to `/api/common/groups/inbox`:
+protocol, all delivered to `/api/app-services/common/groups/inbox`:
 
 - `group_added`  host → invitee   invitation; carries group metadata
 - `group_accept` invitee → host   owner explicitly joins the group
@@ -48,7 +48,7 @@ from common_protocol import (
   MAX_ENVELOPE_BYTES,
   MAX_NAME_CHARS,
   OUTBOUND_TIMEOUT_S,
-  peer_base_url as _peer_base_url,
+  peer_service_url as _peer_service_url,
   read_envelope as _read_envelope,
   sign as _sign,
   valid_host as _valid_host,
@@ -76,7 +76,7 @@ from social_routes import (
 )
 from service_io import atomic_write
 
-router = APIRouter(prefix="/api/common/groups", tags=["common"])
+router = APIRouter(prefix="/groups", tags=["common"])
 
 MAX_GROUP_MEMBERS = 64
 _GID_RE = re.compile(r"^[a-f0-9-]{8,64}$")
@@ -218,7 +218,7 @@ def _members_snapshot(group: dict) -> list[dict]:
 async def _deliver(host: str, envelope: dict) -> bool:
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/groups/inbox",
+      "POST", _peer_service_url(host, "groups/inbox"),
       json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )

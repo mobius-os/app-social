@@ -27,7 +27,7 @@ Design, deliberately mirroring the proven pieces of the platform:
   member; the host can revoke any member later.
 
 Peer surface (public; envelope signatures are the authority):
-  POST /api/common/objects/{oid}/peer   join / state / write / leave envelopes
+  POST /api/app-services/common/objects/{oid}/peer  join / state / write / leave
 
 Owner surface (owner JWT, or an app's scoped token for its OWN objects):
   POST   /api/services/common/objects                       create a hosted object
@@ -69,7 +69,7 @@ from pydantic import BaseModel
 from common_protocol import (
   CLOCK_SKEW_S,
   OUTBOUND_TIMEOUT_S,
-  peer_base_url as _peer_base_url,
+  peer_service_url as _peer_service_url,
   sign as _sign,
   valid_host as _valid_host,
 )
@@ -88,7 +88,7 @@ from social_routes import (
 
 _public_store = CommonPublicStore(lambda: get_settings().data_dir)
 
-router = APIRouter(prefix="/api/common/objects", tags=["common-objects"])
+router = APIRouter(prefix="/objects", tags=["common-objects"])
 
 MAX_DOC_BYTES = 256 * 1024
 MAX_ENVELOPE_BYTES = MAX_DOC_BYTES + 8 * 1024
@@ -578,7 +578,7 @@ async def _resolve_invitees(address: str) -> InviteRecipient:
   else:
     try:
       response = await federation_request(
-        "GET", f"{_peer_base_url(community)}/api/common/directory",
+        "GET", _peer_service_url(community, "directory"),
         params={"q": raw}, timeout_seconds=OUTBOUND_TIMEOUT_S,
       )
       response.raise_for_status()
@@ -708,7 +708,7 @@ async def decline_invitation(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
       json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -858,7 +858,7 @@ async def join_object(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
       json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
   except Exception as exc:
@@ -963,7 +963,7 @@ async def create_invite(
         try:
           response = await federation_request(
             "POST",
-            f"{_peer_base_url(peer)}/api/common/objects/invitations/deliver",
+            _peer_service_url(peer, "objects/invitations/deliver"),
             json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
             timeout_seconds=OUTBOUND_TIMEOUT_S,
           )
@@ -1104,7 +1104,7 @@ async def leave_object(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
       json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -1127,7 +1127,7 @@ async def _proxied_state(host: str, oid: str, since_version: int) -> dict:
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
       json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
   except Exception as exc:
@@ -1219,7 +1219,7 @@ async def write_state(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
       json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
   except Exception as exc:
@@ -1272,7 +1272,7 @@ async def _proxied_asset(host: str, oid: str, asset_id: str, kind: str, **fields
   try:
     response = await federation_request(
       "POST",
-      f"{_peer_base_url(host)}/api/common/objects/{oid}/peer-asset/{asset_id}",
+      _peer_service_url(host, f"objects/{oid}/peer-asset/{asset_id}"),
       json=envelope,
       max_response_bytes=MAX_ASSET_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,

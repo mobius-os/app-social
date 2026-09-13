@@ -310,7 +310,7 @@ class CommonPublicStore:
 
 
 def create_public_router(
-  store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "/api/common",
+  store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
 ) -> tuple[APIRouter, None]:
   """Build the exact public-host surface shared by both runtimes."""
   router = APIRouter(prefix=prefix, tags=["common-public"])

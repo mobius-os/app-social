@@ -11,10 +11,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
-from common_protocol import canonical
-from public_host_factory import WriteRateLimiter, create_app
+from common_protocol import PUBLIC_SERVICE_PATH, canonical, peer_service_url
 
 
 ROOT = Path(__file__).parents[1]
@@ -134,24 +131,12 @@ class SocialServiceTests(unittest.TestCase):
       self.assertEqual(len(listed["body"]["hosted"]), 1)
       self.assertEqual(listed["body"]["joined"], [])
 
-  def test_public_host_keeps_the_stable_common_protocol_path(self):
-    with tempfile.TemporaryDirectory() as directory:
-      application = create_app(directory, source_sha="f" * 40)
-      with TestClient(application) as client:
-        self.assertEqual(client.get("/healthz").json(), {"status": "ok"})
-        self.assertEqual(
-          client.get("/api/common/directory").json(), {"users": []},
-        )
-        self.assertEqual(client.get("/docs").status_code, 404)
-
-  def test_public_host_rate_accounting_has_a_hard_peer_bound(self):
-    limiter = WriteRateLimiter(limit=2, window_seconds=60, peer_limit=2)
-    self.assertTrue(limiter.allow("one", 1))
-    self.assertTrue(limiter.allow("two", 1))
-    self.assertFalse(limiter.allow("three", 1))
-    self.assertEqual(set(limiter.windows), {"one", "two"})
-    self.assertTrue(limiter.allow("three", 62))
-    self.assertEqual(set(limiter.windows), {"three"})
+  def test_peer_urls_use_the_public_app_service(self):
+    self.assertEqual(PUBLIC_SERVICE_PATH, "/api/app-services/common")
+    self.assertEqual(
+      peer_service_url("peer.example", "/groups/inbox"),
+      "https://peer.example/api/app-services/common/groups/inbox",
+    )
 
   def test_public_actor_uses_platform_owned_member_and_app_metadata(self):
     identity_payload = {
@@ -212,7 +197,7 @@ class SocialServiceTests(unittest.TestCase):
         actor = self.call(
           root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",
         )["body"]
-        self.assertEqual(actor["inbox"], "/api/common/inbox")
+        self.assertEqual(actor["inbox"], "/api/app-services/common/inbox")
         self.assertEqual(actor["member_since"], identity_payload["member_since"])
         self.assertEqual(actor["apps"], [{"name": "Shared", "description": "public app"}])
         self.assertEqual(set(seen_paths), {"/api/identity", "/api/apps/"})
@@ -221,17 +206,12 @@ class SocialServiceTests(unittest.TestCase):
       thread.join()
       server.server_close()
 
-  def test_public_container_trusts_forwarding_only_at_its_edge_boundary(self):
-    command = (ROOT / "Dockerfile.public").read_text()
-    self.assertIn('"--proxy-headers", "--forwarded-allow-ips=*"', command)
-
-  def test_federation_source_keeps_outbound_calls_on_the_stable_protocol_path(self):
-    replaced_path = "/api/" + "app-services/common"
+  def test_federation_source_has_no_legacy_platform_route(self):
     for name in (
       "common_protocol.py", "social_routes.py", "social_groups.py",
       "social_objects.py",
     ):
-      self.assertNotIn(replaced_path, (ROOT / name).read_text(), name)
+      self.assertNotIn("/api/common", (ROOT / name).read_text(), name)
 
 
 if __name__ == "__main__":

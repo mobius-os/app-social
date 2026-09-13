@@ -37,9 +37,9 @@ Social owns its server side as a reviewed app service (protocol `common/0`):
 Ed25519-signed envelopes, a public actor card per instance, an inbox each
 instance exposes to peers, groups, and collaborative objects. Möbius supplies
 only the bounded service process, app identity, and explicit public ingress.
-The app UI calls `/api/services/common`; peers keep using the stable
-`/api/common` protocol surface while the platform delegates those requests to
-the accepted Social service.
+The app UI calls `/api/services/common`; peers call the same accepted Social
+service through `/api/app-services/common`. There is no second Social server or
+legacy platform route.
 
 All Social data lives in this app's per-app storage
 (`conversations/<peer-host>/…`); incoming deliveries bump `state/version.json`,

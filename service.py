@@ -27,7 +27,7 @@ app.include_router(objects_router)
 async def dispatch(request: dict) -> dict:
   migrate_legacy_state()
   query = request.get("query") if isinstance(request.get("query"), dict) else {}
-  suffix = "/api/common/" + str(request.get("path") or "").lstrip("/")
+  suffix = "/" + str(request.get("path") or "").lstrip("/")
   if query:
     suffix += "?" + urlencode(query, doseq=True)
   headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}

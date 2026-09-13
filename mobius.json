@@ -1,7 +1,7 @@
 {
   "id": "common",
   "name": "Social",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Federated social for Möbius people — private messages between instances, a community board, and people search.",
   "author": "hamzamerzic",
   "license": "MIT",

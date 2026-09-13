@@ -20,16 +20,14 @@ Ed25519-signed envelopes and no third-party storage:
    owner's choice (default: their own instance).
 
 Public peer surface (no owner auth; envelope signatures are the authority):
-  GET  /api/common/actor        federation keys; joined public profile card
-  GET  /api/common/avatar       instance profile avatar
-  POST /api/common/inbox        deliver a signed DM to this instance's owner
-  GET  /api/common/directory    search users registered with this host
-  POST /api/common/directory    signed directory registration
-  GET  /api/common/board        public board feed of this host
-  GET  /api/common/board/media/{post_id}  hosted board image
-  POST /api/common/board        signed board post
-  POST /api/common/board/reply  signed reply to a hosted board post
-  GET  /api/common/board/{post_id}/replies  hosted post replies
+  GET  /api/app-services/common/actor        federation keys; joined profile card
+  GET  /api/app-services/common/avatar       instance profile avatar
+  POST /api/app-services/common/inbox        deliver a signed DM
+  GET|POST /api/app-services/common/directory  public directory
+  GET|POST /api/app-services/common/board      public board
+  GET /api/app-services/common/board/media/{post_id}  hosted board image
+  POST /api/app-services/common/board/reply    signed board reply
+  GET /api/app-services/common/board/{post_id}/replies  hosted post replies
 
 Owner surface (owner JWT or the Common app's scoped token):
   GET  /api/services/common/me           own profile (creates the keypair lazily)
@@ -69,8 +67,8 @@ from common_protocol import (
   ATTACHMENT_MIME_EXT as _ATTACHMENT_MIME_EXT,
   MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
   MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_REPLY_TEXT_CHARS,
-  OUTBOUND_TIMEOUT_S, PROTOCOL, ActorVerifier,
-  canonical as _canonical, peer_base_url as _peer_base_url,
+  OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
+  canonical as _canonical, peer_service_url as _peer_service_url,
   read_envelope as _read_envelope, sign as _sign,
   valid_host as _valid_host, valid_id as _valid_id,
   validate_attachment as _validate_attachment,
@@ -88,7 +86,7 @@ from service_runtime import (
   require_nondelegated_owner_control,
 )
 
-router = APIRouter(prefix="/api/common", tags=["common"])
+router = APIRouter(tags=["common"])
 
 APP_SLUG = "common"
 PEER_AVATAR_CACHE_TTL_S = 24 * 3600
@@ -386,7 +384,7 @@ def _key_actor_doc(identity: dict) -> dict:
     "encryption_key": {
       "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
     },
-    "inbox": "/api/common/inbox",
+    "inbox": f"{PUBLIC_SERVICE_PATH}/inbox",
   }
 
 
@@ -781,7 +779,7 @@ async def _register_with_community_host(identity: dict) -> str:
     return "registered"
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/directory", json=envelope,
+      "POST", _peer_service_url(host, "directory"), json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -918,7 +916,7 @@ async def send_message(
   detail = None
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(to_host)}/api/common/inbox", json=envelope,
+      "POST", _peer_service_url(to_host, "inbox"), json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -986,7 +984,7 @@ async def publish_post(
     return {"status": "posted", "id": envelope["id"]}
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/board", json=envelope,
+      "POST", _peer_service_url(host, "board"), json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -1026,7 +1024,7 @@ async def get_replies_for_owner(
     return _public_store.get_replies(post_id)
   try:
     response = await federation_request(
-      "GET", f"{_peer_base_url(host)}/api/common/board/{post_id}/replies",
+      "GET", _peer_service_url(host, f"board/{post_id}/replies"),
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
@@ -1067,7 +1065,7 @@ async def get_board_media_for_owner(
     return _serve_image(cached)
   try:
     mime, data = await _download_board_media(
-      f"{_peer_base_url(host)}/api/common/board/media/{post_id}"
+      _peer_service_url(host, f"board/media/{post_id}")
     )
     target = cache_dir / f"{stem}.{_ATTACHMENT_MIME_EXT[mime]}"
     atomic_write(target, data)
@@ -1098,7 +1096,7 @@ async def get_feed(
     return {"host": host, "posts": posts}
   try:
     response = await federation_request(
-      "GET", f"{_peer_base_url(host)}/api/common/board",
+      "GET", _peer_service_url(host, "board"),
       params={
         "limit": limit, "viewer": _own_host(),
         **({"before": before} if before else {}),
@@ -1151,7 +1149,7 @@ async def like_post(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/board/react", json=envelope,
+      "POST", _peer_service_url(host, "board/react"), json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -1200,7 +1198,7 @@ async def reply_to_post(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/common/board/reply", json=envelope,
+      "POST", _peer_service_url(host, "board/reply"), json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -1226,7 +1224,7 @@ async def search_people(
     return {"host": host, **_public_store.search_directory(q)}
   try:
     response = await federation_request(
-      "GET", f"{_peer_base_url(host)}/api/common/directory", params={"q": q},
+      "GET", _peer_service_url(host, "directory"), params={"q": q},
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
@@ -1278,7 +1276,7 @@ async def get_peer_avatar(
     return _serve_avatar(cache)
   try:
     avatar = await _download_avatar(
-      f"{_peer_base_url(host)}/api/common/avatar"
+      _peer_service_url(host, "avatar")
     )
     atomic_write(cache, avatar)
   except Exception:
