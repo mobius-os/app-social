@@ -260,7 +260,7 @@ class ActorVerifier:
         return cached
     try:
       response = await federation_request(
-        "GET", f"{peer_base_url(host)}/api/app-services/common/actor",
+        "GET", f"{peer_base_url(host)}/api/common/actor",
         max_response_bytes=MAX_ENVELOPE_BYTES,
         timeout_seconds=OUTBOUND_TIMEOUT_S,
       )

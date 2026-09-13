@@ -20,29 +20,29 @@ Ed25519-signed envelopes and no third-party storage:
    owner's choice (default: their own instance).
 
 Public peer surface (no owner auth; envelope signatures are the authority):
-  GET  /api/app-services/common/actor        federation keys; joined public profile card
-  GET  /api/app-services/common/avatar       instance profile avatar
-  POST /api/app-services/common/inbox        deliver a signed DM to this instance's owner
-  GET  /api/app-services/common/directory    search users registered with this host
-  POST /api/app-services/common/directory    signed directory registration
-  GET  /api/app-services/common/board        public board feed of this host
-  GET  /api/app-services/common/board/media/{post_id}  hosted board image
-  POST /api/app-services/common/board        signed board post
-  POST /api/app-services/common/board/reply  signed reply to a hosted board post
-  GET  /api/app-services/common/board/{post_id}/replies  hosted post replies
+  GET  /api/common/actor        federation keys; joined public profile card
+  GET  /api/common/avatar       instance profile avatar
+  POST /api/common/inbox        deliver a signed DM to this instance's owner
+  GET  /api/common/directory    search users registered with this host
+  POST /api/common/directory    signed directory registration
+  GET  /api/common/board        public board feed of this host
+  GET  /api/common/board/media/{post_id}  hosted board image
+  POST /api/common/board        signed board post
+  POST /api/common/board/reply  signed reply to a hosted board post
+  GET  /api/common/board/{post_id}/replies  hosted post replies
 
 Owner surface (owner JWT or the Common app's scoped token):
-  GET  /api/app-services/common/me           own profile (creates the keypair lazily)
-  PUT  /api/app-services/common/me           update profile; re-registers with community host
-  POST /api/app-services/common/send         sign + deliver a DM; store own copy
-  POST /api/app-services/common/requests/dm/{host}/{decision}  accept/decline/block request
-  POST /api/app-services/common/publish      sign + submit a board post to the community host
-  GET  /api/app-services/common/board-media/{post_id}  local/cached community board image
-  POST /api/app-services/common/reply        sign + submit a board reply to the community host
-  GET  /api/app-services/common/feed         community host's board (local read when self)
-  GET  /api/app-services/common/people       community host directory search
-  GET  /api/app-services/common/peer/{host}  a peer's actor card (profile view)
-  GET  /api/app-services/common/peer-avatar/{host}  a peer's cached profile avatar
+  GET  /api/services/common/me           own profile (creates the keypair lazily)
+  PUT  /api/services/common/me           update profile; re-registers with community host
+  POST /api/services/common/send         sign + deliver a DM; store own copy
+  POST /api/services/common/requests/dm/{host}/{decision}  accept/decline/block request
+  POST /api/services/common/publish      sign + submit a board post to the community host
+  GET  /api/services/common/board-media/{post_id}  local/cached community board image
+  POST /api/services/common/reply        sign + submit a board reply to the community host
+  GET  /api/services/common/feed         community host's board (local read when self)
+  GET  /api/services/common/people       community host directory search
+  GET  /api/services/common/peer/{host}  a peer's actor card (profile view)
+  GET  /api/services/common/peer-avatar/{host}  a peer's cached profile avatar
 
 Server-owned state lives under `<data_dir>/common/` (identity + community-host
 records). Conversation data lives in the Common mini-app's per-app storage so
@@ -84,7 +84,8 @@ from common_transport import federation_request
 from service_io import atomic_write
 from service_runtime import (
   APP, Principal, fs_locks, get_db, get_principal, get_settings,
-  identity_app_id, notify, owner_profile, require_nondelegated_owner_control,
+  identity_app_id, notify, owner_profile, public_actor_metadata,
+  require_nondelegated_owner_control,
 )
 
 router = APIRouter(prefix="/api/common", tags=["common"])
@@ -385,11 +386,11 @@ def _key_actor_doc(identity: dict) -> dict:
     "encryption_key": {
       "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
     },
-    "inbox": "/api/app-services/common/inbox",
+    "inbox": "/api/common/inbox",
   }
 
 
-def _actor_doc(identity: dict, db=None) -> dict:
+def _actor_doc(identity: dict, metadata: dict) -> dict:
   """The joined public profile card; the display name remains local."""
   host = _own_host()
   return {
@@ -399,8 +400,8 @@ def _actor_doc(identity: dict, db=None) -> dict:
     "bio": identity.get("bio") or "",
     "avatar": _avatar_path().is_file(),
     "joined_at": identity.get("joined_at") or None,
-    "member_since": None,
-    "apps": [],
+    "member_since": metadata["member_since"],
+    "apps": metadata["apps"],
   }
 
 
@@ -543,7 +544,7 @@ async def _set_dm_request_state(
 # ── public peer surface ─────────────────────────────────────────────────────
 
 @router.get("/actor")
-def get_actor(db=Depends(get_db)):
+async def get_actor(db=Depends(get_db)):
   """Publish keys for private federation, and profile data only after join."""
   # An unauthenticated probe must not lazily create an identity on an
   # untouched installation. Authenticated owner use and established
@@ -553,7 +554,7 @@ def get_actor(db=Depends(get_db)):
   identity = _load_identity()
   if not identity.get("joined_at"):
     return _key_actor_doc(identity)
-  return _actor_doc(identity, db)
+  return _actor_doc(identity, await public_actor_metadata())
 
 
 def _serve_avatar(path: Path) -> FileResponse:
@@ -780,7 +781,7 @@ async def _register_with_community_host(identity: dict) -> str:
     return "registered"
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/directory", json=envelope,
+      "POST", f"{_peer_base_url(host)}/api/common/directory", json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -917,7 +918,7 @@ async def send_message(
   detail = None
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(to_host)}/api/app-services/common/inbox", json=envelope,
+      "POST", f"{_peer_base_url(to_host)}/api/common/inbox", json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -985,7 +986,7 @@ async def publish_post(
     return {"status": "posted", "id": envelope["id"]}
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/board", json=envelope,
+      "POST", f"{_peer_base_url(host)}/api/common/board", json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -1025,7 +1026,7 @@ async def get_replies_for_owner(
     return _public_store.get_replies(post_id)
   try:
     response = await federation_request(
-      "GET", f"{_peer_base_url(host)}/api/app-services/common/board/{post_id}/replies",
+      "GET", f"{_peer_base_url(host)}/api/common/board/{post_id}/replies",
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
@@ -1066,7 +1067,7 @@ async def get_board_media_for_owner(
     return _serve_image(cached)
   try:
     mime, data = await _download_board_media(
-      f"{_peer_base_url(host)}/api/app-services/common/board/media/{post_id}"
+      f"{_peer_base_url(host)}/api/common/board/media/{post_id}"
     )
     target = cache_dir / f"{stem}.{_ATTACHMENT_MIME_EXT[mime]}"
     atomic_write(target, data)
@@ -1097,7 +1098,7 @@ async def get_feed(
     return {"host": host, "posts": posts}
   try:
     response = await federation_request(
-      "GET", f"{_peer_base_url(host)}/api/app-services/common/board",
+      "GET", f"{_peer_base_url(host)}/api/common/board",
       params={
         "limit": limit, "viewer": _own_host(),
         **({"before": before} if before else {}),
@@ -1150,7 +1151,7 @@ async def like_post(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/board/react", json=envelope,
+      "POST", f"{_peer_base_url(host)}/api/common/board/react", json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -1199,7 +1200,7 @@ async def reply_to_post(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/board/reply", json=envelope,
+      "POST", f"{_peer_base_url(host)}/api/common/board/reply", json=envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -1225,7 +1226,7 @@ async def search_people(
     return {"host": host, **_public_store.search_directory(q)}
   try:
     response = await federation_request(
-      "GET", f"{_peer_base_url(host)}/api/app-services/common/directory", params={"q": q},
+      "GET", f"{_peer_base_url(host)}/api/common/directory", params={"q": q},
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
@@ -1277,7 +1278,7 @@ async def get_peer_avatar(
     return _serve_avatar(cache)
   try:
     avatar = await _download_avatar(
-      f"{_peer_base_url(host)}/api/app-services/common/avatar"
+      f"{_peer_base_url(host)}/api/common/avatar"
     )
     atomic_write(cache, avatar)
   except Exception:

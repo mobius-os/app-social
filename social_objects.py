@@ -27,19 +27,19 @@ Design, deliberately mirroring the proven pieces of the platform:
   member; the host can revoke any member later.
 
 Peer surface (public; envelope signatures are the authority):
-  POST /api/app-services/common/objects/{oid}/peer   join / state / write / leave envelopes
+  POST /api/common/objects/{oid}/peer   join / state / write / leave envelopes
 
 Owner surface (owner JWT, or an app's scoped token for its OWN objects):
-  POST   /api/app-services/common/objects                      create a hosted object
-  GET    /api/app-services/common/objects?app=                 list hosted + joined objects
-  POST   /api/app-services/common/objects/join                 redeem an invite string
-  POST   /api/app-services/common/objects/{oid}/invites        mint an invite (host only)
-  GET    /api/app-services/common/objects/{host}/{oid}/state   read (local or proxied)
-  PUT    /api/app-services/common/objects/{host}/{oid}/state   CAS write (local or proxied)
-  GET    /api/app-services/common/objects/{oid}/members        membership view (host only)
-  DELETE /api/app-services/common/objects/{oid}/members/{mhost} revoke a member (host only)
-  POST   /api/app-services/common/objects/{host}/{oid}/leave   leave a joined object
-  DELETE /api/app-services/common/objects/{oid}                delete a hosted object
+  POST   /api/services/common/objects                       create a hosted object
+  GET    /api/services/common/objects?app=                  list hosted + joined objects
+  POST   /api/services/common/objects/join                  redeem an invite string
+  POST   /api/services/common/objects/{oid}/invites         mint an invite (host only)
+  GET    /api/services/common/objects/{host}/{oid}/state    read (local or proxied)
+  PUT    /api/services/common/objects/{host}/{oid}/state    CAS write (local or proxied)
+  GET    /api/services/common/objects/{oid}/members         membership view (host only)
+  DELETE /api/services/common/objects/{oid}/members/{mhost} revoke a member (host only)
+  POST   /api/services/common/objects/{host}/{oid}/leave    leave a joined object
+  DELETE /api/services/common/objects/{oid}                 delete a hosted object
 
 Server state lives under `<data_dir>/common/objects/`. Apps read and write
 through their own instance; the instance signs and forwards to the host when
@@ -578,7 +578,7 @@ async def _resolve_invitees(address: str) -> InviteRecipient:
   else:
     try:
       response = await federation_request(
-        "GET", f"{_peer_base_url(community)}/api/app-services/common/directory",
+        "GET", f"{_peer_base_url(community)}/api/common/directory",
         params={"q": raw}, timeout_seconds=OUTBOUND_TIMEOUT_S,
       )
       response.raise_for_status()
@@ -708,7 +708,7 @@ async def decline_invitation(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/objects/{oid}/peer",
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
       json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -858,7 +858,7 @@ async def join_object(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/objects/{oid}/peer",
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
       json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
   except Exception as exc:
@@ -963,7 +963,7 @@ async def create_invite(
         try:
           response = await federation_request(
             "POST",
-            f"{_peer_base_url(peer)}/api/app-services/common/objects/invitations/deliver",
+            f"{_peer_base_url(peer)}/api/common/objects/invitations/deliver",
             json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
             timeout_seconds=OUTBOUND_TIMEOUT_S,
           )
@@ -1104,7 +1104,7 @@ async def leave_object(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/objects/{oid}/peer",
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
       json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
@@ -1127,7 +1127,7 @@ async def _proxied_state(host: str, oid: str, since_version: int) -> dict:
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/objects/{oid}/peer",
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
       json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
   except Exception as exc:
@@ -1219,7 +1219,7 @@ async def write_state(
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/objects/{oid}/peer",
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
       json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
   except Exception as exc:
@@ -1272,7 +1272,7 @@ async def _proxied_asset(host: str, oid: str, asset_id: str, kind: str, **fields
   try:
     response = await federation_request(
       "POST",
-      f"{_peer_base_url(host)}/api/app-services/common/objects/{oid}/peer-asset/{asset_id}",
+      f"{_peer_base_url(host)}/api/common/objects/{oid}/peer-asset/{asset_id}",
       json=envelope,
       max_response_bytes=MAX_ASSET_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,

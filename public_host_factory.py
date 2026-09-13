@@ -16,6 +16,44 @@ from common_public import CommonPublicStore, create_public_router
 
 SERVICE_NAME = "mobius-social"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+WRITE_LIMIT = 120
+WRITE_WINDOW_SECONDS = 60
+WRITE_PEER_LIMIT = 4096
+
+
+class WriteRateLimiter:
+  """Bound write admission per proxy-resolved peer without unbounded keys."""
+
+  def __init__(
+    self, *, limit: int = WRITE_LIMIT,
+    window_seconds: int = WRITE_WINDOW_SECONDS,
+    peer_limit: int = WRITE_PEER_LIMIT,
+  ):
+    self.limit = limit
+    self.window_seconds = window_seconds
+    self.peer_limit = peer_limit
+    self.windows: dict[str, deque[float]] = {}
+
+  def allow(self, peer: str, now: float) -> bool:
+    cutoff = now - self.window_seconds
+    window = self.windows.get(peer)
+    if window is None:
+      if len(self.windows) >= self.peer_limit:
+        stale = [
+          key for key, values in self.windows.items()
+          if not values or values[-1] < cutoff
+        ]
+        for key in stale:
+          self.windows.pop(key, None)
+      if len(self.windows) >= self.peer_limit:
+        return False
+      window = self.windows[peer] = deque()
+    while window and window[0] < cutoff:
+      window.popleft()
+    if len(window) >= self.limit:
+      return False
+    window.append(now)
+    return True
 
 
 def _baked_source_sha() -> str:
@@ -32,7 +70,7 @@ def create_app(data_dir: str | Path, *, source_sha: str) -> FastAPI:
     raise RuntimeError("Public Social host needs an absolute data path and source SHA")
   store = CommonPublicStore(configured)
   verifier = ActorVerifier(configured)
-  windows: dict[str, deque[float]] = {}
+  write_limiter = WriteRateLimiter()
 
   @asynccontextmanager
   async def lifespan(application: FastAPI):
@@ -59,17 +97,8 @@ def create_app(data_dir: str | Path, *, source_sha: str) -> FastAPI:
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
       peer = request.client.host if request.client else "unknown"
       now = time.monotonic()
-      if len(windows) > 4096:
-        cutoff = now - 60
-        for key, values in list(windows.items()):
-          if not values or values[-1] < cutoff:
-            windows.pop(key, None)
-      window = windows.setdefault(peer, deque())
-      while window and window[0] < now - 60:
-        window.popleft()
-      if len(window) >= 120:
+      if not write_limiter.allow(peer, now):
         return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
-      window.append(now)
     return await call_next(request)
 
   @application.get("/healthz")
@@ -83,7 +112,7 @@ def create_app(data_dir: str | Path, *, source_sha: str) -> FastAPI:
     return {"service": SERVICE_NAME, "source_sha": source_sha}
 
   current, _ = create_public_router(
-    store, verifier, prefix="/api/app-services/common",
+    store, verifier, prefix="/api/common",
   )
   application.include_router(current)
   return application

@@ -3,7 +3,7 @@
 A group lives on its creator's instance, the **group host**. The host owns the
 authoritative membership record; members keep their own copy of every message,
 exactly like 1:1 conversations. Six signed envelope types extend the
-protocol, all delivered to `/api/app-services/common/groups/inbox`:
+protocol, all delivered to `/api/common/groups/inbox`:
 
 - `group_added`  host → invitee   invitation; carries group metadata
 - `group_accept` invitee → host   owner explicitly joins the group
@@ -18,12 +18,12 @@ the host controls membership and fan-out without being able to forge another
 member's authorship. Nothing about a group ever touches a third instance.
 
 Owner surface (owner JWT or the Common app's scoped token):
-  POST /api/app-services/common/groups                     create a group + invite members
-  POST /api/app-services/common/groups/{gid}/send          send a message to the group
-  POST /api/app-services/common/groups/{gid}/accept        accept + join a remote group
-  POST /api/app-services/common/groups/{gid}/decline       decline a remote invitation
-  POST /api/app-services/common/groups/{gid}/members       add a member (host only)
-  DELETE /api/app-services/common/groups/{gid}             close a group (host only)
+  POST /api/services/common/groups                     create a group + invite members
+  POST /api/services/common/groups/{gid}/send          send a message to the group
+  POST /api/services/common/groups/{gid}/accept        accept + join a remote group
+  POST /api/services/common/groups/{gid}/decline       decline a remote invitation
+  POST /api/services/common/groups/{gid}/members       add a member (host only)
+  DELETE /api/services/common/groups/{gid}             close a group (host only)
 
 Host-side authoritative records live in `<data_dir>/common/groups/`; each
 instance's own copy of group conversations lives in the Common app's per-app
@@ -218,7 +218,7 @@ def _members_snapshot(group: dict) -> list[dict]:
 async def _deliver(host: str, envelope: dict) -> bool:
   try:
     response = await federation_request(
-      "POST", f"{_peer_base_url(host)}/api/app-services/common/groups/inbox",
+      "POST", f"{_peer_base_url(host)}/api/common/groups/inbox",
       json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )

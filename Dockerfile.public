@@ -27,4 +27,7 @@ RUN printf '%s\n' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$' \
 
 USER 1000:1000
 EXPOSE 8080
-CMD ["uvicorn", "public_host:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+# This container is reachable only through the operator-owned edge network.
+# Uvicorn can therefore resolve Caddy's sanitized forwarding header to the
+# actual peer used by the bounded write limiter.
+CMD ["uvicorn", "public_host:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips=*"]

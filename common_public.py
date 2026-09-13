@@ -61,11 +61,6 @@ REACTION_REPLAY_TTL_S = 2 * CLOCK_SKEW_S
 REACTION_REPLAY_LIMIT = 2048
 
 
-def _request_peer(request: Request) -> str:
-  """Use the real TCP peer, never a caller-spoofable forwarding header."""
-  return request.client.host if request.client else "unknown"
-
-
 class CommonPublicStore:
   """The canonical Common public-store implementation."""
 

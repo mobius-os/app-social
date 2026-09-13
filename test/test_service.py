@@ -4,15 +4,17 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from common_protocol import canonical
-from public_host_factory import create_app
+from public_host_factory import WriteRateLimiter, create_app
 
 
 ROOT = Path(__file__).parents[1]
@@ -41,7 +43,10 @@ def signed(key, body):
 
 
 class SocialServiceTests(unittest.TestCase):
-  def call(self, root, path, *, method="GET", body=None, actor=None, query=None):
+  def call(
+    self, root, path, *, method="GET", body=None, actor=None, query=None,
+    api_base_url="http://127.0.0.1:9",
+  ):
     storage = root / "apps" / "7"
     storage.mkdir(parents=True, exist_ok=True)
     request = {
@@ -59,7 +64,8 @@ class SocialServiceTests(unittest.TestCase):
       "APP_STORAGE_DIR": str(storage),
       "APP_ID": "7",
       "APP_SLUG": "common",
-      "API_BASE_URL": "http://127.0.0.1:9",
+      "APP_TOKEN": "test-app-token",
+      "API_BASE_URL": api_base_url,
       "INSTANCE_DOMAIN": "self.example",
       "INSTANCE_ORIGIN": "https://self.example",
     }
@@ -128,16 +134,104 @@ class SocialServiceTests(unittest.TestCase):
       self.assertEqual(len(listed["body"]["hosted"]), 1)
       self.assertEqual(listed["body"]["joined"], [])
 
-  def test_public_host_serves_current_and_dated_legacy_paths(self):
+  def test_public_host_keeps_the_stable_common_protocol_path(self):
     with tempfile.TemporaryDirectory() as directory:
       application = create_app(directory, source_sha="f" * 40)
       with TestClient(application) as client:
         self.assertEqual(client.get("/healthz").json(), {"status": "ok"})
         self.assertEqual(
-          client.get("/api/app-services/common/directory").json(), {"users": []},
+          client.get("/api/common/directory").json(), {"users": []},
         )
-        self.assertEqual(client.get("/api/common/directory").status_code, 404)
         self.assertEqual(client.get("/docs").status_code, 404)
+
+  def test_public_host_rate_accounting_has_a_hard_peer_bound(self):
+    limiter = WriteRateLimiter(limit=2, window_seconds=60, peer_limit=2)
+    self.assertTrue(limiter.allow("one", 1))
+    self.assertTrue(limiter.allow("two", 1))
+    self.assertFalse(limiter.allow("three", 1))
+    self.assertEqual(set(limiter.windows), {"one", "two"})
+    self.assertTrue(limiter.allow("three", 62))
+    self.assertEqual(set(limiter.windows), {"three"})
+
+  def test_public_actor_uses_platform_owned_member_and_app_metadata(self):
+    identity_payload = {
+      "member_since": "2025-04-03",
+      "profile": {"handle": "owner"},
+    }
+    apps_payload = [
+      {
+        "id": 8, "name": "Private", "description": "not published",
+        "distribution_manifest": None,
+      },
+      {
+        "id": 2, "name": "Shared", "description": "public app",
+        "distribution_manifest": {"kind": "published"},
+      },
+    ]
+    seen_paths = []
+
+    class Handler(BaseHTTPRequestHandler):
+      def do_GET(self):
+        seen_paths.append(self.path)
+        if self.headers.get("Authorization") != "Bearer test-app-token":
+          self.send_error(401)
+          return
+        if self.path == "/api/identity":
+          payload = identity_payload
+        elif self.path == "/api/apps/":
+          payload = apps_payload
+        else:
+          self.send_error(404)
+          return
+        encoded = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+      def log_message(self, _format, *_args):
+        pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        service_root = root / "apps/7/server/common"
+        service_root.mkdir(parents=True)
+        _key, public = keypair()
+        (service_root / "identity.json").write_text(json.dumps({
+          "private_key_b64": base64.b64encode(b"p" * 32).decode(),
+          "public_key_b64": public,
+          "enc_private_key_b64": base64.b64encode(b"e" * 32).decode(),
+          "enc_public_key_b64": base64.b64encode(b"x" * 32).decode(),
+          "handle": "owner", "bio": "Hello", "joined_at": 1,
+        }))
+        actor = self.call(
+          root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",
+        )["body"]
+        self.assertEqual(actor["inbox"], "/api/common/inbox")
+        self.assertEqual(actor["member_since"], identity_payload["member_since"])
+        self.assertEqual(actor["apps"], [{"name": "Shared", "description": "public app"}])
+        self.assertEqual(set(seen_paths), {"/api/identity", "/api/apps/"})
+    finally:
+      server.shutdown()
+      thread.join()
+      server.server_close()
+
+  def test_public_container_trusts_forwarding_only_at_its_edge_boundary(self):
+    command = (ROOT / "Dockerfile.public").read_text()
+    self.assertIn('"--proxy-headers", "--forwarded-allow-ips=*"', command)
+
+  def test_federation_source_keeps_outbound_calls_on_the_stable_protocol_path(self):
+    replaced_path = "/api/" + "app-services/common"
+    for name in (
+      "common_protocol.py", "social_routes.py", "social_groups.py",
+      "social_objects.py",
+    ):
+      self.assertNotIn(replaced_path, (ROOT / name).read_text(), name)
 
 
 if __name__ == "__main__":
