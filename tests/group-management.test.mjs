@@ -13,7 +13,7 @@ test('inviting into an existing group uses its exact id and chosen deployment', 
   setToken('scoped-test')
   const receipt = { status: 'added', members: [{ host: 'friend.example' }], delivered: { 'friend.example': true } }
   globalThis.fetch = async (url, options) => {
-    assert.equal(url, '/api/common/groups/group-id/members')
+    assert.equal(url, '/api/services/common/groups/group-id/members')
     assert.equal(options.method, 'POST')
     assert.equal(options.headers.Authorization, 'Bearer scoped-test')
     assert.deepEqual(JSON.parse(options.body), { host: 'friend.example' })
@@ -26,7 +26,7 @@ test('deleting uses the group authority, never a local storage wipe', async () =
   globalThis.window = { mobius: { storage: { remove() { assert.fail('deletion must be owned by the group host') } } } }
   const receipt = { status: 'deleted', delivered: { 'offline.example': false } }
   globalThis.fetch = async (url, options) => {
-    assert.equal(url, '/api/common/groups/group-id')
+    assert.equal(url, '/api/services/common/groups/group-id')
     assert.equal(options.method, 'DELETE')
     return Response.json(receipt)
   }
@@ -41,9 +41,9 @@ test('a failed delete remains a failure rather than claiming the group disappear
 test('message-request decisions use server-owned authenticated actions', async () => {
   setToken('scoped-test')
   const expected = [
-    ['/api/common/requests/dm/peer.example/accept', { status: 'accepted' }],
-    ['/api/common/requests/dm/peer.example/decline', { status: 'declined' }],
-    ['/api/common/requests/dm/peer.example/block', { status: 'blocked' }],
+    ['/api/services/common/requests/dm/peer.example/accept', { status: 'accepted' }],
+    ['/api/services/common/requests/dm/peer.example/decline', { status: 'declined' }],
+    ['/api/services/common/requests/dm/peer.example/block', { status: 'blocked' }],
   ]
   globalThis.fetch = async (url, options) => {
     const [nextUrl, receipt] = expected.shift()
@@ -61,8 +61,8 @@ test('message-request decisions use server-owned authenticated actions', async (
 test('group invitations are accepted or declined through group authority', async () => {
   setToken('scoped-test')
   const expected = [
-    ['/api/common/groups/group-id/accept', { status: 'accepted' }],
-    ['/api/common/groups/group-id/decline', { status: 'declined', host_notified: false }],
+    ['/api/services/common/groups/group-id/accept', { status: 'accepted' }],
+    ['/api/services/common/groups/group-id/decline', { status: 'declined', host_notified: false }],
   ]
   globalThis.fetch = async (url, options) => {
     const [nextUrl, receipt] = expected.shift()

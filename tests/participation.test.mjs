@@ -106,7 +106,7 @@ test('public board and directory render independently from global-directory memb
 test('board replies use the owner route that signs and forwards remote replies', async () => {
   setToken('social-app-token')
   globalThis.fetch = async (url, options) => {
-    assert.equal(url, '/api/common/reply')
+    assert.equal(url, '/api/services/common/reply')
     assert.equal(options.method, 'POST')
     assert.equal(options.headers.Authorization, 'Bearer social-app-token')
     assert.deepEqual(JSON.parse(options.body), { post_id: '12345678', text: 'Hello' })
