@@ -1,4 +1,4 @@
-"""Common federation — the Möbius-to-Möbius social layer (protocol v0).
+"""Social federation — the Möbius-to-Möbius social layer (protocol v0).
 
 Every Möbius instance is one user's server. This router gives an instance
 three federated capabilities, all instance-to-instance over HTTPS with
@@ -20,30 +20,30 @@ Ed25519-signed envelopes and no third-party storage:
    owner's choice (default: their own instance).
 
 Public peer surface (no owner auth; envelope signatures are the authority):
-  GET  /api/app-services/common/actor        federation keys; joined profile card
-  GET  /api/app-services/common/avatar       instance profile avatar
-  POST /api/app-services/common/inbox        deliver a signed DM
-  GET|POST /api/app-services/common/directory  public directory
-  GET|POST /api/app-services/common/board      public board
-  GET /api/app-services/common/board/media/{post_id}  hosted board image
-  POST /api/app-services/common/board/reply    signed board reply
-  GET /api/app-services/common/board/{post_id}/replies  hosted post replies
+  GET  /api/app-services/social/actor        federation keys; joined profile card
+  GET  /api/app-services/social/avatar       instance profile avatar
+  POST /api/app-services/social/inbox        deliver a signed DM
+  GET|POST /api/app-services/social/directory  public directory
+  GET|POST /api/app-services/social/board      public board
+  GET /api/app-services/social/board/media/{post_id}  hosted board image
+  POST /api/app-services/social/board/reply    signed board reply
+  GET /api/app-services/social/board/{post_id}/replies  hosted post replies
 
-Owner surface (owner JWT or the Common app's scoped token):
-  GET  /api/services/common/me           own profile (creates the keypair lazily)
-  PUT  /api/services/common/me           update profile; re-registers with community host
-  POST /api/services/common/send         sign + deliver a DM; store own copy
-  POST /api/services/common/requests/dm/{host}/{decision}  accept/decline/block request
-  POST /api/services/common/publish      sign + submit a board post to the community host
-  GET  /api/services/common/board-media/{post_id}  local/cached community board image
-  POST /api/services/common/reply        sign + submit a board reply to the community host
-  GET  /api/services/common/feed         community host's board (local read when self)
-  GET  /api/services/common/people       community host directory search
-  GET  /api/services/common/peer/{host}  a peer's actor card (profile view)
-  GET  /api/services/common/peer-avatar/{host}  a peer's cached profile avatar
+Owner surface (owner JWT or the Social app's scoped token):
+  GET  /api/services/social/me           own profile (creates the keypair lazily)
+  PUT  /api/services/social/me           update profile; re-registers with community host
+  POST /api/services/social/send         sign + deliver a DM; store own copy
+  POST /api/services/social/requests/dm/{host}/{decision}  accept/decline/block request
+  POST /api/services/social/publish      sign + submit a board post to the community host
+  GET  /api/services/social/board-media/{post_id}  local/cached community board image
+  POST /api/services/social/reply        sign + submit a board reply to the community host
+  GET  /api/services/social/feed         community host's board (local read when self)
+  GET  /api/services/social/people       community host directory search
+  GET  /api/services/social/peer/{host}  a peer's actor card (profile view)
+  GET  /api/services/social/peer-avatar/{host}  a peer's cached profile avatar
 
 Server-owned state lives under `<data_dir>/common/` (identity + community-host
-records). Conversation data lives in the Common mini-app's per-app storage so
+records). Conversation data lives in the Social app's per-app storage so
 the app UI reads it through `window.mobius.storage`.
 """
 
@@ -88,7 +88,7 @@ from service_runtime import (
 
 router = APIRouter(tags=["common"])
 
-APP_SLUG = "common"
+APP_SLUG = "social"
 PEER_AVATAR_CACHE_TTL_S = 24 * 3600
 BOARD_MEDIA_CACHE_TTL_S = 24 * 3600
 REQUEST_STATES = {"pending", "accepted", "declined", "blocked"}
@@ -405,7 +405,7 @@ def _actor_doc(identity: dict, metadata: dict) -> dict:
 
 # ── peer actor cache ────────────────────────────────────────────────────────
 
-# ── conversation storage (in the Common app's per-app storage) ──────────────
+# ── conversation storage (in the Social app's per-app storage) ──────────────
 
 def _common_app(db=None):
   return APP
@@ -638,7 +638,7 @@ router.include_router(_public_router)
 # ── owner surface ───────────────────────────────────────────────────────────
 
 def _require_owner_or_common_app(db, principal: Principal):
-  """The owner, or the Common app's own scoped token, may act."""
+  """The owner, or the Social app's own scoped token, may act."""
   app = _common_app(db)
   if principal.scope == "public":
     raise HTTPException(status_code=401, detail="Authentication required.")

@@ -7,7 +7,7 @@ let bearer = null
 export function setToken(token) { bearer = token }
 
 async function call(path, options = {}, responseType = 'json') {
-  const response = await fetch(`/api/services/common/${path}`, {
+  const response = await fetch(`/api/services/social/${path}`, {
     ...options,
     headers: {
       Authorization: `Bearer ${bearer}`,

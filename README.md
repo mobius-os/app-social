@@ -37,8 +37,8 @@ Social owns its server side as a reviewed app service (protocol `common/0`):
 Ed25519-signed envelopes, a public actor card per instance, an inbox each
 instance exposes to peers, groups, and collaborative objects. Möbius supplies
 only the bounded service process, app identity, and explicit public ingress.
-The app UI calls `/api/services/common`; peers call the same accepted Social
-service through `/api/app-services/common`. There is no second Social server or
+The app UI calls `/api/services/social`; peers call the same accepted Social
+service through `/api/app-services/social`. There is no second Social server or
 legacy platform route.
 
 All Social data lives in this app's per-app storage
@@ -48,7 +48,7 @@ which the open app watches to refresh live.
 ### Integration boundary for public browsing
 
 This release requires the companion backend read-host contract. Feed, people,
-board media and `/api/services/common/replies/{post_id}` accept `community_host` for
+board media and `/api/services/social/replies/{post_id}` accept `community_host` for
 app-authenticated public reads. The app selects the one global host for every
 read without changing saved membership or registering the owner. Remote replies
 are fetched through the same DNS-pinned transport as other federation reads.
