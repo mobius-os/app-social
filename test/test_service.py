@@ -60,7 +60,7 @@ class SocialServiceTests(unittest.TestCase):
       **os.environ,
       "APP_STORAGE_DIR": str(storage),
       "APP_ID": "7",
-      "APP_SLUG": "common",
+      "APP_SLUG": "social",
       "APP_TOKEN": "test-app-token",
       "API_BASE_URL": api_base_url,
       "INSTANCE_DOMAIN": "self.example",
@@ -132,10 +132,10 @@ class SocialServiceTests(unittest.TestCase):
       self.assertEqual(listed["body"]["joined"], [])
 
   def test_peer_urls_use_the_public_app_service(self):
-    self.assertEqual(PUBLIC_SERVICE_PATH, "/api/app-services/common")
+    self.assertEqual(PUBLIC_SERVICE_PATH, "/api/app-services/social")
     self.assertEqual(
       peer_service_url("peer.example", "/groups/inbox"),
-      "https://peer.example/api/app-services/common/groups/inbox",
+      "https://peer.example/api/app-services/social/groups/inbox",
     )
 
   def test_public_actor_uses_platform_owned_member_and_app_metadata(self):
@@ -197,7 +197,7 @@ class SocialServiceTests(unittest.TestCase):
         actor = self.call(
           root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",
         )["body"]
-        self.assertEqual(actor["inbox"], "/api/app-services/common/inbox")
+        self.assertEqual(actor["inbox"], "/api/app-services/social/inbox")
         self.assertEqual(actor["member_since"], identity_payload["member_since"])
         self.assertEqual(actor["apps"], [{"name": "Shared", "description": "public app"}])
         self.assertEqual(set(seen_paths), {"/api/identity", "/api/apps/"})

@@ -3,7 +3,7 @@
 A *shared object* is one JSON document owned by an app (a kanban board, a
 shared list, a group-chat roster) that lives on the instance of whoever
 created it and is edited together by invited peers. This generalizes the
-Common federation layer from messages to collaborative state, so ANY app can
+Social federation layer from messages to collaborative state, so ANY app can
 be collaborative by pointing at this one surface — no app ships its own sync
 backend.
 
@@ -27,19 +27,19 @@ Design, deliberately mirroring the proven pieces of the platform:
   member; the host can revoke any member later.
 
 Peer surface (public; envelope signatures are the authority):
-  POST /api/app-services/common/objects/{oid}/peer  join / state / write / leave
+  POST /api/app-services/social/objects/{oid}/peer  join / state / write / leave
 
 Owner surface (owner JWT, or an app's scoped token for its OWN objects):
-  POST   /api/services/common/objects                       create a hosted object
-  GET    /api/services/common/objects?app=                  list hosted + joined objects
-  POST   /api/services/common/objects/join                  redeem an invite string
-  POST   /api/services/common/objects/{oid}/invites         mint an invite (host only)
-  GET    /api/services/common/objects/{host}/{oid}/state    read (local or proxied)
-  PUT    /api/services/common/objects/{host}/{oid}/state    CAS write (local or proxied)
-  GET    /api/services/common/objects/{oid}/members         membership view (host only)
-  DELETE /api/services/common/objects/{oid}/members/{mhost} revoke a member (host only)
-  POST   /api/services/common/objects/{host}/{oid}/leave    leave a joined object
-  DELETE /api/services/common/objects/{oid}                 delete a hosted object
+  POST   /api/services/social/objects                       create a hosted object
+  GET    /api/services/social/objects?app=                  list hosted + joined objects
+  POST   /api/services/social/objects/join                  redeem an invite string
+  POST   /api/services/social/objects/{oid}/invites         mint an invite (host only)
+  GET    /api/services/social/objects/{host}/{oid}/state    read (local or proxied)
+  PUT    /api/services/social/objects/{host}/{oid}/state    CAS write (local or proxied)
+  GET    /api/services/social/objects/{oid}/members         membership view (host only)
+  DELETE /api/services/social/objects/{oid}/members/{mhost} revoke a member (host only)
+  POST   /api/services/social/objects/{host}/{oid}/leave    leave a joined object
+  DELETE /api/services/social/objects/{oid}                 delete a hosted object
 
 Server state lives under `<data_dir>/common/objects/`. Apps read and write
 through their own instance; the instance signs and forwards to the host when

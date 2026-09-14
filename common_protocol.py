@@ -1,7 +1,7 @@
 """Canonical ``common/0`` wire validation and peer-key verification.
 
 This module is deliberately independent of the owner database and identity
-keys.  The personal Common router and the public social host both use these
+keys.  The personal Social router and the public social host both use these
 exact canonical bytes and validation rules, so separating the public service
 does not create a second federation implementation.
 """
@@ -24,7 +24,7 @@ from common_transport import federation_request
 from service_io import atomic_write, read_capped_body
 
 PROTOCOL = "common/0"
-PUBLIC_SERVICE_PATH = "/api/app-services/common"
+PUBLIC_SERVICE_PATH = "/api/app-services/social"
 MAX_TEXT_CHARS = 4000
 MAX_REPLY_TEXT_CHARS = 1000
 MAX_NAME_CHARS = 80
