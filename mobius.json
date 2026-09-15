@@ -1,5 +1,6 @@
 {
   "id": "social",
+  "package_id": "urn:uuid:33fae9ec-b2fb-4351-8a4e-85bcc362b546",
   "previous_id": "common",
   "name": "Social",
   "version": "0.3.0",
@@ -14,6 +15,7 @@
     "identity_manage": true
   },
   "service": {
+    "id": "social",
     "entry": "service.py",
     "access": "public"
   },
