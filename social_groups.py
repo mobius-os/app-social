@@ -47,7 +47,7 @@ from pydantic import BaseModel
 from common_protocol import (
   MAX_ENVELOPE_BYTES,
   MAX_NAME_CHARS,
-  OUTBOUND_TIMEOUT_S,
+  post_signed_envelope as _post_signed_envelope,
   peer_service_url as _peer_service_url,
   read_envelope as _read_envelope,
   sign as _sign,
@@ -56,7 +56,6 @@ from common_protocol import (
   validate_reply_to as _validate_reply_to,
   validate_text_or_attachment as _validate_text_or_attachment,
 )
-from common_transport import federation_request
 from service_runtime import (
   Principal, fs_locks, get_db, get_principal, notify,
   require_nondelegated_owner_control,
@@ -217,10 +216,9 @@ def _members_snapshot(group: dict) -> list[dict]:
 
 async def _deliver(host: str, envelope: dict) -> bool:
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, "groups/inbox"),
-      json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, "groups/inbox"), envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
     )
     response.raise_for_status()
     return True

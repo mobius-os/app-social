@@ -69,6 +69,7 @@ from common_protocol import (
   MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_REPLY_TEXT_CHARS,
   OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
   canonical as _canonical, peer_service_url as _peer_service_url,
+  post_signed_envelope as _post_signed_envelope,
   read_envelope as _read_envelope, sign as _sign,
   valid_host as _valid_host, valid_id as _valid_id,
   validate_attachment as _validate_attachment,
@@ -810,15 +811,25 @@ async def _register_with_community_host(identity: dict) -> str:
     )
     return "registered"
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, "directory"), json=envelope,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, "directory"), envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
     return "registered"
+  except httpx.HTTPStatusError as exc:
+    return "verification_failed" if exc.response.status_code == 403 else "rejected"
   except Exception:
     return "unreachable"
+
+
+def _community_write_error(exc: Exception, action: str) -> str:
+  """Describe a reached host separately from a transport failure."""
+  if isinstance(exc, httpx.HTTPStatusError):
+    if exc.response.status_code == 403:
+      return "The community host could not verify this Social identity. Try again."
+    return f"The community host rejected the {action}. Try again."
+  return "The community host could not be reached. Try again."
 
 
 @router.put("/me")
@@ -947,10 +958,9 @@ async def send_message(
   status = "delivered"
   detail = None
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(to_host, "inbox"), json=envelope,
+    response = await _post_signed_envelope(
+      _peer_service_url(to_host, "inbox"), envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
   except httpx.HTTPStatusError as exc:
@@ -1015,16 +1025,15 @@ async def publish_post(
     _store_board_post(board_post, attachment)
     return {"status": "posted", "id": envelope["id"]}
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, "board"), json=envelope,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, "board"), envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
     return {"status": "posted", "id": envelope["id"]}
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail="Community host could not be reached."
+      status_code=502, detail=_community_write_error(exc, "post")
     ) from exc
 
 
@@ -1180,16 +1189,15 @@ async def like_post(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, "board/react"), json=envelope,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, "board/react"), envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
     return response.json()
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail="Community host could not be reached."
+      status_code=502, detail=_community_write_error(exc, "reaction")
     ) from exc
 
 
@@ -1229,16 +1237,15 @@ async def reply_to_post(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, "board/reply"), json=envelope,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, "board/reply"), envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
     return response.json()
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail="Community host could not be reached."
+      status_code=502, detail=_community_write_error(exc, "reply")
     ) from exc
 
 

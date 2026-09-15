@@ -39,9 +39,12 @@ test('joining automatically sets the canonical community destination', async () 
 })
 
 test('a failed registration stays a retryable failure, never success', async () => {
-  await assert.rejects(joinGlobalCommunity({ ...fresh, joined: true }, async () => ({ directory: 'unreachable' }), () => assert.fail()), /Try joining again/)
-  const profile = { ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }
-  assert.equal((await joinGlobalCommunity(profile, () => assert.fail(), async () => ({ directory: 'registered' }))).directory, 'registered')
+  const profile = { ...fresh, joined: true }
+  await assert.rejects(joinGlobalCommunity(profile, async () => ({ directory: 'unreachable' }), () => assert.fail()), /could not be reached/)
+  await assert.rejects(joinGlobalCommunity(profile, async () => ({ directory: 'verification_failed' }), () => assert.fail()), /could not verify/)
+  await assert.rejects(joinGlobalCommunity(profile, async () => ({ directory: 'rejected' }), () => assert.fail()), /rejected this profile/)
+  const registered = { ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }
+  assert.equal((await joinGlobalCommunity(registered, () => assert.fail(), async () => ({ directory: 'registered' }))).directory, 'registered')
 })
 
 test('a failed destination write prevents joining', async () => {
