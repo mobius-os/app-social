@@ -3,7 +3,7 @@
   "package_id": "urn:uuid:33fae9ec-b2fb-4351-8a4e-85bcc362b546",
   "previous_id": "common",
   "name": "Social",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Federated social for Möbius people — private messages between instances, a community board, and people search.",
   "author": "hamzamerzic",
   "license": "MIT",
@@ -17,7 +17,10 @@
   "service": {
     "id": "social",
     "entry": "service.py",
-    "access": "public"
+    "access": "public",
+    "aliases": [
+      "common"
+    ]
   },
   "source_files": [
     "api.js",
