@@ -38,7 +38,12 @@ MAX_REPLY_EXCERPT_CHARS = 140
 MAX_AVATAR_BYTES = 512 * 1024
 ACTOR_CACHE_TTL_S = 3600
 ACTOR_CACHE_LIMIT = 4096
+# A signed delivery can make the receiver fetch the sender's actor card before
+# it answers. Keep that nested budget shorter than the delivery budget so a
+# cold cache cannot make both requests expire at the same instant.
+ACTOR_FETCH_TIMEOUT_S = 10.0
 OUTBOUND_TIMEOUT_S = 10.0
+SIGNED_WRITE_TIMEOUT_S = 20.0
 
 CLOCK_SKEW_S = 600
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,250})(:\d{1,5})?$")
@@ -71,6 +76,16 @@ def peer_service_url(host: str, path: str = "") -> str:
   suffix = path.lstrip("/")
   return f"{peer_base_url(host)}{PUBLIC_SERVICE_PATH}" + (
     f"/{suffix}" if suffix else ""
+  )
+
+
+async def post_signed_envelope(
+  url: str, envelope: dict, *, max_response_bytes: int = MAX_ENVELOPE_BYTES,
+):
+  """Send a signed write with room for the receiver's actor-card callback."""
+  return await federation_request(
+    "POST", url, json=envelope, max_response_bytes=max_response_bytes,
+    timeout_seconds=SIGNED_WRITE_TIMEOUT_S,
   )
 
 
@@ -271,7 +286,7 @@ class ActorVerifier:
       response = await federation_request(
         "GET", peer_service_url(host, "actor"),
         max_response_bytes=MAX_ENVELOPE_BYTES,
-        timeout_seconds=OUTBOUND_TIMEOUT_S,
+        timeout_seconds=ACTOR_FETCH_TIMEOUT_S,
       )
       response.raise_for_status()
       actor = response.json()
@@ -322,12 +337,15 @@ class ActorVerifier:
 
 
 __all__ = [
-  "ACTOR_CACHE_LIMIT", "ACTOR_CACHE_TTL_S", "ATTACHMENT_MIME_EXT", "ActorVerifier",
+  "ACTOR_CACHE_LIMIT", "ACTOR_CACHE_TTL_S", "ACTOR_FETCH_TIMEOUT_S",
+  "ATTACHMENT_MIME_EXT", "ActorVerifier",
   "CLOCK_SKEW_S", "MAX_ATTACHMENT_BYTES", "MAX_ATTACHMENT_DIMENSION",
   "MAX_ATTACHMENT_ENVELOPE_BYTES", "MAX_AVATAR_BYTES", "MAX_BIO_CHARS",
   "MAX_ENVELOPE_BYTES", "MAX_NAME_CHARS", "MAX_REPLY_TEXT_CHARS",
-  "MAX_TEXT_CHARS", "OUTBOUND_TIMEOUT_S", "PROTOCOL", "PUBLIC_SERVICE_PATH",
-  "canonical", "peer_base_url", "peer_service_url", "read_envelope", "sign",
+  "MAX_TEXT_CHARS", "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
+  "PROTOCOL", "PUBLIC_SERVICE_PATH",
+  "canonical", "peer_base_url", "peer_service_url", "post_signed_envelope",
+  "read_envelope", "sign",
   "valid_host", "valid_id",
   "validate_attachment", "validate_reply_to", "validate_text_or_attachment",
   "verify",

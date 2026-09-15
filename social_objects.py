@@ -69,6 +69,7 @@ from pydantic import BaseModel
 from common_protocol import (
   CLOCK_SKEW_S,
   OUTBOUND_TIMEOUT_S,
+  post_signed_envelope as _post_signed_envelope,
   peer_service_url as _peer_service_url,
   sign as _sign,
   valid_host as _valid_host,
@@ -707,10 +708,9 @@ async def decline_invitation(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    await federation_request(
-      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
-      json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    await _post_signed_envelope(
+      _peer_service_url(host, f"objects/{oid}/peer"), envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
     )
   except Exception:
     pass  # the host prunes the pending member on next contact
@@ -857,9 +857,8 @@ async def join_object(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
-      json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, f"objects/{oid}/peer"), envelope,
     )
   except Exception as exc:
     raise HTTPException(
@@ -961,11 +960,9 @@ async def create_invite(
         }
         envelope["sig"] = _sign(envelope, identity["private_key_b64"])
         try:
-          response = await federation_request(
-            "POST",
-            _peer_service_url(peer, "objects/invitations/deliver"),
-            json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
-            timeout_seconds=OUTBOUND_TIMEOUT_S,
+          response = await _post_signed_envelope(
+            _peer_service_url(peer, "objects/invitations/deliver"), envelope,
+            max_response_bytes=MAX_ENVELOPE_BYTES,
           )
           response.raise_for_status()
         except Exception:
@@ -1103,10 +1100,9 @@ async def leave_object(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    await federation_request(
-      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
-      json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    await _post_signed_envelope(
+      _peer_service_url(host, f"objects/{oid}/peer"), envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
     )
   except Exception:
     pass  # local leave still succeeds; the host prunes on next contact
@@ -1126,9 +1122,8 @@ async def _proxied_state(host: str, oid: str, since_version: int) -> dict:
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
-      json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, f"objects/{oid}/peer"), envelope,
     )
   except Exception as exc:
     raise HTTPException(
@@ -1218,9 +1213,8 @@ async def write_state(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, f"objects/{oid}/peer"),
-      json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, f"objects/{oid}/peer"), envelope,
     )
   except Exception as exc:
     raise HTTPException(
@@ -1270,12 +1264,9 @@ async def _proxied_asset(host: str, oid: str, asset_id: str, kind: str, **fields
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    response = await federation_request(
-      "POST",
-      _peer_service_url(host, f"objects/{oid}/peer-asset/{asset_id}"),
-      json=envelope,
+    response = await _post_signed_envelope(
+      _peer_service_url(host, f"objects/{oid}/peer-asset/{asset_id}"), envelope,
       max_response_bytes=MAX_ASSET_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
   except Exception as exc:
     raise HTTPException(

@@ -1,14 +1,18 @@
 """Security contracts for Social's app-owned federation transport."""
 
+import base64
 import gzip
 import socket
+import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from fastapi import HTTPException
 
+import common_protocol
 import common_transport
+from common_protocol import ACTOR_FETCH_TIMEOUT_S, SIGNED_WRITE_TIMEOUT_S
 
 
 REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -36,6 +40,53 @@ def client_factory(handler, options):
 
 
 class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
+  async def test_actor_fetch_uses_the_shorter_verification_budget(self):
+    actor = {
+      "protocol": "common/0",
+      "host": "peer.example",
+      "handle": "peer",
+      "bio": "",
+      "public_key": {
+        "alg": "ed25519",
+        "key_b64": base64.b64encode(b"k" * 32).decode("ascii"),
+      },
+    }
+    request_url = "https://peer.example/api/app-services/social/actor"
+    response = httpx.Response(
+      200, json=actor, request=httpx.Request("GET", request_url),
+    )
+    with tempfile.TemporaryDirectory() as data_dir:
+      verifier = common_protocol.ActorVerifier(data_dir)
+      with patch.object(
+        common_protocol, "federation_request",
+        new=AsyncMock(return_value=response),
+      ) as request:
+        result = await verifier.fetch_actor("peer.example")
+    self.assertEqual(result, actor)
+    request.assert_awaited_once_with(
+      "GET", request_url,
+      max_response_bytes=common_protocol.MAX_ENVELOPE_BYTES,
+      timeout_seconds=ACTOR_FETCH_TIMEOUT_S,
+    )
+
+  async def test_signed_write_budget_outlives_nested_actor_verification(self):
+    self.assertGreater(SIGNED_WRITE_TIMEOUT_S, ACTOR_FETCH_TIMEOUT_S)
+    response = httpx.Response(200, json={"status": "ok"})
+    with patch.object(
+      common_protocol, "federation_request",
+      new=AsyncMock(return_value=response),
+    ) as request:
+      result = await common_protocol.post_signed_envelope(
+        "https://peer.example/api/app-services/social/board",
+        {"sig": "signed"}, max_response_bytes=321,
+      )
+    self.assertIs(result, response)
+    request.assert_awaited_once_with(
+      "POST", "https://peer.example/api/app-services/social/board",
+      json={"sig": "signed"}, max_response_bytes=321,
+      timeout_seconds=SIGNED_WRITE_TIMEOUT_S,
+    )
+
   async def test_non_public_destinations_are_rejected_before_connect(self):
     for host, address in (
       ("127.0.0.1", "127.0.0.1"),
