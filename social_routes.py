@@ -324,14 +324,42 @@ def _new_encryption_keypair() -> tuple[str, str]:
   return private_b64, public_b64
 
 
+def _signing_public_key(private_key_b64: str) -> str:
+  """Derive the advertised Ed25519 key from the key that signs messages."""
+  from cryptography.hazmat.primitives import serialization
+  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+  key = Ed25519PrivateKey.from_private_bytes(
+    base64.b64decode(private_key_b64, validate=True)
+  )
+  return base64.b64encode(
+    key.public_key().public_bytes(
+      encoding=serialization.Encoding.Raw,
+      format=serialization.PublicFormat.Raw,
+    )
+  ).decode()
+
+
+def _encryption_public_key(private_key_b64: str) -> str:
+  """Derive the advertised X25519 key from the key that decrypts messages."""
+  from cryptography.hazmat.primitives import serialization
+  from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+  key = X25519PrivateKey.from_private_bytes(
+    base64.b64decode(private_key_b64, validate=True)
+  )
+  return base64.b64encode(
+    key.public_key().public_bytes(
+      encoding=serialization.Encoding.Raw,
+      format=serialization.PublicFormat.Raw,
+    )
+  ).decode()
+
+
 def _load_identity() -> dict:
   """Load (or lazily create) this instance's federation identity."""
   path = _identity_path()
   if path.is_file():
     identity = json.loads(path.read_text())
-    if not identity.get("enc_private_key_b64") or not identity.get(
-      "enc_public_key_b64"
-    ):
+    if not identity.get("enc_private_key_b64"):
       private_b64, public_b64 = _new_encryption_keypair()
       identity["enc_private_key_b64"] = private_b64
       identity["enc_public_key_b64"] = public_b64
@@ -380,9 +408,13 @@ def _key_actor_doc(identity: dict) -> dict:
   return {
     "protocol": PROTOCOL,
     "host": _own_host(),
-    "public_key": {"alg": "ed25519", "key_b64": identity["public_key_b64"]},
+    "public_key": {
+      "alg": "ed25519",
+      "key_b64": _signing_public_key(identity["private_key_b64"]),
+    },
     "encryption_key": {
-      "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
+      "alg": "x25519",
+      "key_b64": _encryption_public_key(identity["enc_private_key_b64"]),
     },
     "inbox": f"{PUBLIC_SERVICE_PATH}/inbox",
   }
