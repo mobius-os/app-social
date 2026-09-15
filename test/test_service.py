@@ -186,10 +186,24 @@ class SocialServiceTests(unittest.TestCase):
         root = Path(directory)
         service_root = root / "apps/7/server/common"
         service_root.mkdir(parents=True)
-        _key, public = keypair()
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        signing_private = Ed25519PrivateKey.from_private_bytes(b"p" * 32)
+        signing_public = base64.b64encode(
+          signing_private.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+          )
+        ).decode()
+        encryption_private = X25519PrivateKey.from_private_bytes(b"e" * 32)
+        encryption_public = base64.b64encode(
+          encryption_private.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+          )
+        ).decode()
         (service_root / "identity.json").write_text(json.dumps({
           "private_key_b64": base64.b64encode(b"p" * 32).decode(),
-          "public_key_b64": public,
+          "public_key_b64": base64.b64encode(b"stale signing key" * 2).decode(),
           "enc_private_key_b64": base64.b64encode(b"e" * 32).decode(),
           "enc_public_key_b64": base64.b64encode(b"x" * 32).decode(),
           "handle": "owner", "bio": "Hello", "joined_at": 1,
@@ -198,6 +212,8 @@ class SocialServiceTests(unittest.TestCase):
           root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",
         )["body"]
         self.assertEqual(actor["inbox"], "/api/app-services/social/inbox")
+        self.assertEqual(actor["public_key"]["key_b64"], signing_public)
+        self.assertEqual(actor["encryption_key"]["key_b64"], encryption_public)
         self.assertEqual(actor["member_since"], identity_payload["member_since"])
         self.assertEqual(actor["apps"], [{"name": "Shared", "description": "public app"}])
         self.assertEqual(set(seen_paths), {"/api/identity", "/api/apps/"})
