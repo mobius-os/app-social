@@ -108,12 +108,13 @@ export const CSS = `
   color: #fff;
 }
 
-/* ── Board: hero pulse card + compose trigger ───────────────────────────── */
-.cn-post { padding: 24px 0 20px; position: relative; }
+/* ── Board: tighter, timeline-style rows ────────────────────────────────── */
+.cn-post { padding: 15px 0 13px; position: relative; }
 .cn-post + .cn-post::before {
   content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
   background: var(--border); opacity: 0.65;
 }
+.cn-post.is-pending { opacity: 0.55; }
 .cn-post-head { display: flex; align-items: center; gap: 11px; }
 .cn-person {
   padding: 0; border: 0; background: transparent; text-align: left; color: inherit;
@@ -123,7 +124,7 @@ export const CSS = `
 .cn-person-name { font-size: 14.5px; font-weight: 720; line-height: 1.25; letter-spacing: -0.01em; }
 .cn-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .cn-post-copy {
-  font-size: 16px; line-height: 1.6; margin: 14px 0 0;
+  font-size: 15px; line-height: 1.5; margin: 9px 0 0;
   letter-spacing: -0.004em; white-space: pre-wrap;
 }
 
@@ -143,6 +144,12 @@ export const CSS = `
   background: color-mix(in srgb, #e0426d 12%, transparent);
 }
 .cn-react:disabled { opacity: 0.46; cursor: default; transform: none; }
+.cn-react.is-delete { margin-left: auto; }
+.cn-react.is-delete:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.cn-confirm-sheet { max-width: 420px; }
 /* ── Rows (conversations, people) ───────────────────────────────────────── */
 .cn-row {
   width: 100%; min-height: 82px; padding: 16px 8px; display: flex; align-items: center; gap: 13px;
@@ -430,6 +437,33 @@ export const CSS = `
 .cn-board-image { max-height: 520px; margin-top: 12px; border-radius: 14px; }
 .cn-board-image img { object-fit: contain; }
 
+/* Multi-image board gallery */
+.cn-gallery {
+  display: grid; gap: 3px; margin-top: 12px;
+  border-radius: 14px; overflow: hidden;
+  grid-template-columns: 1fr 1fr;
+}
+.cn-gallery-item { aspect-ratio: 1 / 1; }
+.cn-gallery-3 .cn-gallery-item:first-child { grid-column: 1 / -1; aspect-ratio: 2 / 1; }
+
+/* Selected-image tray in the composer */
+.cn-selected-gallery {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0;
+}
+.cn-selected-thumb {
+  position: relative; width: 74px; height: 74px; border-radius: 12px;
+  overflow: hidden; background: var(--surface2, var(--surface));
+  border: 1px solid var(--border); flex: 0 0 auto;
+}
+.cn-selected-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cn-selected-thumb button {
+  position: absolute; top: 3px; right: 3px; width: 22px; height: 22px;
+  border: 0; border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(8, 8, 12, 0.72); color: #fff;
+}
+.cn-selected-thumb button svg { width: 13px; height: 13px; }
+
 @media (hover: none) {
   .cn-bubble-reply { display: none; }
   .cn-message-line.is-mine > .cn-bubble { max-width: 88%; }
@@ -498,24 +532,27 @@ export const CSS = `
   border-radius: 8px; background: var(--accent); color: var(--accent-fg);
   font-size: 9.5px; font-weight: 750; display: flex; align-items: center; justify-content: center;
 }
+.cn-nav-dot {
+  position: absolute; top: 7px; right: calc(50% - 16px);
+  width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg);
+}
 
 /* Corner compose button, anchored above the tab bar (outside the scroller) */
 .cn-fab {
   position: absolute; right: 16px;
   bottom: calc(76px + env(safe-area-inset-bottom));
   z-index: 30;
-  width: auto; min-width: 54px; height: 54px; padding: 0 18px; gap: 8px; border-radius: 16px; border: 0;
+  width: 56px; height: 56px; padding: 0; border-radius: 50%; border: 0;
   display: flex; align-items: center; justify-content: center; cursor: pointer;
   background: var(--accent);
-  color: var(--accent-fg); font-size: 26px;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+  color: var(--accent-fg);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
   transition: transform 0.12s ease, filter 0.14s ease;
 }
 .cn-fab:hover { filter: brightness(1.07); }
 .cn-fab:active { transform: scale(0.92); }
-
-.cn-fab span { font: 650 14px/1 var(--font); }
-.cn-fab svg { width: 22px; height: 22px; }
+.cn-fab svg { width: 26px; height: 26px; }
 .cn-header-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── First-use and community context ────────────────────────────────────── */
@@ -593,11 +630,13 @@ export const CSS = `
   margin: -8px auto 16px;
 }
 .cn-sheet .cn-selected-image { margin-inline: 0; }
-.cn-post-compose { display: flex; align-items: flex-end; gap: 8px; }
-.cn-post-compose .cn-textarea { min-width: 0; flex: 1; }
+.cn-post-compose { display: flex; align-items: flex-start; gap: 11px; }
+.cn-post-compose .cn-avatar { margin-top: 5px; }
+.cn-post-compose .cn-textarea { min-width: 0; flex: 1; min-height: 132px; }
 .cn-post-sheet-actions {
-  display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 18px;
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 14px;
 }
+.cn-post-sheet-actions .cn-compose-image { margin-right: auto; }
 
 /* Full-app image viewer. */
 .cn-lightbox {

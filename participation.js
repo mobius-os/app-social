@@ -8,6 +8,8 @@ const INTENT_KINDS = new Set(['post', 'reply', 'like'])
 const POST_ID_RE = /^[a-z0-9-]{1,128}$/i
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
+const MAX_INTENT_ATTACHMENTS = 4
+
 function normalizedAttachment(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const { mime, data_b64: data, w, h } = value
@@ -19,6 +21,19 @@ function normalizedAttachment(value) {
     || !Number.isInteger(h) || h < 1 || h > 8192
   ) return null
   return { mime, data_b64: data, w, h }
+}
+
+function normalizedAttachments(value) {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_INTENT_ATTACHMENTS) {
+    return null
+  }
+  const out = []
+  for (const item of value) {
+    const one = normalizedAttachment(item)
+    if (!one) return null
+    out.push(one)
+  }
+  return out
 }
 
 export function createParticipationIntent(kind, values = {}) {
@@ -35,8 +50,13 @@ export function createParticipationIntent(kind, values = {}) {
     intent.post_id = postId
   }
   if (kind === 'post') {
-    const attachment = normalizedAttachment(values.attachment)
-    if (attachment) intent.attachment = attachment
+    const attachments = normalizedAttachments(values.attachments)
+    if (attachments) {
+      intent.attachments = attachments
+    } else {
+      const attachment = normalizedAttachment(values.attachment)
+      if (attachment) intent.attachment = attachment
+    }
   }
   return intent
 }

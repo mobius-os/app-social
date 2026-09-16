@@ -24,7 +24,7 @@ function blobBase64(blob) {
   })
 }
 
-function pngHasTransparency(context, width, height) {
+function hasTransparency(context, width, height) {
   const pixels = context.getImageData(0, 0, width, height).data
   for (let index = 3; index < pixels.length; index += 4) {
     if (pixels[index] < 255) return true
@@ -32,7 +32,7 @@ function pngHasTransparency(context, width, height) {
   return false
 }
 
-export async function prepareImage(file) {
+export async function prepareImage(file, maxBytes = MAX_BYTES) {
   if (!file?.type?.startsWith('image/')) throw new Error('Choose an image file.')
 
   let bitmap
@@ -51,7 +51,7 @@ export async function prepareImage(file) {
     let width = Math.max(1, Math.round(originalWidth * scale))
     let height = Math.max(1, Math.round(originalHeight * scale))
     const canvas = document.createElement('canvas')
-    const context = canvas.getContext('2d', { alpha: true, willReadFrequently: file.type === 'image/png' })
+    const context = canvas.getContext('2d', { alpha: true, willReadFrequently: true })
     if (!context) throw new Error('This image couldn’t be prepared.')
 
     const draw = (opaque = false) => {
@@ -65,23 +65,24 @@ export async function prepareImage(file) {
       context.drawImage(bitmap, 0, 0, width, height)
     }
 
+    // Keep transparency for ANY source that actually has it (PNG, WebP, …) by
+    // checking the decoded pixels rather than trusting the source mime; only a
+    // fully opaque image is flattened to JPEG for size.
     draw()
-    const mime = file.type === 'image/png' && pngHasTransparency(context, width, height)
-      ? 'image/png'
-      : 'image/jpeg'
+    const mime = hasTransparency(context, width, height) ? 'image/png' : 'image/jpeg'
     if (mime === 'image/jpeg') draw(true)
     let blob = await canvasBlob(canvas, mime)
 
-    // Keep the backend's decoded-byte limit without changing the promised
-    // JPEG quality. Very detailed images get progressively smaller instead.
-    while (blob.size > MAX_BYTES && Math.max(width, height) > 320) {
+    // Keep within the (possibly per-image) byte budget without changing the
+    // promised JPEG quality. Very detailed images get progressively smaller.
+    while (blob.size > maxBytes && Math.max(width, height) > 320) {
       width = Math.max(1, Math.round(width * 0.86))
       height = Math.max(1, Math.round(height * 0.86))
       draw(mime === 'image/jpeg')
       blob = await canvasBlob(canvas, mime)
     }
-    if (blob.size > MAX_BYTES) {
-      throw new Error('This image is still larger than 1 MiB after resizing. Try a simpler image.')
+    if (blob.size > maxBytes) {
+      throw new Error('This image is still too large after resizing. Try a simpler image.')
     }
 
     const data_b64 = await blobBase64(blob)
@@ -94,7 +95,7 @@ export async function prepareImage(file) {
   }
 }
 
-function ManagedImage({ attachment, storagePath, postId, className, alt, onOpen, onUnavailable }) {
+function ManagedImage({ attachment, storagePath, postId, index, className, alt, onOpen, onUnavailable, square }) {
   const directUrl = attachment?.preview_url || null
   const [url, setUrl] = useState(directUrl)
   const [failed, setFailed] = useState(false)
@@ -113,7 +114,7 @@ function ManagedImage({ attachment, storagePath, postId, className, alt, onOpen,
     }
     setUrl(null)
     const load = postId
-      ? getBoardMedia(postId)
+      ? getBoardMedia(postId, index)
       : window.mobius?.storage?.getBlob?.(storagePath)
     if (!load?.then) {
       setFailed(true)
@@ -144,13 +145,13 @@ function ManagedImage({ attachment, storagePath, postId, className, alt, onOpen,
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [directUrl, postId, storagePath])
+  }, [directUrl, postId, index, storagePath])
 
   return (
     <button
       className={`cn-media ${className}`}
       type="button"
-      style={{ aspectRatio: `${width} / ${height}` }}
+      style={square ? undefined : { aspectRatio: `${width} / ${height}` }}
       onClick={() => url && onOpen(url, alt)}
       disabled={!url}
       aria-label={url ? `Open ${alt}` : failed ? `${alt} unavailable` : `Loading ${alt}`}
@@ -195,6 +196,31 @@ export function MessageImage({ attachment, conversationPath, onOpen, onUnavailab
 }
 
 export function BoardImage({ post, onOpen, onUnavailable }) {
+  const gallery = Array.isArray(post?.attachments) && post.attachments.length
+    ? post.attachments.slice(0, 4)
+    : null
+  if (gallery) {
+    if (gallery.length === 1) {
+      return (
+        <ManagedImage
+          attachment={gallery[0]} postId={post.id} index={0}
+          className="cn-board-image" alt="post photo"
+          onOpen={onOpen} onUnavailable={onUnavailable}
+        />
+      )
+    }
+    return (
+      <div className={`cn-gallery cn-gallery-${gallery.length}`}>
+        {gallery.map((attachment, i) => (
+          <ManagedImage
+            key={i} attachment={attachment} postId={post.id} index={i}
+            className="cn-gallery-item" alt={`post photo ${i + 1}`} square
+            onOpen={onOpen} onUnavailable={onUnavailable}
+          />
+        ))}
+      </div>
+    )
+  }
   if (!post?.attachment) return null
   return (
     <ManagedImage
@@ -220,6 +246,23 @@ export function SelectedImageStrip({ selected, onRemove }) {
       <button type="button" onClick={onRemove} aria-label="Remove photo">
         <X aria-hidden="true" />
       </button>
+    </div>
+  )
+}
+
+export function SelectedImagesStrip({ selected, onRemove }) {
+  if (!selected?.length) return null
+  return (
+    <div className="cn-selected-gallery">
+      {selected.map((image, i) => (
+        <div className="cn-selected-thumb" key={image.id ?? i}>
+          <img src={image.previewUrl} alt={`Selected image ${i + 1}`} />
+          <button type="button" onClick={() => onRemove(i)}
+                  aria-label={`Remove image ${i + 1}`}>
+            <X aria-hidden="true" />
+          </button>
+        </div>
+      ))}
     </div>
   )
 }

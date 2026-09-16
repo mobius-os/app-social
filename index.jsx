@@ -90,6 +90,8 @@ export default function App({ appId, token }) {
   const conversationLoad = useRef(0)
   const [thread, setThread] = useState(null) // { kind: 'dm'|'group', peer?, name?, group? }
   const [version, setVersion] = useState(0)
+  const [boardActivity, setBoardActivity] = useState(false)
+  const seenActivity = useRef(null)
   const [toast, setToast] = useState(null)
   const [lightbox, setLightbox] = useState(null)
   const [profileRequest, setProfileRequest] = useState(null)
@@ -233,6 +235,35 @@ export default function App({ appId, token }) {
   useEffect(() => {
     if (version > 0) loadConversations()
   }, [version])
+
+  // Surface new likes/replies on the owner's own posts as a dot on the Board
+  // tab. The community host holds those posts, so the app can't be pushed about
+  // them; instead it compares counts each time the feed reloads. Viewing the
+  // board resets the baseline and clears the dot.
+  useEffect(() => {
+    if (!me?.host || feedState !== 'ready') return
+    const mine = feed.filter((post) => post.host === me.host)
+    const counts = new Map(
+      mine.map((post) => [post.id, (post.like_count || 0) + (post.reply_count || 0)]),
+    )
+    if (tab === 'board') {
+      seenActivity.current = counts
+      setBoardActivity(false)
+      return
+    }
+    const prior = seenActivity.current
+    if (prior === null) {
+      seenActivity.current = counts
+      return
+    }
+    for (const [id, count] of counts) {
+      const before = prior.get(id)
+      if (before !== undefined && count > before) {
+        setBoardActivity(true)
+        break
+      }
+    }
+  }, [feed, tab, me, feedState])
 
   // ── thread navigation with a real shell back target ───────────────────────
   function openAnyThread(next) {
@@ -403,6 +434,7 @@ export default function App({ appId, token }) {
 
       <nav className="cn-nav" aria-label="Main navigation">
         <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-current={tab === 'board' ? 'page' : undefined} onClick={() => setTab('board')}>
+          {boardActivity && <span className="cn-nav-dot" aria-label="New board activity" />}
           <Globe aria-hidden="true" /><span>Board</span>
         </button>
         <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} aria-current={tab === 'messages' ? 'page' : undefined} onClick={() => setTab('messages')}>
@@ -477,8 +509,8 @@ export default function App({ appId, token }) {
       </div>
 
       {tab === 'board' && (
-        <button className="cn-fab" onClick={() => setComposing(true)} aria-label="New post">
-          <Plus aria-hidden="true" /><span>New post</span>
+        <button className="cn-fab" onClick={() => setComposing(true)} aria-label="New post" title="New post">
+          <Plus aria-hidden="true" />
         </button>
       )}
 
