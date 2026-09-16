@@ -89,7 +89,6 @@ export default function Board({
   const [pending, setPending] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [hiddenIds, setHiddenIds] = useState(() => new Set())
-  const [processingImage, setProcessingImage] = useState(false)
   const [selectedImages, setSelectedImages] = useState([])
   const [likeOverrides, setLikeOverrides] = useState({})
   const [replyPost, setReplyPost] = useState(null)
@@ -371,16 +370,19 @@ export default function Board({
     setHiddenIds((prior) => new Set(prior).add(post.id))
     try {
       await deletePost(post.id)
-      showToast('Post deleted', 'success')
-      await onRefresh(true)
     } catch (error) {
+      // Only a failed delete un-hides the post; a later refresh failure must not
+      // resurrect a post the server already removed.
       setHiddenIds((prior) => {
         const next = new Set(prior)
         next.delete(post.id)
         return next
       })
       showToast(error.message || 'This post couldn’t be deleted.', 'error')
+      return
     }
+    showToast('Post deleted', 'success')
+    onRefresh(true)
   }
 
   function chooseImage(event) {
@@ -469,6 +471,13 @@ export default function Board({
       await publishPost(text, attachment, attachments)
       window.mobius?.signal?.('item_created', { type: 'board_post' })
       onCompleteParticipation?.('post', null, completedIntent)
+      // Release the local previews now that the post succeeded (on failure we
+      // restore them for a retry, so only revoke on the happy path).
+      for (const image of images) {
+        if (image.file && image.previewUrl?.startsWith('blob:')) {
+          URL.revokeObjectURL(image.previewUrl)
+        }
+      }
       await onRefresh(true)
       setPending(null)
       showToast('Posted to the board', 'success')
@@ -684,16 +693,16 @@ export default function Board({
                    onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
             <div className="cn-post-sheet-actions">
               <button className="cn-compose-image" type="button" onClick={() => fileRef.current?.click()}
-                      disabled={posting || processingImage || selectedImages.length >= MAX_POST_IMAGES}
+                      disabled={posting || selectedImages.length >= MAX_POST_IMAGES}
                       aria-label="Attach photo"
                       title={selectedImages.length >= MAX_POST_IMAGES ? `Up to ${MAX_POST_IMAGES} images` : 'Attach photo'}>
-                {processingImage ? <span className="cn-spinner" /> : <ImageSquare aria-hidden="true" />}
+                <ImageSquare aria-hidden="true" />
               </button>
               <button className="cn-btn cn-btn-secondary" onClick={() => setComposing(false)} disabled={posting || handoffBusy}>
                 Cancel
               </button>
               <button className="cn-btn cn-btn-primary" onClick={submitPost}
-                      disabled={posting || handoffBusy || participationBusy || processingImage || (!draft.trim() && !selectedImages.length)}>
+                      disabled={posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length)}>
                 {posting ? 'Posting…' : handoffBusy || participationBusy
                   ? 'Please wait…'
                   : canInteract ? 'Post' : participationActionLabel(participationStep(me), 'post')}

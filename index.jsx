@@ -246,23 +246,28 @@ export default function App({ appId, token }) {
     const counts = new Map(
       mine.map((post) => [post.id, (post.like_count || 0) + (post.reply_count || 0)]),
     )
-    if (tab === 'board') {
-      seenActivity.current = counts
-      setBoardActivity(false)
-      return
-    }
     const prior = seenActivity.current
-    if (prior === null) {
+    if (tab === 'board' || prior === null) {
+      // Viewing the board (or the first load) sets the baseline and clears the dot.
       seenActivity.current = counts
+      if (tab === 'board') setBoardActivity(false)
       return
     }
+    // Off the board: flag a rise on a known post, and start tracking posts that
+    // appeared since the baseline (recorded at their current count, not flagged)
+    // so later activity on them is caught too. Known baselines are left intact
+    // until the next board view, so a rise is measured against last-seen.
+    const next = new Map(prior)
+    let rose = false
     for (const [id, count] of counts) {
-      const before = prior.get(id)
-      if (before !== undefined && count > before) {
-        setBoardActivity(true)
-        break
+      if (!prior.has(id)) {
+        next.set(id, count)
+      } else if (count > prior.get(id)) {
+        rose = true
       }
     }
+    seenActivity.current = next
+    if (rose) setBoardActivity(true)
   }, [feed, tab, me, feedState])
 
   // ── thread navigation with a real shell back target ───────────────────────

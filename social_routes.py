@@ -473,8 +473,12 @@ def _bump_version(app) -> None:
 async def _store_message(
   db, app, peer_host: str, record: dict,
   attachment: tuple[dict, bytes] | None = None,
-) -> tuple[bool, str]:
-  """Store one message atomically and return ``(created, request_state)``.
+) -> tuple[bool, str, bool]:
+  """Store one message atomically; return ``(created, request_state, new_request)``.
+
+  ``new_request`` is True only for the first inbound message of a brand-new
+  pending conversation, so callers can notify on first contact without alerting
+  again for every later message from an un-accepted sender.
 
   A metadata record written by an older Social version is an established
   conversation.  Only a genuinely new inbound conversation becomes a quiet
@@ -493,11 +497,11 @@ async def _store_message(
     # preference.  Decide it under the same lock as owner request decisions
     # and before materializing either the message or its attachment.
     if state == "blocked" and record["dir"] == "in":
-      return False, state
+      return False, state, False
     msgs = convo / "msgs"
     message_path = msgs / f"{record['id']}.json"
     if message_path.is_file():
-      return False, state
+      return False, state, False
     if attachment is not None:
       record["attachment"] = _write_app_attachment(
         convo, record["id"], attachment
@@ -522,7 +526,8 @@ async def _store_message(
       meta["unread"] = 0
     atomic_write(meta_path, json.dumps(meta))
     _bump_version(app)
-    return True, state
+    new_request = not had_meta and record["dir"] == "in" and state == "pending"
+    return True, state, new_request
 
 
 async def _prepare_outgoing_conversation(
@@ -646,7 +651,7 @@ async def receive_message(request: Request, db=Depends(get_db)):
     record["encrypted"] = True
   if reply_to is not None:
     record["reply_to"] = reply_to
-  created, request_state = await _store_message(
+  created, request_state, new_request = await _store_message(
     db, app, sender, record, attachment
   )
   if not created:
@@ -657,9 +662,9 @@ async def receive_message(request: Request, db=Depends(get_db)):
     return {"status": "duplicate"}
   if request_state == "accepted":
     await notify(f"Message from {sender_label}", _message_preview(text))
-  elif request_state == "pending":
-    # First contact from someone new. Let the owner know a request is waiting
-    # rather than leaving it silent until they happen to open Messages.
+  elif new_request:
+    # Only the first message of a new request notifies, so an un-accepted
+    # sender cannot spam the owner with a push per message.
     await notify(
       f"Message request from {sender_label}", _message_preview(text)
     )
@@ -1279,7 +1284,13 @@ async def like_post(
   identity = _load_identity()
   host = _browse_community_host(community_host)
   if host == _own_host():
-    return _toggle_board_like(post_id, _own_host())
+    result = _toggle_board_like(post_id, _own_host())
+    author_host = result.pop("author_host", None)
+    if result.pop("activity", False) and author_host:
+      await _relay_board_activity(
+        "like", author_host, _own_host(), identity.get("handle") or "", post_id,
+      )
+    return result
   envelope = {
     "v": 0,
     "type": "board_react",
@@ -1323,10 +1334,16 @@ async def reply_to_post(
   reply_id = str(uuid.uuid4())
   sent_at = time.time()
   if host == _own_host():
-    return _add_board_reply(
+    result = _add_board_reply(
       post_id, reply_id, _own_host(), identity.get("handle") or "",
       text, sent_at,
     )
+    author_host = result.pop("author_host", None)
+    if result.pop("activity", False) and author_host:
+      await _relay_board_activity(
+        "reply", author_host, _own_host(), identity.get("handle") or "", post_id,
+      )
+    return result
   envelope = {
     "v": 0,
     "type": "board_reply",
