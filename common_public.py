@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse
 from common_protocol import (
   ATTACHMENT_MIME_EXT,
   CLOCK_SKEW_S,
+  MAX_BOARD_ATTACHMENTS,
   MAX_BIO_CHARS,
   MAX_NAME_CHARS,
   MAX_REPLY_TEXT_CHARS,
@@ -40,6 +41,7 @@ from common_protocol import (
   valid_host,
   valid_id,
   validate_attachment,
+  validate_attachments,
   validate_text_or_attachment,
 )
 from service_io import atomic_write
@@ -206,10 +208,27 @@ class CommonPublicStore:
     posts.sort(key=lambda post: post.get("created_at", 0), reverse=True)
     return posts[:limit]
 
+  def board_media_index_path(self, post_id: str, index: int, mime: str) -> Path:
+    return self.board_media_dir() / f"{post_id}-{index}.{ATTACHMENT_MIME_EXT[mime]}"
+
+  def board_image(self, post_id: str, index: int | None = None) -> tuple[Path, str] | None:
+    """Locate one stored board image. index=None means the first/legacy image."""
+    directory = self.board_media_dir()
+    if index is None:
+      return self.find_image(directory, f"{post_id}-0") or self.find_image(directory, post_id)
+    return self.find_image(directory, f"{post_id}-{index}")
+
   def store_post(
     self, post: dict, attachment: tuple[dict, bytes] | None = None,
+    attachments: list[tuple[dict, bytes]] | None = None,
   ) -> bool:
-    """Store once by stable id; return False without changing a duplicate."""
+    """Store once by stable id; return False without changing a duplicate.
+
+    A post may carry a small gallery (`attachments`) written as
+    ``<id>-<index>.<ext>``; a legacy single `attachment` is written as
+    ``<id>.<ext>``. `attachments` also records a single `attachment` (its first
+    image) so a reader that only understands one image still shows something.
+    """
     with self._mutation_lock(self._board_lock, "board"):
       path = self.board_dir() / f"{post['id']}.json"
       if path.is_file():
@@ -217,7 +236,14 @@ class CommonPublicStore:
       if sum(1 for _ in self.board_dir().glob("*.json")) >= BOARD_POST_LIMIT:
         raise HTTPException(status_code=507, detail="Board is full.")
       record = dict(post)
-      if attachment is not None:
+      if attachments:
+        metas = []
+        for index, (wire, data) in enumerate(attachments):
+          atomic_write(self.board_media_index_path(post["id"], index, wire["mime"]), data)
+          metas.append({"mime": wire["mime"], "w": wire["w"], "h": wire["h"]})
+        record["attachments"] = metas
+        record["attachment"] = metas[0]
+      elif attachment is not None:
         wire, data = attachment
         atomic_write(self.board_media_path(post["id"], wire["mime"]), data)
         record["attachment"] = {
@@ -239,6 +265,7 @@ class CommonPublicStore:
       if not isinstance(likes, dict):
         likes = {}
         post["likes"] = likes
+      author_host = post.get("host")
       now = time.time()
       if replay_token is not None:
         journal = post.setdefault("_reaction_replays", {})
@@ -252,19 +279,28 @@ class CommonPublicStore:
           and expiry >= now
         }
         if replay_token in live:
-          return {"status": "ok", "likes": len(likes), "liked": host in likes}
+          return {
+            "status": "ok", "likes": len(likes), "liked": host in likes,
+            "author_host": author_host, "activity": False,
+          }
         if len(live) >= REACTION_REPLAY_LIMIT:
           raise HTTPException(status_code=429, detail="Reaction replay journal is full.")
         live[replay_token] = now + REACTION_REPLAY_TTL_S
         post["_reaction_replays"] = live
       if host not in likes and len(likes) >= BOARD_LIKE_LIMIT:
         raise HTTPException(status_code=507, detail="Post reaction limit reached.")
+      added = host not in likes
       if host in likes:
         del likes[host]
       else:
         likes[host] = now
       atomic_write(path, json.dumps(post))
-      return {"status": "ok", "likes": len(likes), "liked": host in likes}
+      # `activity` is True only for a genuine new like (not an unlike or a
+      # replay), so the router notifies the post's author exactly once.
+      return {
+        "status": "ok", "likes": len(likes), "liked": host in likes,
+        "author_host": author_host, "activity": added,
+      }
 
   def add_reply(
     self, post_id: str, reply_id: str, host: str, handle: str,
@@ -275,12 +311,16 @@ class CommonPublicStore:
       if not path.is_file():
         raise HTTPException(status_code=404, detail="Unknown post.")
       post = self._load_object(path)
+      author_host = post.get("host")
       replies = post.get("replies")
       if not isinstance(replies, list):
         replies = []
         post["replies"] = replies
       if any(isinstance(reply, dict) and reply.get("id") == reply_id for reply in replies):
-        return {"status": "ok", "reply_count": len(replies)}
+        return {
+          "status": "ok", "reply_count": len(replies),
+          "author_host": author_host, "activity": False,
+        }
       if len(replies) >= BOARD_REPLY_LIMIT:
         raise HTTPException(status_code=507, detail="Post reply limit reached.")
       replies.append({
@@ -291,7 +331,10 @@ class CommonPublicStore:
         "created_at": created_at,
       })
       atomic_write(path, json.dumps(post))
-      return {"status": "ok", "reply_count": len(replies)}
+      return {
+        "status": "ok", "reply_count": len(replies),
+        "author_host": author_host, "activity": True,
+      }
 
   def get_replies(self, post_id: str) -> dict:
     path = self.board_dir() / f"{post_id}.json"
@@ -308,11 +351,53 @@ class CommonPublicStore:
       )
     }
 
+  def delete_post(self, post_id: str, host: str) -> dict:
+    """Delete one post its own author asked to remove, and its media.
+
+    This is a deliberate author action, not the silent expiry/pruning the module
+    invariant forbids: only the host that authored the post may remove it, and a
+    repeat of the same delete is idempotent so a retry cannot error. Replies from
+    other hosts live inside the post record and are removed with it.
+    """
+    with self._mutation_lock(self._board_lock, "board"):
+      path = self.board_dir() / f"{post_id}.json"
+      if not path.is_file():
+        return {"status": "deleted"}
+      post = self._load_object(path)
+      if post.get("host") != host:
+        raise HTTPException(
+          status_code=403,
+          detail="Only the author host may delete this post.",
+        )
+      # Remove the legacy single image and every gallery image (<id>-<n>.<ext>).
+      stems = [post_id] + [f"{post_id}-{i}" for i in range(MAX_BOARD_ATTACHMENTS)]
+      for stem in stems:
+        found = self.find_image(self.board_media_dir(), stem)
+        if found is not None:
+          try:
+            found[0].unlink()
+          except OSError:
+            pass
+      try:
+        path.unlink()
+      except OSError as exc:
+        raise HTTPException(
+          status_code=500, detail="The post could not be deleted."
+        ) from exc
+      return {"status": "deleted"}
+
 
 def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
+  on_activity=None,
 ) -> tuple[APIRouter, None]:
-  """Build the exact public-host surface shared by both runtimes."""
+  """Build the exact public-host surface shared by both runtimes.
+
+  ``on_activity(kind, author_host, actor_host, actor_handle, post_id)`` is an
+  optional awaitable the host calls after a genuine new like or reply, so it can
+  tell the post's author (locally or via federation) that their post got
+  activity. It never changes the peer-facing response.
+  """
   router = APIRouter(prefix=prefix, tags=["common-public"])
 
   @router.get("/directory")
@@ -350,7 +435,15 @@ def create_public_router(
   def get_board_media(post_id: str):
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    return store.serve_image(store.find_image(store.board_media_dir(), post_id))
+    return store.serve_image(store.board_image(post_id))
+
+  @router.get("/board/media/{post_id}/{index}")
+  def get_board_media_at(post_id: str, index: int):
+    if not valid_id(post_id):
+      raise HTTPException(status_code=400, detail="Post id is invalid.")
+    if not 0 <= index < MAX_BOARD_ATTACHMENTS:
+      raise HTTPException(status_code=400, detail="Image index is invalid.")
+    return store.serve_image(store.board_image(post_id, index))
 
   @router.get("/board/{post_id}/replies")
   def get_board_replies(post_id: str):
@@ -366,11 +459,17 @@ def create_public_router(
     post_id = envelope.get("post_id")
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    await verifier.verify_envelope(envelope)
+    actor = await verifier.verify_envelope(envelope)
     replay_token = hashlib.sha256(canonical(envelope)).hexdigest()
-    return store.toggle_like(
+    result = store.toggle_like(
       post_id, envelope["from"], replay_token=replay_token,
     )
+    author_host = result.pop("author_host", None)
+    if on_activity and result.pop("activity", False) and author_host:
+      await on_activity(
+        "like", author_host, envelope["from"], actor.get("handle") or "", post_id,
+      )
+    return result
 
   @router.post("/board/reply")
   async def reply_to_board(request: Request):
@@ -390,10 +489,27 @@ def create_public_router(
     ):
       raise HTTPException(status_code=400, detail="Reply text is invalid.")
     actor = await verifier.verify_envelope(envelope)
-    return store.add_reply(
+    result = store.add_reply(
       post_id, reply_id, envelope["from"], actor.get("handle") or "",
       text, envelope["sent_at"],
     )
+    author_host = result.pop("author_host", None)
+    if on_activity and result.pop("activity", False) and author_host:
+      await on_activity(
+        "reply", author_host, envelope["from"], actor.get("handle") or "", post_id,
+      )
+    return result
+
+  @router.post("/board/delete")
+  async def delete_from_board(request: Request):
+    envelope = await read_envelope(request)
+    if envelope.get("v") != 0 or envelope.get("type") != "board_delete":
+      raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+    post_id = envelope.get("post_id")
+    if not valid_id(post_id):
+      raise HTTPException(status_code=400, detail="Post id is invalid.")
+    await verifier.verify_envelope(envelope)
+    return store.delete_post(post_id, envelope["from"])
 
   @router.post("/board")
   async def post_to_board(request: Request):
@@ -401,8 +517,10 @@ def create_public_router(
     if envelope.get("v") != 0 or envelope.get("type") != "board_post":
       raise HTTPException(status_code=400, detail="Unsupported envelope type.")
     attachment = validate_attachment(envelope.get("attachment"))
+    attachments = validate_attachments(envelope.get("attachments"))
     text = envelope.get("text")
-    validate_text_or_attachment(text, attachment, "Post text is invalid.")
+    first = attachment or (attachments[0] if attachments else None)
+    validate_text_or_attachment(text, first, "Post text is invalid.")
     post_id = envelope.get("id")
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
@@ -414,7 +532,7 @@ def create_public_router(
       "text": text,
       "created_at": envelope["sent_at"],
       "replies": [],
-    }, attachment)
+    }, attachment, attachments)
     return {"status": "posted"}
 
   return router, None

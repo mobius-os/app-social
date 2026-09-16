@@ -42,17 +42,28 @@ export const sendMessage = (to, text, peerHandle, attachment, replyTo) =>
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
   })
-export const publishPost = (text, attachment) =>
+export const publishPost = (text, attachment, attachments) =>
   call('publish', {
     method: 'POST',
-    body: JSON.stringify({ text, ...(attachment ? { attachment } : {}) }),
+    body: JSON.stringify({
+      text,
+      ...(attachment ? { attachment } : {}),
+      ...(attachments && attachments.length ? { attachments } : {}),
+    }),
   })
 const browseQuery = `community_host=${encodeURIComponent(SHARED_COMMUNITY_HOST)}`
 export const getFeed = () => call(`feed?${browseQuery}`)
-export const getBoardMedia = (postId) =>
-  call(`board-media/${encodeURIComponent(postId)}?${browseQuery}`, {}, 'blob')
+export const getBoardMedia = (postId, index) =>
+  call(
+    index === undefined || index === null
+      ? `board-media/${encodeURIComponent(postId)}?${browseQuery}`
+      : `board-media/${encodeURIComponent(postId)}/${index}?${browseQuery}`,
+    {}, 'blob',
+  )
 export const likePost = (postId) =>
   call('like', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
+export const deletePost = (postId) =>
+  call('delete', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
 export const getReplies = (postId) =>
   call(`replies/${encodeURIComponent(postId)}?${browseQuery}`)
 export const postReply = (postId, text) =>

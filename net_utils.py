@@ -46,12 +46,21 @@ _BLOCKED_NETS = [
 ]
 
 
-def validate_url_safe(url: str) -> tuple[str, str, str]:
-  """Validates a URL against the SSRF blocklist; returns `(pinned_url, host_header, sni_host)`.
+def validate_url_safe(url: str) -> tuple[list[str], str, str]:
+  """Validates a URL against the SSRF blocklist; returns `(pinned_urls, host_header, sni_host)`.
 
-  `pinned_url` connects to the resolved IP (defeats DNS-rebinding); `host_header`
-  is the original authority host[:port] for the Host header; `sni_host` is the
-  bare DNS name for TLS SNI/cert validation (see the return site below).
+  `pinned_urls` are per-IP URLs that connect to a resolved address (defeats
+  DNS-rebinding), ordered IPv4-first then IPv6; the caller connects to them in
+  order until one succeeds. `host_header` is the original authority host[:port]
+  for the Host header; `sni_host` is the bare DNS name for TLS SNI/cert
+  validation (see the return site below).
+
+  Returning every validated address — not just the first — matters because the
+  connection is pinned to one specific IP. getaddrinfo ordering (RFC 6724) can
+  place an IPv6 address first even on a host with no IPv6 egress, which pinned
+  the request to a dead address and surfaced as "peer could not be reached".
+  Handing the transport all validated candidates (IPv4 preferred) lets it fall
+  back past an unroutable address family or a dead edge IP.
 
   The install endpoint is the SSRF surface: we fetch arbitrary URLs on behalf
   of an authenticated owner. From inside the container we can reach our own
@@ -87,7 +96,7 @@ def validate_url_safe(url: str) -> tuple[str, str, str]:
     infos = socket.getaddrinfo(host, None)
   except socket.gaierror as exc:
     raise HTTPException(400, f"Cannot resolve host {host!r}: {exc}") from exc
-  pinned_ip = None
+  validated_ips: list[str] = []
   for info in infos:
     ip_str = info[4][0]
     try:
@@ -123,16 +132,25 @@ def validate_url_safe(url: str) -> tuple[str, str, str]:
             f"(network {net}).",
           )
     # Every resolved address is validated (we raise on the first blocked one),
-    # so pinning to the first is safe — the fetched IP can't be an unvalidated
-    # one.
-    if pinned_ip is None:
-      pinned_ip = ip_str
-  if pinned_ip is None:
+    # so returning them all is safe — no fetched IP can be an unvalidated one.
+    if ip_str not in validated_ips:
+      validated_ips.append(ip_str)
+  if not validated_ips:
     raise HTTPException(400, f"Cannot resolve host {host!r} to any address.")
-  ip_host = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip
-  netloc = f"{ip_host}:{parsed.port}" if parsed.port else ip_host
-  pinned_url = parsed._replace(netloc=netloc).geturl()
+  # Prefer IPv4, then IPv6. The transport pins each connection to one exact
+  # address, so an unroutable family (this container has no IPv6 egress) must be
+  # skippable rather than fatal. Ordering IPv4 first — while still returning the
+  # IPv6 candidates as fallback — keeps a genuinely IPv6-only peer reachable too.
+  ordered = (
+    [ip for ip in validated_ips if ":" not in ip]
+    + [ip for ip in validated_ips if ":" in ip]
+  )
+  pinned_urls: list[str] = []
+  for ip_str in ordered:
+    ip_host = f"[{ip_str}]" if ":" in ip_str else ip_str
+    netloc = f"{ip_host}:{parsed.port}" if parsed.port else ip_host
+    pinned_urls.append(parsed._replace(netloc=netloc).geturl())
   # Host header carries the ORIGINAL authority (host + non-default port, IPv6
   # brackets preserved) per RFC 7230 §5.4; the SNI/cert name is the bare DNS
   # host. userinfo was rejected above, so parsed.netloc is exactly host[:port].
-  return pinned_url, parsed.netloc, host
+  return pinned_urls, parsed.netloc, host

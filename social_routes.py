@@ -66,12 +66,14 @@ from pydantic import BaseModel
 from common_protocol import (
   ATTACHMENT_MIME_EXT as _ATTACHMENT_MIME_EXT,
   MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
+  MAX_BOARD_ATTACHMENTS as _MAX_BOARD_ATTACHMENTS,
   MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_REPLY_TEXT_CHARS,
   OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
   canonical as _canonical, peer_service_url as _peer_service_url,
   read_envelope as _read_envelope, sign as _sign,
   valid_host as _valid_host, valid_id as _valid_id,
   validate_attachment as _validate_attachment,
+  validate_attachments as _validate_attachments,
   validate_reply_to as _validate_reply_to,
   validate_text_or_attachment as _validate_text_or_attachment,
 )
@@ -471,8 +473,12 @@ def _bump_version(app) -> None:
 async def _store_message(
   db, app, peer_host: str, record: dict,
   attachment: tuple[dict, bytes] | None = None,
-) -> tuple[bool, str]:
-  """Store one message atomically and return ``(created, request_state)``.
+) -> tuple[bool, str, bool]:
+  """Store one message atomically; return ``(created, request_state, new_request)``.
+
+  ``new_request`` is True only for the first inbound message of a brand-new
+  pending conversation, so callers can notify on first contact without alerting
+  again for every later message from an un-accepted sender.
 
   A metadata record written by an older Social version is an established
   conversation.  Only a genuinely new inbound conversation becomes a quiet
@@ -491,11 +497,11 @@ async def _store_message(
     # preference.  Decide it under the same lock as owner request decisions
     # and before materializing either the message or its attachment.
     if state == "blocked" and record["dir"] == "in":
-      return False, state
+      return False, state, False
     msgs = convo / "msgs"
     message_path = msgs / f"{record['id']}.json"
     if message_path.is_file():
-      return False, state
+      return False, state, False
     if attachment is not None:
       record["attachment"] = _write_app_attachment(
         convo, record["id"], attachment
@@ -520,7 +526,8 @@ async def _store_message(
       meta["unread"] = 0
     atomic_write(meta_path, json.dumps(meta))
     _bump_version(app)
-    return True, state
+    new_request = not had_meta and record["dir"] == "in" and state == "pending"
+    return True, state, new_request
 
 
 async def _prepare_outgoing_conversation(
@@ -644,7 +651,7 @@ async def receive_message(request: Request, db=Depends(get_db)):
     record["encrypted"] = True
   if reply_to is not None:
     record["reply_to"] = reply_to
-  created, request_state = await _store_message(
+  created, request_state, new_request = await _store_message(
     db, app, sender, record, attachment
   )
   if not created:
@@ -655,14 +662,88 @@ async def receive_message(request: Request, db=Depends(get_db)):
     return {"status": "duplicate"}
   if request_state == "accepted":
     await notify(f"Message from {sender_label}", _message_preview(text))
+  elif new_request:
+    # Only the first message of a new request notifies, so an un-accepted
+    # sender cannot spam the owner with a push per message.
+    await notify(
+      f"Message request from {sender_label}", _message_preview(text)
+    )
   return {
     "status": "delivered" if request_state == "accepted" else "pending",
   }
 
 
+def _activity_line(kind: str, actor_host: str, actor_handle: str) -> str:
+  who = f"@{actor_handle}" if actor_handle else actor_host
+  verb = "liked" if kind == "like" else "replied to"
+  return f"{who} {verb} your post"
+
+
+async def _relay_board_activity(
+  kind: str, author_host: str, actor_host: str, actor_handle: str, post_id: str,
+) -> None:
+  """Tell a post's author that their post got a like or reply.
+
+  Runs on the host that stores the post. If the author lives here, notify the
+  owner directly; otherwise sign a `board_activity` envelope to the author's
+  host, which notifies its own owner. Best-effort: a failed relay never affects
+  the reactor's stored like/reply.
+  """
+  if not author_host or author_host == actor_host:
+    return
+  if author_host == _own_host():
+    await notify("Activity on your post", _activity_line(kind, actor_host, actor_handle))
+    return
+  identity = _load_identity()
+  envelope = {
+    "v": 0,
+    "type": "board_activity",
+    "post_id": post_id,
+    "kind": kind,
+    "actor": actor_host,
+    "actor_handle": actor_handle,
+    "from": _own_host(),
+    "to": author_host,
+    "sent_at": time.time(),
+  }
+  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+  try:
+    response = await federation_request(
+      "POST", _peer_service_url(author_host, "activity"), json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=min(OUTBOUND_TIMEOUT_S, 5.0),
+    )
+    response.raise_for_status()
+  except Exception:
+    pass
+
+
+@router.post("/activity")
+async def receive_board_activity(request: Request):
+  """Accept a signed notice that one of the owner's posts got a like or reply."""
+  envelope = await _read_envelope(request)
+  if envelope.get("v") != 0 or envelope.get("type") != "board_activity":
+    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+  if envelope.get("to") != _own_host():
+    raise HTTPException(status_code=400, detail="Envelope is addressed elsewhere.")
+  if not _valid_id(envelope.get("post_id")):
+    raise HTTPException(status_code=400, detail="Post id is invalid.")
+  kind = envelope.get("kind")
+  if kind not in ("like", "reply"):
+    raise HTTPException(status_code=400, detail="Unsupported activity kind.")
+  # The signature proves this came from the host that holds the post; the host
+  # is authoritative for activity on the boards it serves.
+  await _verify_peer_envelope(envelope)
+  actor_host = envelope.get("actor") or envelope["from"]
+  actor_handle = envelope.get("actor_handle")
+  actor_handle = actor_handle if isinstance(actor_handle, str) else ""
+  await notify("Activity on your post", _activity_line(kind, actor_host, actor_handle))
+  return {"status": "ok"}
+
+
 # The directory and board peer surface is shared with the isolated host.
 _public_router, _public_write_limiter = create_public_router(
-  _public_store, _actor_verifier, prefix="",
+  _public_store, _actor_verifier, prefix="", on_activity=_relay_board_activity,
 )
 router.include_router(_public_router)
 
@@ -702,6 +783,7 @@ def _request_peer(peer_host: str) -> str:
 class PublishPost(BaseModel):
   text: str
   attachment: Any = None
+  attachments: Any = None
 
 
 async def _refresh_profile_cache(db, principal: Principal) -> dict:
@@ -989,7 +1071,9 @@ async def publish_post(
   _require_owner_or_common_app(db, principal)
   text = post.text.strip()
   attachment = _validate_attachment(post.attachment)
-  _validate_text_or_attachment(text, attachment, "Post text is invalid.")
+  attachments = _validate_attachments(post.attachments)
+  first = attachment or (attachments[0] if attachments else None)
+  _validate_text_or_attachment(text, first, "Post text is invalid.")
   identity = _load_identity()
   envelope = {
     "v": 0,
@@ -999,7 +1083,12 @@ async def publish_post(
     "text": text,
     "sent_at": time.time(),
   }
-  if attachment is not None:
+  if attachments:
+    # Send the whole gallery, and also the first image as a lone `attachment`
+    # so a host that predates galleries still stores and shows one image.
+    envelope["attachments"] = [wire for wire, _ in attachments]
+    envelope["attachment"] = attachments[0][0]
+  elif attachment is not None:
     envelope["attachment"] = attachment[0]
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   host = _browse_community_host(community_host)
@@ -1012,7 +1101,7 @@ async def publish_post(
       "created_at": envelope["sent_at"],
       "replies": [],
     }
-    _store_board_post(board_post, attachment)
+    _store_board_post(board_post, attachment, attachments)
     return {"status": "posted", "id": envelope["id"]}
   try:
     response = await federation_request(
@@ -1072,33 +1161,27 @@ async def get_replies_for_owner(
     ) from exc
 
 
-@router.get("/board-media/{post_id}")
-async def get_board_media_for_owner(
-  post_id: str,
-  community_host: str | None = None,
-  db: object = Depends(get_db),
-  principal: Principal = Depends(get_principal),
-):
-  """Serve a community-board image, caching remote hosts for 24 hours."""
-  _require_owner_or_common_app(db, principal)
-  if not _valid_id(post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  host = _browse_community_host(community_host)
+async def _serve_owner_board_media(host: str, post_id: str, index: int | None):
+  """Serve one community-board image (a gallery index or the first/legacy one),
+  caching remote hosts for 24 hours."""
   if host == _own_host():
-    return _serve_image(_find_image(_board_media_dir(), post_id))
+    return _serve_image(_public_store.board_image(post_id, index))
 
   cache_dir = _peer_board_media_dir()
-  stem = _peer_board_media_name(host, post_id)
+  base_stem = _peer_board_media_name(host, post_id)
+  stem = base_stem if index is None else f"{base_stem}-{index}"
   cached = _find_image(cache_dir, stem)
   if (
     cached is not None
     and time.time() - cached[0].stat().st_mtime < BOARD_MEDIA_CACHE_TTL_S
   ):
     return _serve_image(cached)
+  suffix = (
+    f"board/media/{post_id}" if index is None
+    else f"board/media/{post_id}/{index}"
+  )
   try:
-    mime, data = await _download_board_media(
-      _peer_service_url(host, f"board/media/{post_id}")
-    )
+    mime, data = await _download_board_media(_peer_service_url(host, suffix))
     target = cache_dir / f"{stem}.{_ATTACHMENT_MIME_EXT[mime]}"
     atomic_write(target, data)
     for _old_mime, ext in _ATTACHMENT_MIME_EXT.items():
@@ -1110,6 +1193,37 @@ async def get_board_media_for_owner(
     if cached is None:
       raise HTTPException(status_code=404, detail="Board image not found.")
   return _serve_image(cached)
+
+
+@router.get("/board-media/{post_id}")
+async def get_board_media_for_owner(
+  post_id: str,
+  community_host: str | None = None,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Serve a community-board image (the first, for legacy single-image posts)."""
+  _require_owner_or_common_app(db, principal)
+  if not _valid_id(post_id):
+    raise HTTPException(status_code=400, detail="Post id is invalid.")
+  return await _serve_owner_board_media(_browse_community_host(community_host), post_id, None)
+
+
+@router.get("/board-media/{post_id}/{index}")
+async def get_board_media_index_for_owner(
+  post_id: str,
+  index: int,
+  community_host: str | None = None,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Serve one image from a multi-image community-board post."""
+  _require_owner_or_common_app(db, principal)
+  if not _valid_id(post_id):
+    raise HTTPException(status_code=400, detail="Post id is invalid.")
+  if not 0 <= index < _MAX_BOARD_ATTACHMENTS:
+    raise HTTPException(status_code=400, detail="Image index is invalid.")
+  return await _serve_owner_board_media(_browse_community_host(community_host), post_id, index)
 
 
 @router.get("/feed")
@@ -1170,7 +1284,13 @@ async def like_post(
   identity = _load_identity()
   host = _browse_community_host(community_host)
   if host == _own_host():
-    return _toggle_board_like(post_id, _own_host())
+    result = _toggle_board_like(post_id, _own_host())
+    author_host = result.pop("author_host", None)
+    if result.pop("activity", False) and author_host:
+      await _relay_board_activity(
+        "like", author_host, _own_host(), identity.get("handle") or "", post_id,
+      )
+    return result
   envelope = {
     "v": 0,
     "type": "board_react",
@@ -1214,10 +1334,16 @@ async def reply_to_post(
   reply_id = str(uuid.uuid4())
   sent_at = time.time()
   if host == _own_host():
-    return _add_board_reply(
+    result = _add_board_reply(
       post_id, reply_id, _own_host(), identity.get("handle") or "",
       text, sent_at,
     )
+    author_host = result.pop("author_host", None)
+    if result.pop("activity", False) and author_host:
+      await _relay_board_activity(
+        "reply", author_host, _own_host(), identity.get("handle") or "", post_id,
+      )
+    return result
   envelope = {
     "v": 0,
     "type": "board_reply",
@@ -1236,6 +1362,66 @@ async def reply_to_post(
     )
     response.raise_for_status()
     return response.json()
+  except Exception as exc:
+    raise HTTPException(
+      status_code=502, detail="Community host could not be reached."
+    ) from exc
+
+
+class DeletePost(BaseModel):
+  post_id: str
+
+
+@router.post("/delete")
+async def delete_own_post(
+  body: DeletePost,
+  community_host: str | None = None,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Delete one of the owner's own board posts from the community host."""
+  require_nondelegated_owner_control(principal)
+  _require_owner_or_common_app(db, principal)
+  post_id = body.post_id.strip()
+  if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
+    raise HTTPException(status_code=400, detail="Post id is invalid.")
+  identity = _load_identity()
+  host = _browse_community_host(community_host)
+  if host == _own_host():
+    return _public_store.delete_post(post_id, _own_host())
+  envelope = {
+    "v": 0,
+    "type": "board_delete",
+    "post_id": post_id,
+    "from": _own_host(),
+    "sent_at": time.time(),
+  }
+  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+  try:
+    response = await federation_request(
+      "POST", _peer_service_url(host, "board/delete"), json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return response.json()
+  except httpx.HTTPStatusError as exc:
+    # The host was reachable but refused. An older release has no delete route
+    # (404) or rejects the unknown envelope (400); either way it cannot delete
+    # yet, so say that plainly instead of a misleading "unreachable". Our client
+    # only ever sends a valid id and envelope, so those codes are not our fault.
+    if exc.response.status_code in (400, 404):
+      raise HTTPException(
+        status_code=501,
+        detail="This community server doesn’t support deleting posts yet.",
+      ) from exc
+    if exc.response.status_code == 403:
+      raise HTTPException(
+        status_code=403, detail="You can only delete your own posts.",
+      ) from exc
+    raise HTTPException(
+      status_code=502, detail="The post could not be deleted.",
+    ) from exc
   except Exception as exc:
     raise HTTPException(
       status_code=502, detail="Community host could not be reached."

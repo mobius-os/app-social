@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowUp, Chat, Heart, HeartFilled, ImageSquare, Plus,
+  ArrowUp, Chat, Heart, HeartFilled, ImageSquare, Plus, Trash,
 } from '@openai/apps-sdk-ui/components/Icon'
 import {
-  avatarHue, getPeerAvatar, getReplies, initials, likePost, postReply,
-  publishPost, timeAgo,
+  avatarHue, deletePost, getPeerAvatar, getReplies, initials, likePost,
+  postReply, publishPost, timeAgo,
 } from '../api.js'
 import {
   boardRefreshDelay, optimisticLikeChange, reconcileReplies, threadRefreshDelay,
 } from '../reconciliation.js'
 import { useModalFocus } from './modalFocus.js'
 import { LANDING_DATA_URL } from './landingImage.js'
-import { BoardImage, prepareImage, SelectedImageStrip } from './Media.jsx'
+import { BoardImage, prepareImage, SelectedImagesStrip } from './Media.jsx'
+
+const MAX_POST_IMAGES = 4
+const GALLERY_BUDGET_BYTES = 1.35 * 1024 * 1024
 import {
   createParticipationIntent, participationActionLabel, participationStep,
 } from '../participation.js'
@@ -83,8 +86,10 @@ export default function Board({
 }) {
   const [draft, setDraft] = useState('')
   const [posting, setPosting] = useState(false)
-  const [processingImage, setProcessingImage] = useState(false)
-  const [selectedImage, setSelectedImage] = useState(null)
+  const [pending, setPending] = useState(null)
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [hiddenIds, setHiddenIds] = useState(() => new Set())
+  const [selectedImages, setSelectedImages] = useState([])
   const [likeOverrides, setLikeOverrides] = useState({})
   const [replyPost, setReplyPost] = useState(null)
   const [replies, setReplies] = useState([])
@@ -101,6 +106,7 @@ export default function Board({
     if (!posting && !handoffBusy) setComposing(false)
   })
   const repliesRef = useModalFocus(Boolean(replyPost), () => { if (!replySending) closeReplies() })
+  const deleteRef = useModalFocus(Boolean(deleteTarget), () => setDeleteTarget(null))
   replySendingRef.current = replySending
 
   function countFor(post) {
@@ -325,15 +331,20 @@ export default function Board({
         postId: intent.post_id,
         text: intent.text,
         attachment: intent.attachment,
+        attachments: intent.attachments,
       })
       return
     }
     if (intent.kind === 'post') {
       setDraft(intent.text || '')
-      setSelectedImage(intent.attachment ? {
-        payload: intent.attachment,
-        previewUrl: `data:${intent.attachment.mime};base64,${intent.attachment.data_b64}`,
-      } : null)
+      const saved = Array.isArray(intent.attachments) && intent.attachments.length
+        ? intent.attachments
+        : (intent.attachment ? [intent.attachment] : [])
+      setSelectedImages(saved.map((attachment, i) => ({
+        id: `resumed-${i}`,
+        payload: attachment,
+        previewUrl: `data:${attachment.mime};base64,${attachment.data_b64}`,
+      })))
       setComposing(true)
       return
     }
@@ -351,42 +362,133 @@ export default function Board({
     button?.focus?.()
   }
 
-  async function chooseImage(event) {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) return
-    setProcessingImage(true)
+  async function doDelete() {
+    const post = deleteTarget
+    if (!post) return
+    setDeleteTarget(null)
+    // Remove it from view immediately; restore it if the server rejects.
+    setHiddenIds((prior) => new Set(prior).add(post.id))
     try {
-      setSelectedImage(await prepareImage(file))
+      await deletePost(post.id)
     } catch (error) {
-      showToast(error.message, 'error')
-    } finally {
-      setProcessingImage(false)
+      // Only a failed delete un-hides the post; a later refresh failure must not
+      // resurrect a post the server already removed.
+      setHiddenIds((prior) => {
+        const next = new Set(prior)
+        next.delete(post.id)
+        return next
+      })
+      showToast(error.message || 'This post couldn’t be deleted.', 'error')
+      return
     }
+    showToast('Post deleted', 'success')
+    onRefresh(true)
+  }
+
+  function chooseImage(event) {
+    const files = Array.from(event.target.files || [])
+    event.target.value = ''
+    if (!files.length) return
+    const additions = []
+    for (const file of files) {
+      if (selectedImages.length + additions.length >= MAX_POST_IMAGES) {
+        showToast(`You can attach up to ${MAX_POST_IMAGES} images.`, 'error')
+        break
+      }
+      if (!file.type?.startsWith('image/')) {
+        showToast('Choose image files only.', 'error')
+        continue
+      }
+      additions.push({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      })
+    }
+    if (additions.length) setSelectedImages(prior => [...prior, ...additions])
+  }
+
+  function removeImage(index) {
+    setSelectedImages((prior) => {
+      const image = prior[index]
+      if (image?.file && image.previewUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(image.previewUrl)
+      }
+      return prior.filter((_, i) => i !== index)
+    })
+  }
+
+  // Compress each selected image now, sharing a byte budget so the whole
+  // gallery (plus the first image kept for old hosts) fits one federation
+  // envelope. Items resumed from a saved draft already carry a payload.
+  async function collectImagePayloads(images) {
+    if (!images.length) return { attachment: undefined, attachments: undefined }
+    const budget = images.length <= 1
+      ? undefined
+      : Math.floor(GALLERY_BUDGET_BYTES / (images.length + 1))
+    const payloads = []
+    for (const image of images) {
+      payloads.push(image.payload || (await prepareImage(image.file, budget)).payload)
+    }
+    return payloads.length === 1
+      ? { attachment: payloads[0], attachments: undefined }
+      : { attachment: undefined, attachments: payloads }
   }
 
   async function publish() {
-    const completedIntent = createParticipationIntent('post', {
-      text: draft, attachment: selectedImage?.payload,
-    })
     const text = draft.trim()
-    const image = selectedImage
-    if (!text && !image) return
+    const images = selectedImages
+    if (!text && !images.length) return
     markActivity()
     setPosting(true)
+    let attachment
+    let attachments
     try {
-      await publishPost(text, image?.payload)
+      ({ attachment, attachments } = await collectImagePayloads(images))
+    } catch (error) {
+      setPosting(false)
+      showToast(error.message || 'An image couldn’t be prepared.', 'error')
+      return
+    }
+    const completedIntent = createParticipationIntent('post', {
+      text, attachment, attachments,
+    })
+    // Show the post at the top of the board immediately and hand the composer
+    // back; the federation round-trip reconciles in the background. On failure
+    // we drop the placeholder and restore the draft and its images.
+    setPending({
+      id: `pending-${Date.now()}`,
+      host: me?.host,
+      handle: me?.handle || '',
+      text,
+      hasImage: images.length > 0,
+      created_at: Date.now() / 1000,
+    })
+    setDraft('')
+    setSelectedImages([])
+    setComposing(false)
+    try {
+      await publishPost(text, attachment, attachments)
       window.mobius?.signal?.('item_created', { type: 'board_post' })
       onCompleteParticipation?.('post', null, completedIntent)
-      setDraft('')
-      setSelectedImage(null)
-      setComposing(false)
+      // Release the local previews now that the post succeeded (on failure we
+      // restore them for a retry, so only revoke on the happy path).
+      for (const image of images) {
+        if (image.file && image.previewUrl?.startsWith('blob:')) {
+          URL.revokeObjectURL(image.previewUrl)
+        }
+      }
+      await onRefresh(true)
+      setPending(null)
       showToast('Posted to the board', 'success')
-      onRefresh(true)
     } catch (error) {
+      setPending(null)
+      setDraft(text)
+      setSelectedImages(images)
+      setComposing(true)
       window.mobius?.signal?.('error', { message: error.message, source: 'publish' })
       showToast(
-        (error.status === 400 || error.status === 404) && image
+        (error.status === 400 || error.status === 404) && images.length
           ? 'Photo posts aren’t available on this server yet.'
           : error.message,
         'error',
@@ -394,6 +496,26 @@ export default function Board({
     } finally {
       setPosting(false)
     }
+  }
+
+  async function submitPost() {
+    if (canInteract) return publish()
+    // Not joined yet: compress now, then save the draft to resume after joining.
+    setPosting(true)
+    let payloads
+    try {
+      payloads = await collectImagePayloads(selectedImages)
+    } catch (error) {
+      setPosting(false)
+      showToast(error.message || 'An image couldn’t be prepared.', 'error')
+      return
+    }
+    setPosting(false)
+    await continueParticipation('post', {
+      text: draft,
+      attachment: payloads.attachment,
+      attachments: payloads.attachments,
+    })
   }
 
   return (
@@ -442,7 +564,7 @@ export default function Board({
           <button className="cn-btn cn-btn-secondary" onClick={() => onRefresh()}>Try again</button>
         </div>
       )}
-      {feedState === 'ready' && feed.length === 0 && (
+      {feedState === 'ready' && feed.length === 0 && !pending && (
         <div className="cn-empty">
           {LANDING_DATA_URL
             ? <img className="cn-landing" style={{ maxWidth: 180, opacity: 0.9 }} src={LANDING_DATA_URL} alt="" />
@@ -455,7 +577,26 @@ export default function Board({
         </div>
       )}
       <div className="cn-feed">
-        {feed.map((post) => {
+        {pending && (
+          <article className="cn-post is-pending" aria-label="Posting">
+            <div className="cn-post-head">
+              <Avatar name={pending.handle} host={pending.host} size="small" />
+              <span className="cn-person">
+                <span>
+                  <span className="cn-person-name">
+                    {pending.handle ? `@${pending.handle}` : 'You'}
+                  </span>
+                  <span className="cn-meta" style={{ display: 'block' }}>Posting…</span>
+                </span>
+              </span>
+            </div>
+            {pending.text && <p className="cn-post-copy">{pending.text}</p>}
+            {pending.hasImage && !pending.text && (
+              <p className="cn-post-copy">Sharing your photo…</p>
+            )}
+          </article>
+        )}
+        {feed.filter((post) => !hiddenIds.has(post.id)).map((post) => {
           const like = likeOverrides[post.id] || {
             liked: !!post.liked, count: post.like_count || 0,
           }
@@ -507,6 +648,16 @@ export default function Board({
                   <Chat aria-hidden="true" />
                   <span>{replyCount}</span>
                 </button>
+                {me?.host && post.host === me.host && (
+                  <button
+                    className="cn-react is-delete"
+                    onClick={() => setDeleteTarget(post)}
+                    aria-label="Delete post"
+                    title="Delete post"
+                  >
+                    <Trash aria-hidden="true" />
+                  </button>
+                )}
               </div>
             </article>
           )
@@ -525,36 +676,59 @@ export default function Board({
               : participationStep(me) === 'join'
                 ? 'Joining shares your handle and profile picture. You’ll still review this post before sharing it.'
                 : 'Write now, then continue in Möbius · You. Nothing will be posted automatically.'}</p>
-            <SelectedImageStrip selected={selectedImage} onRemove={() => setSelectedImage(null)} />
             <div className="cn-post-compose">
+              <Avatar name={me?.handle} host={me?.host} size="small" />
               <textarea
                 className="cn-textarea"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="What would you like to share?"
+                placeholder="What’s happening?"
                 aria-label="Post text"
                 maxLength={4000}
+                autoFocus
               />
-              <input ref={fileRef} className="cn-file-input" type="file" accept="image/*"
-                     onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
-              <button className="cn-compose-image" type="button" onClick={() => fileRef.current?.click()}
-                      disabled={posting || processingImage} aria-label="Attach photo">
-                {processingImage ? <span className="cn-spinner" /> : <ImageSquare aria-hidden="true" />}
-              </button>
             </div>
+            <SelectedImagesStrip selected={selectedImages} onRemove={removeImage} />
+            <input ref={fileRef} className="cn-file-input" type="file" accept="image/*" multiple
+                   onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
             <div className="cn-post-sheet-actions">
+              <button className="cn-compose-image" type="button" onClick={() => fileRef.current?.click()}
+                      disabled={posting || selectedImages.length >= MAX_POST_IMAGES}
+                      aria-label="Attach photo"
+                      title={selectedImages.length >= MAX_POST_IMAGES ? `Up to ${MAX_POST_IMAGES} images` : 'Attach photo'}>
+                <ImageSquare aria-hidden="true" />
+              </button>
               <button className="cn-btn cn-btn-secondary" onClick={() => setComposing(false)} disabled={posting || handoffBusy}>
                 Cancel
               </button>
-              <button className="cn-btn cn-btn-primary" onClick={() => canInteract
-                        ? publish()
-                        : continueParticipation('post', {
-                          text: draft, attachment: selectedImage?.payload,
-                        })}
-                      disabled={posting || handoffBusy || participationBusy || processingImage || (!draft.trim() && !selectedImage)}>
+              <button className="cn-btn cn-btn-primary" onClick={submitPost}
+                      disabled={posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length)}>
                 {posting ? 'Posting…' : handoffBusy || participationBusy
                   ? 'Please wait…'
                   : canInteract ? 'Post' : participationActionLabel(participationStep(me), 'post')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="Delete post"
+             onClick={() => setDeleteTarget(null)}>
+          <div ref={deleteRef} tabIndex={-1} className="cn-sheet cn-confirm-sheet"
+               onClick={(e) => e.stopPropagation()}>
+            <div className="cn-grabber" aria-hidden="true" />
+            <h3 className="cn-sheet-title">Delete this post?</h3>
+            <p className="cn-sheet-body">
+              This removes your post from the community board for everyone. This
+              can’t be undone.
+            </p>
+            <div className="cn-sheet-actions">
+              <button className="cn-btn cn-btn-secondary" onClick={() => setDeleteTarget(null)}>
+                Cancel
+              </button>
+              <button className="cn-btn cn-btn-danger" onClick={doDelete}>
+                Delete
               </button>
             </div>
           </div>

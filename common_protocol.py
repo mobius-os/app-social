@@ -33,6 +33,9 @@ MAX_ENVELOPE_BYTES = 32_768
 MAX_ATTACHMENT_ENVELOPE_BYTES = 2 * 1024 * 1024
 MAX_ATTACHMENT_BYTES = 1024 * 1024
 MAX_ATTACHMENT_DIMENSION = 8192
+# One board post may carry a small gallery. The whole envelope still obeys
+# MAX_ATTACHMENT_ENVELOPE_BYTES, so callers keep the images small enough to fit.
+MAX_BOARD_ATTACHMENTS = 4
 MAX_REPLY_AUTHOR_CHARS = 80
 MAX_REPLY_EXCERPT_CHARS = 140
 MAX_AVATAR_BYTES = 512 * 1024
@@ -136,6 +139,31 @@ def validate_attachment(value: Any) -> tuple[dict, bytes] | None:
   return value, data
 
 
+def validate_attachments(
+  value: Any, *, max_count: int = MAX_BOARD_ATTACHMENTS,
+) -> list[tuple[dict, bytes]] | None:
+  """Validate the multi-image shape: a bounded list of single attachments.
+
+  Each item is validated exactly like a lone attachment; the surrounding
+  envelope cap (MAX_ATTACHMENT_ENVELOPE_BYTES) bounds the combined size.
+  """
+  if value is None:
+    return None
+  if not isinstance(value, list) or not value:
+    raise HTTPException(status_code=400, detail="Attachments are invalid.")
+  if len(value) > max_count:
+    raise HTTPException(
+      status_code=400, detail=f"At most {max_count} images are allowed.",
+    )
+  decoded: list[tuple[dict, bytes]] = []
+  for item in value:
+    one = validate_attachment(item)
+    if one is None:
+      raise HTTPException(status_code=400, detail="Attachments are invalid.")
+    decoded.append(one)
+  return decoded
+
+
 def validate_reply_to(value: Any) -> dict | None:
   """Validate a self-contained quoted reply without resolving its target."""
   if value is None:
@@ -175,9 +203,13 @@ async def read_envelope(request: Request) -> dict:
     raise HTTPException(status_code=400, detail="Envelope is not JSON.") from exc
   if not isinstance(envelope, dict):
     raise HTTPException(status_code=400, detail="Envelope is not an object.")
+  attachments = envelope.get("attachments")
   supports_large_payload = (
     envelope.get("type") in _ATTACHMENT_ENVELOPE_TYPES
-    and envelope.get("attachment") is not None
+    and (
+      envelope.get("attachment") is not None
+      or (isinstance(attachments, list) and len(attachments) > 0)
+    )
   ) or (
     envelope.get("type") == "message" and envelope.get("enc") is not None
   )
@@ -325,6 +357,7 @@ __all__ = [
   "ACTOR_CACHE_LIMIT", "ACTOR_CACHE_TTL_S", "ATTACHMENT_MIME_EXT", "ActorVerifier",
   "CLOCK_SKEW_S", "MAX_ATTACHMENT_BYTES", "MAX_ATTACHMENT_DIMENSION",
   "MAX_ATTACHMENT_ENVELOPE_BYTES", "MAX_AVATAR_BYTES", "MAX_BIO_CHARS",
+  "MAX_BOARD_ATTACHMENTS", "validate_attachments",
   "MAX_ENVELOPE_BYTES", "MAX_NAME_CHARS", "MAX_REPLY_TEXT_CHARS",
   "MAX_TEXT_CHARS", "OUTBOUND_TIMEOUT_S", "PROTOCOL", "PUBLIC_SERVICE_PATH",
   "canonical", "peer_base_url", "peer_service_url", "read_envelope", "sign",
