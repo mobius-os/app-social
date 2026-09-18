@@ -16,7 +16,12 @@ export async function joinGlobalCommunity(profile, saveProfile, join) {
   }
   if (!result) result = await join()
   if (result.directory !== 'registered') {
-    throw new Error('Your profile is not listed in Social yet. Try joining again; your saved conversations are unchanged.')
+    const detail = result.directory === 'verification_failed'
+      ? 'The community host could not verify this Möbius identity. Try joining again; your saved conversations are unchanged.'
+      : result.directory === 'rejected'
+        ? 'The community host rejected this profile. Try joining again; your saved conversations are unchanged.'
+        : 'The community host could not be reached. Try joining again; your saved conversations are unchanged.'
+    throw new Error(detail)
   }
   return result
 }
