@@ -86,20 +86,22 @@ test('deletion hides only the creator’s group and preserves other members’ r
 })
 
 for (const [label, clear, path] of [
-  ['group', clearGroupUnread, 'groups/one/meta.json'],
-  ['direct conversation', clearUnread, 'conversations/one/meta.json'],
+  ['group', clearGroupUnread, '/api/services/social/groups/one/read'],
+  ['direct conversation', clearUnread, '/api/services/social/conversations/one/read'],
 ]) {
-  test(`marking a ${label} read cannot overwrite a concurrent membership, deletion or message update`, async () => {
+  test(`marking a ${label} read stays behind Social’s transaction owner`, async () => {
+    setToken('scoped-test')
     globalThis.window = { mobius: { storage: {
-      async getWithVersion(got) { assert.equal(got, path); return { value: { unread: 1 }, version: 'before-change' } },
-      async durableWrite(got, value, options) {
-        assert.equal(got, path)
-        assert.deepEqual(value, { unread: 0 })
-        assert.deepEqual(options, { ifMatch: 'before-change' })
-        throw new Error('conflict')
-      },
-      set() { assert.fail('an unconditional write could revive deleted metadata') },
+      getWithVersion() { assert.fail('the UI must not rewrite conversation metadata') },
+      durableWrite() { assert.fail('the UI must not rewrite conversation metadata') },
     } } }
-    await assert.rejects(() => clear('one'), /conflict/)
+    globalThis.fetch = async (url, options) => {
+      assert.equal(url, path)
+      assert.equal(options.method, 'POST')
+      assert.equal(options.headers.Authorization, 'Bearer scoped-test')
+      assert.deepEqual(JSON.parse(options.body), {})
+      return Response.json({ status: 'read', changed: true })
+    }
+    assert.deepEqual(await clear('one'), { status: 'read', changed: true })
   })
 }

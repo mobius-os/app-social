@@ -11,6 +11,10 @@ import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
 import GroupDetails from './GroupDetails.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
+import {
+  isDefinitePrecommitRejection, reconcileLatestPage, reconcileOlderPage,
+  settleOptimistic,
+} from '../message_ui_state.js'
 
 export default function GroupThread({
   group, me, version, onBack, showToast, onOpenImage,
@@ -19,7 +23,11 @@ export default function GroupThread({
   const [currentGroup, setCurrentGroup] = useState(group)
   const [loadError, setLoadError] = useState('')
   const refreshRequest = useRef(0)
+  const paginationGeneration = useRef(0)
+  const seenVersion = useRef(version)
   const [messages, setMessages] = useState(null)
+  const [nextCursor, setNextCursor] = useState(null)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [processingImage, setProcessingImage] = useState(false)
@@ -28,30 +36,92 @@ export default function GroupThread({
   const [requestBusy, setRequestBusy] = useState('')
   const [requestError, setRequestError] = useState('')
   const scrollRef = useRef(null)
+  const messagesRef = useRef(null)
+  const stickToBottom = useRef(true)
   const inputRef = useRef(null)
   const fileRef = useRef(null)
   const gid = group.gid
 
-  async function refresh() {
+  function updateMessages(next) {
+    const value = typeof next === 'function' ? next(messagesRef.current) : next
+    messagesRef.current = value
+    setMessages(value)
+  }
+
+  async function refresh({ replace = false } = {}) {
     const request = ++refreshRequest.current
     try {
-      const [loaded, metadata] = await Promise.all([listGroupMessages(gid), getGroup(gid)])
-      if (request !== refreshRequest.current) return
-      setMessages(loaded); setCurrentGroup(metadata); setLoadError('')
+      const [page, metadata] = await Promise.all([listGroupMessages(gid), getGroup(gid)])
+      if (request !== refreshRequest.current) return false
+      const reconciled = reconcileLatestPage(messagesRef.current, page, { replace })
+      updateMessages(reconciled.messages)
+      if (reconciled.resetCursor) {
+        paginationGeneration.current += 1
+        setNextCursor(reconciled.nextCursor)
+      }
+      setCurrentGroup(metadata); setLoadError('')
+      return true
     } catch (error) {
       if (request === refreshRequest.current) setLoadError('Messages couldn’t be refreshed. Your saved history hasn’t been removed.')
+      return false
     }
   }
 
   useEffect(() => {
-    refresh()
+    seenVersion.current = version
+    paginationGeneration.current += 1
+    updateMessages(null)
+    setNextCursor(null)
+    refresh({ replace: true })
     if (requestStatus(currentGroup) === 'accepted') clearGroupUnread(gid).catch(() => {})
     return () => { refreshRequest.current += 1 }
-  }, [gid, version])
+  }, [gid])
+  useEffect(() => {
+    if (version > 0 && version !== seenVersion.current) {
+      seenVersion.current = version
+      refresh()
+      if (requestStatus(currentGroup) === 'accepted') clearGroupUnread(gid).catch(() => {})
+    }
+  }, [version])
+  async function loadEarlier() {
+    if (!nextCursor || loadingEarlier) return
+    const el = scrollRef.current
+    const previousHeight = el?.scrollHeight || 0
+    stickToBottom.current = false
+    setLoadingEarlier(true)
+    const generation = paginationGeneration.current
+    try {
+      const page = await listGroupMessages(gid, nextCursor)
+      const reconciled = reconcileOlderPage(
+        messagesRef.current, page, generation, paginationGeneration.current,
+      )
+      if (!reconciled) return
+      updateMessages(reconciled.messages)
+      setNextCursor(reconciled.nextCursor)
+      setLoadError('')
+      requestAnimationFrame(() => {
+        if (el) el.scrollTop += el.scrollHeight - previousHeight
+      })
+    } catch {
+      if (generation === paginationGeneration.current) {
+        setLoadError('Earlier messages couldn’t be loaded. Your saved history hasn’t been removed.')
+      }
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = requestStatus(currentGroup) === 'pending' ? 0 : el.scrollHeight
+    if (!el) return
+    if (requestStatus(currentGroup) === 'pending') el.scrollTop = 0
+    else if (stickToBottom.current) el.scrollTop = el.scrollHeight
   }, [messages?.length, selectedImage, replyTarget, currentGroup.request_status])
+
+  function trackScroll() {
+    const el = scrollRef.current
+    if (!el || requestStatus(currentGroup) === 'pending') return
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 72
+  }
 
   async function chooseImage(event) {
     const file = event.target.files?.[0]
@@ -97,12 +167,15 @@ export default function GroupThread({
     if ((!text && !image) || sending || processingImage || currentGroup.deleted_at) return
 
     setSending(true)
-    setMessages((prior) => [...(prior || []), {
-      id: `local-${Date.now()}`,
+    const optimisticId = `local-${crypto.randomUUID()}`
+    updateMessages((prior) => [...(prior || []), {
+      id: optimisticId,
       dir: 'out',
       text,
       sent_at: Date.now() / 1000,
       status: 'sending',
+      _client_pending: true,
+      _client_unconfirmed_history: true,
       ...(image ? {
         attachment: {
           mime: image.payload.mime,
@@ -118,6 +191,7 @@ export default function GroupThread({
     setReplyTarget(null)
     try {
       const result = await sendGroupMessage(gid, text, image?.payload, reply)
+      updateMessages((prior) => settleOptimistic(prior, optimisticId, result))
       window.mobius?.signal?.('item_created', { type: 'group_message' })
       if (result.status === 'failed') {
         showToast(result.detail || 'The group host couldn’t be reached.', 'error')
@@ -128,15 +202,23 @@ export default function GroupThread({
       await refresh()
     } catch (error) {
       window.mobius?.signal?.('error', { message: error.message, source: 'group_send' })
-      setDraft(text)
-      setSelectedImage(image)
-      setReplyTarget(reply)
-      showToast(
-        (error.status === 400 || error.status === 404) && (image || reply)
-          ? 'Photo attachments and quoted replies aren’t available on this server yet.'
-          : error.message,
-        'error',
-      )
+      const rejectedBeforeSave = isDefinitePrecommitRejection(error)
+      if (rejectedBeforeSave) {
+        updateMessages((prior) => (prior || []).filter((message) => message.id !== optimisticId))
+        setDraft(text)
+        setSelectedImage(image)
+        setReplyTarget(reply)
+        showToast(
+          (error.status === 400 || error.status === 404) && (image || reply)
+            ? 'Photo attachments and quoted replies aren’t available on this server yet.'
+            : error.message,
+          'error',
+        )
+      } else {
+        updateMessages((prior) => (prior || []).map((message) =>
+          message.id === optimisticId ? { ...message, status: 'unknown' } : message))
+        showToast('Delivery is uncertain. Check the conversation before sending again.', 'error')
+      }
       await refresh()
     } finally {
       setSending(false)
@@ -173,7 +255,7 @@ export default function GroupThread({
     const tick = mine && (
       <span className="cn-tick" aria-label={message.status || 'delivered'}>
         {message.status === 'sending' ? <Clock aria-hidden="true" />
-          : message.status === 'failed' ? <Warning aria-hidden="true" />
+          : ['failed', 'unknown'].includes(message.status) ? <Warning aria-hidden="true" />
           : <Check aria-hidden="true" />}
       </span>
     )
@@ -196,8 +278,10 @@ export default function GroupThread({
         ))}
       />,
     )
-    if (message.status === 'failed') {
-      rendered.push(<span className="cn-failed-note" key={`fail-${message.id}`}>Not delivered</span>)
+    if (message.status === 'failed' || message.status === 'unknown') {
+      rendered.push(<span className="cn-failed-note" key={`fail-${message.id}`}>
+        {message.status === 'failed' ? 'Not delivered' : 'Delivery uncertain · Check before sending again'}
+      </span>)
     }
   }
 
@@ -214,7 +298,7 @@ export default function GroupThread({
         </span>
         <button className="cn-btn cn-btn-secondary" onClick={() => setDetails(true)} aria-label="Group details">Details</button>
       </div>
-      <div className="cn-thread-msgs" ref={scrollRef}>
+      <div className="cn-thread-msgs" ref={scrollRef} onScroll={trackScroll}>
         {requestStatus(currentGroup) === 'pending' && <section className="cn-request-panel" aria-labelledby="cn-group-request-title">
           <div>
             <strong id="cn-group-request-title">Group invitation</strong>
@@ -233,6 +317,12 @@ export default function GroupThread({
                     onClick={() => decideInvitation('decline')}>Decline</button>
           </div>
         </section>}
+        {nextCursor && (
+          <button className="cn-history-more" type="button" disabled={loadingEarlier}
+                  onClick={loadEarlier}>
+            {loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
+          </button>
+        )}
         {loadError && <div className="cn-directory-error" role="alert"><p>{loadError}</p><button className="cn-btn cn-btn-secondary" onClick={refresh}>Try again</button></div>}
         {messages === null && !loadError && <div className="cn-center"><div className="cn-spinner" /></div>}
         {messages !== null && messages.length === 0 && (
@@ -258,6 +348,7 @@ export default function GroupThread({
             {processingImage ? <span className="cn-spinner" /> : <ImageSquare aria-hidden="true" />}
           </button>
           <input ref={inputRef} value={draft} onChange={(event) => setDraft(event.target.value)}
+                 disabled={sending || processingImage}
                  placeholder="Message" autoComplete="off" aria-label="Message" />
           <button className="cn-send" type="submit"
                   disabled={sending || processingImage || (!draft.trim() && !selectedImage)} aria-label="Send">

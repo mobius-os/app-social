@@ -31,16 +31,21 @@ export const getMe = () => call('me')
 export const join = () => call('join', { method: 'POST', body: JSON.stringify({}) })
 export const saveMe = (settings) =>
   call('me', { method: 'PUT', body: JSON.stringify(settings) })
-export const sendMessage = (to, text, peerHandle, attachment, replyTo) =>
+export const sendMessage = (id, to, text, peerHandle, attachment, replyTo) =>
   call('send', {
     method: 'POST',
     body: JSON.stringify({
+      id,
       to,
       text,
       ...(peerHandle ? { peer_handle: peerHandle } : {}),
       ...(attachment ? { attachment } : {}),
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
+  })
+export const retryMessage = (peer, id) =>
+  call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/retry`, {
+    method: 'POST', body: JSON.stringify({}),
   })
 export const publishPost = (text, attachment, attachments) =>
   call('publish', {
@@ -95,24 +100,42 @@ export async function listConversations() {
   return (await listMetadata('conversations/')).sort((a, b) => (b.last_at || 0) - (a.last_at || 0))
 }
 
-export async function listMessages(peer) {
+async function listStoredMessages(prefix) {
   const store = window.mobius?.storage
   if (!store) return []
-  const entries = await store.list(`conversations/${peer}/msgs/`, { includeContent: true })
+  const entries = await store.list(prefix, { includeContent: true })
   const loaded = await Promise.all(
     entries.map((e) => (e.content !== undefined ? e.content : store.get(e.path).catch(() => null)))
   )
   return loaded.filter(Boolean).sort((a, b) => (a.sent_at || 0) - (b.sent_at || 0))
 }
 
-async function markConversationRead(path) {
-  const store = window.mobius?.storage
-  if (!store) return
-  const { value: meta, version } = await store.getWithVersion(path)
-  if (meta?.unread) await store.durableWrite(path, { ...meta, unread: 0 }, { ifMatch: version })
+async function listHistory(path, fallbackPrefix, before) {
+  const query = new URLSearchParams({ limit: '50' })
+  if (before) query.set('before', before)
+  try {
+    return await call(`${path}?${query}`)
+  } catch (error) {
+    // Keep already-cached history readable offline. Online service failures
+    // remain visible rather than being mistaken for an empty conversation.
+    if (before || error.status) throw error
+    return {
+      messages: await listStoredMessages(fallbackPrefix),
+      next_cursor: null,
+    }
+  }
 }
 
-export const clearUnread = peer => markConversationRead(`conversations/${peer}/meta.json`)
+export const listMessages = (peer, before = null) => listHistory(
+  `conversations/${encodeURIComponent(peer)}/messages`,
+  `conversations/${peer}/msgs/`,
+  before,
+)
+
+export const clearUnread = peer =>
+  call(`conversations/${encodeURIComponent(peer)}/read`, {
+    method: 'POST', body: JSON.stringify({}),
+  })
 export const acceptMessageRequest = peer =>
   call(`requests/dm/${encodeURIComponent(peer)}/accept`, { method: 'POST', body: JSON.stringify({}) })
 export const declineMessageRequest = peer =>
@@ -154,17 +177,16 @@ export async function getGroup(gid) {
   return value
 }
 
-export async function listGroupMessages(gid) {
-  const store = window.mobius?.storage
-  if (!store) return []
-  const entries = await store.list(`groups/${gid}/msgs/`, { includeContent: true })
-  const loaded = await Promise.all(
-    entries.map((e) => (e.content !== undefined ? e.content : store.get(e.path)))
-  )
-  return loaded.filter(Boolean).sort((a, b) => (a.sent_at || 0) - (b.sent_at || 0))
-}
+export const listGroupMessages = (gid, before = null) => listHistory(
+  `groups/${encodeURIComponent(gid)}/messages`,
+  `groups/${gid}/msgs/`,
+  before,
+)
 
-export const clearGroupUnread = gid => markConversationRead(`groups/${gid}/meta.json`)
+export const clearGroupUnread = gid =>
+  call(`groups/${encodeURIComponent(gid)}/read`, {
+    method: 'POST', body: JSON.stringify({}),
+  })
 
 // The creator removes a deleted group from Messages; other members retain history.
 export const groupIsVisible = (group, ownHost) => !group.deleted_at || group.host !== ownHost

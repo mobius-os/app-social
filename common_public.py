@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import fcntl
+import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -70,6 +71,8 @@ class CommonPublicStore:
     self._data_dir = data_dir
     self._directory_lock = threading.Lock()
     self._board_lock = threading.Lock()
+    self._board_index_lock = threading.Lock()
+    self._board_index_ready = False
 
   def data_dir(self) -> Path:
     value = self._data_dir() if callable(self._data_dir) else self._data_dir
@@ -106,6 +109,210 @@ class CommonPublicStore:
     path = self.common_dir() / "board"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+  def board_index_path(self) -> Path:
+    return self.common_dir() / "board-index.sqlite3"
+
+  def board_index_dirty_path(self) -> Path:
+    return self.common_dir() / "board-index.dirty"
+
+  def _mark_board_index_dirty(self) -> bool:
+    """Invalidate the disposable index before source JSON can change."""
+    if self.board_index_dirty_path().is_file():
+      # A prior mutation still needs a full scan.  This writer may mirror its
+      # own row but must not clear the inherited invalidation.
+      return False
+    atomic_write(self.board_index_dirty_path(), str(time.time()))
+    return True
+
+  def _clear_board_index_dirty(self) -> None:
+    try:
+      self.board_index_dirty_path().unlink(missing_ok=True)
+    except OSError:
+      # A retained marker only causes another conservative reconciliation.
+      pass
+
+  @contextmanager
+  def _board_index(self):
+    connection = sqlite3.connect(self.board_index_path(), timeout=5.0)
+    try:
+      connection.row_factory = sqlite3.Row
+      connection.execute("PRAGMA journal_mode=WAL")
+      connection.execute("PRAGMA synchronous=NORMAL")
+      connection.execute("PRAGMA busy_timeout=5000")
+      connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS board_posts (
+          id TEXT PRIMARY KEY,
+          created_at REAL NOT NULL,
+          record_json TEXT NOT NULL,
+          source_mtime_ns INTEGER NOT NULL,
+          source_size INTEGER NOT NULL
+        ) WITHOUT ROWID
+        """
+      )
+      connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS board_posts_feed
+        ON board_posts(created_at DESC, id DESC)
+        """
+      )
+      yield connection
+      connection.commit()
+    except Exception:
+      connection.rollback()
+      raise
+    finally:
+      connection.close()
+
+  @staticmethod
+  def _board_record_values(record: dict, stat) -> tuple:
+    created_at = record.get("created_at", 0)
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+      created_at = 0
+    return (
+      str(record.get("id") or ""), float(created_at),
+      json.dumps(record, separators=(",", ":")),
+      int(stat.st_mtime_ns), int(stat.st_size),
+    )
+
+  @staticmethod
+  def _upsert_board_record(connection: sqlite3.Connection, values: tuple) -> None:
+    connection.execute(
+      """
+      INSERT INTO board_posts(
+        id, created_at, record_json, source_mtime_ns, source_size
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        created_at=excluded.created_at,
+        record_json=excluded.record_json,
+        source_mtime_ns=excluded.source_mtime_ns,
+        source_size=excluded.source_size
+      """,
+      values,
+    )
+
+  def _ensure_board_index(self) -> None:
+    """Reconcile the fast read model with the rollback-safe JSON records.
+
+    Reconciliation runs once per service process. The long-lived community
+    host therefore scans on startup rather than on every feed request, while a
+    rollback to a file-only release can still accept posts and have them
+    imported automatically on the next start.
+    """
+    if self._board_index_ready and not self.board_index_dirty_path().is_file():
+      return
+    with self._board_index_lock:
+      if self._board_index_ready and not self.board_index_dirty_path().is_file():
+        return
+      # Reconciliation and file mutations share the cross-process board lock,
+      # so a late startup scan can never overwrite a newer mirrored mutation.
+      with self._mutation_lock(self._board_lock, "board"):
+        with self._board_index() as connection:
+          existing = {
+            row["id"]: (row["source_mtime_ns"], row["source_size"])
+            for row in connection.execute(
+              "SELECT id, source_mtime_ns, source_size FROM board_posts"
+            )
+          }
+          seen = set()
+          invalid = set()
+          for path in self.board_dir().glob("*.json"):
+            post_id = path.stem
+            seen.add(post_id)
+            try:
+              stat = path.stat()
+            except OSError:
+              continue
+            if existing.get(post_id) == (stat.st_mtime_ns, stat.st_size):
+              continue
+            try:
+              record = self._load_object(path)
+            except HTTPException:
+              invalid.add(post_id)
+              continue
+            if record.get("id") != post_id:
+              invalid.add(post_id)
+              continue
+            self._upsert_board_record(
+              connection, self._board_record_values(record, stat),
+            )
+          stale = (set(existing) - seen) | invalid
+          connection.executemany(
+            "DELETE FROM board_posts WHERE id = ?",
+            ((post_id,) for post_id in stale),
+          )
+        self._clear_board_index_dirty()
+      self._board_index_ready = True
+
+  def _refresh_board_index(self, record: dict, path: Path) -> bool:
+    """Mirror one committed JSON record; a rebuild repairs cache failures."""
+    if not self._board_index_ready:
+      return False
+    try:
+      stat = path.stat()
+      with self._board_index() as connection:
+        self._upsert_board_record(
+          connection, self._board_record_values(record, stat),
+        )
+      return True
+    except (OSError, sqlite3.Error):
+      self._board_index_ready = False
+      return False
+
+  def _remove_from_board_index(self, post_id: str) -> bool:
+    if not self._board_index_ready:
+      return False
+    try:
+      with self._board_index() as connection:
+        connection.execute("DELETE FROM board_posts WHERE id = ?", (post_id,))
+      return True
+    except sqlite3.Error:
+      self._board_index_ready = False
+      return False
+
+  @staticmethod
+  def _present_board_record(raw: dict, viewer: str | None) -> dict:
+    post = dict(raw)
+    likes = post.pop("likes", {})
+    if not isinstance(likes, dict):
+      likes = {}
+    post["like_count"] = len(likes)
+    if viewer is not None:
+      post["liked"] = viewer in likes
+    replies = post.pop("replies", [])
+    if not isinstance(replies, list):
+      replies = []
+    post["reply_count"] = len(replies)
+    post.pop("_reaction_replays", None)
+    return post
+
+  def _read_board_files(
+    self, limit: int, before: float | None, viewer: str | None,
+  ) -> list[dict]:
+    """Availability fallback used only when the disposable index is broken."""
+    posts = []
+    for file in self.board_dir().glob("*.json"):
+      try:
+        raw = self._load_object(file)
+      except HTTPException:
+        continue
+      if before is not None and raw.get("created_at", 0) >= before:
+        continue
+      posts.append(self._present_board_record(raw, viewer))
+    posts.sort(key=lambda post: post.get("created_at", 0), reverse=True)
+    return posts[:limit]
+
+  def _board_count(self) -> int:
+    if not self._board_index_ready:
+      return sum(1 for _ in self.board_dir().glob("*.json"))
+    try:
+      with self._board_index() as connection:
+        row = connection.execute("SELECT COUNT(*) AS count FROM board_posts").fetchone()
+      return int(row["count"])
+    except sqlite3.Error:
+      self._board_index_ready = False
+      return sum(1 for _ in self.board_dir().glob("*.json"))
 
   def board_media_dir(self) -> Path:
     path = self.common_dir() / "board-media"
@@ -182,31 +389,27 @@ class CommonPublicStore:
   def read_board(
     self, limit: int, before: float | None, viewer: str | None = None,
   ) -> list[dict]:
-    posts = []
-    for file in self.board_dir().glob("*.json"):
-      try:
-        raw = self._load_object(file)
-      except HTTPException:
-        # Preserve browsing when one independently-addressed record is damaged.
-        continue
-      post = dict(raw)
-      if before is not None and post.get("created_at", 0) >= before:
-        continue
-      likes = post.pop("likes", {})
-      if not isinstance(likes, dict):
-        likes = {}
-      post["like_count"] = len(likes)
-      if viewer is not None:
-        post["liked"] = viewer in likes
-      replies = post.pop("replies", [])
-      if not isinstance(replies, list):
-        replies = []
-      post["reply_count"] = len(replies)
-      # Replay state is host-internal metadata, never part of the feed.
-      post.pop("_reaction_replays", None)
-      posts.append(post)
-    posts.sort(key=lambda post: post.get("created_at", 0), reverse=True)
-    return posts[:limit]
+    try:
+      self._ensure_board_index()
+      where = "WHERE created_at < ?" if before is not None else ""
+      parameters = (before, limit) if before is not None else (limit,)
+      with self._board_index() as connection:
+        rows = connection.execute(
+          f"""
+          SELECT record_json FROM board_posts
+          {where}
+          ORDER BY created_at DESC, id DESC
+          LIMIT ?
+          """,
+          parameters,
+        ).fetchall()
+      return [
+        self._present_board_record(json.loads(row["record_json"]), viewer)
+        for row in rows
+      ]
+    except (json.JSONDecodeError, sqlite3.Error):
+      self._board_index_ready = False
+      return self._read_board_files(limit, before, viewer)
 
   def board_media_index_path(self, post_id: str, index: int, mime: str) -> Path:
     return self.board_media_dir() / f"{post_id}-{index}.{ATTACHMENT_MIME_EXT[mime]}"
@@ -229,11 +432,15 @@ class CommonPublicStore:
     ``<id>.<ext>``. `attachments` also records a single `attachment` (its first
     image) so a reader that only understands one image still shows something.
     """
+    try:
+      self._ensure_board_index()
+    except sqlite3.Error:
+      self._board_index_ready = False
     with self._mutation_lock(self._board_lock, "board"):
       path = self.board_dir() / f"{post['id']}.json"
       if path.is_file():
         return False
-      if sum(1 for _ in self.board_dir().glob("*.json")) >= BOARD_POST_LIMIT:
+      if self._board_count() >= BOARD_POST_LIMIT:
         raise HTTPException(status_code=507, detail="Board is full.")
       record = dict(post)
       if attachments:
@@ -249,13 +456,20 @@ class CommonPublicStore:
         record["attachment"] = {
           "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
         }
+      owns_dirty_marker = self._mark_board_index_dirty()
       atomic_write(path, json.dumps(record))
+      if self._refresh_board_index(record, path) and owns_dirty_marker:
+        self._clear_board_index_dirty()
       return True
 
   def toggle_like(
     self, post_id: str, host: str, *, replay_token: str | None = None,
   ) -> dict:
     """Toggle a like once, making an exact signed-envelope retry idempotent."""
+    try:
+      self._ensure_board_index()
+    except sqlite3.Error:
+      self._board_index_ready = False
     with self._mutation_lock(self._board_lock, "board"):
       path = self.board_dir() / f"{post_id}.json"
       if not path.is_file():
@@ -294,7 +508,10 @@ class CommonPublicStore:
         del likes[host]
       else:
         likes[host] = now
+      owns_dirty_marker = self._mark_board_index_dirty()
       atomic_write(path, json.dumps(post))
+      if self._refresh_board_index(post, path) and owns_dirty_marker:
+        self._clear_board_index_dirty()
       # `activity` is True only for a genuine new like (not an unlike or a
       # replay), so the router notifies the post's author exactly once.
       return {
@@ -306,6 +523,10 @@ class CommonPublicStore:
     self, post_id: str, reply_id: str, host: str, handle: str,
     text: str, created_at: float,
   ) -> dict:
+    try:
+      self._ensure_board_index()
+    except sqlite3.Error:
+      self._board_index_ready = False
     with self._mutation_lock(self._board_lock, "board"):
       path = self.board_dir() / f"{post_id}.json"
       if not path.is_file():
@@ -330,7 +551,10 @@ class CommonPublicStore:
         "text": text,
         "created_at": created_at,
       })
+      owns_dirty_marker = self._mark_board_index_dirty()
       atomic_write(path, json.dumps(post))
+      if self._refresh_board_index(post, path) and owns_dirty_marker:
+        self._clear_board_index_dirty()
       return {
         "status": "ok", "reply_count": len(replies),
         "author_host": author_host, "activity": True,
@@ -359,6 +583,10 @@ class CommonPublicStore:
     repeat of the same delete is idempotent so a retry cannot error. Replies from
     other hosts live inside the post record and are removed with it.
     """
+    try:
+      self._ensure_board_index()
+    except sqlite3.Error:
+      self._board_index_ready = False
     with self._mutation_lock(self._board_lock, "board"):
       path = self.board_dir() / f"{post_id}.json"
       if not path.is_file():
@@ -379,11 +607,14 @@ class CommonPublicStore:
           except OSError:
             pass
       try:
+        owns_dirty_marker = self._mark_board_index_dirty()
         path.unlink()
       except OSError as exc:
         raise HTTPException(
           status_code=500, detail="The post could not be deleted."
         ) from exc
+      if self._remove_from_board_index(post_id) and owns_dirty_marker:
+        self._clear_board_index_dirty()
       return {"status": "deleted"}
 
 
