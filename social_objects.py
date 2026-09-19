@@ -54,6 +54,8 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
+import os
 import re
 import secrets as pysecrets
 import shutil
@@ -104,7 +106,6 @@ MAX_SENDER_INVITATIONS = 50
 
 INVITE_TTL_S = 7 * 24 * 3600
 PRESENCE_TTL_S = 12
-PRESENCE_RETENTION_S = 5 * 60
 ROLES = ("editor", "viewer")
 
 _OID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -135,7 +136,7 @@ _INVITE_RE = re.compile(
 )
 
 _object_locks: "WeakValueDictionary[str, asyncio.Lock]" = WeakValueDictionary()
-_object_presence: dict[tuple[str, str], float] = {}
+_log = logging.getLogger(__name__)
 
 
 def _object_lock(oid: str) -> asyncio.Lock:
@@ -146,23 +147,42 @@ def _object_lock(oid: str) -> asyncio.Lock:
   return lock
 
 
+def _presence_path(oid: str, host: str) -> Path:
+  # Presence is app-owned and cross-request: JSON-v1 starts a new process for
+  # every request. Use one bounded marker per admitted member, not a shared
+  # JSON document whose read/modify/write can lose another member's heartbeat.
+  name = hashlib.sha256(host.encode()).hexdigest()
+  return _hosted_dir(oid) / "presence" / name
+
+
 def _mark_present(oid: str, host: str, now: float | None = None) -> None:
-  """Record ephemeral board presence without turning heartbeats into disk I/O."""
+  """Refresh a disposable timestamp, never board content/version or access."""
   observed_at = time.time() if now is None else now
-  _object_presence[(oid, host)] = observed_at
-  if len(_object_presence) > 2048:
-    cutoff = observed_at - PRESENCE_RETENTION_S
-    for key, seen_at in list(_object_presence.items()):
-      if seen_at < cutoff:
-        _object_presence.pop(key, None)
+  path = _presence_path(oid, host)
+  try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+      os.utime(path, (observed_at, observed_at))
+    except FileNotFoundError:
+      path.touch(exist_ok=True)
+      os.utime(path, (observed_at, observed_at))
+  except OSError:
+    # Losing ephemeral presence must not fail an otherwise valid board read
+    # or report a committed write as failed. No fsync/durable heartbeat queue.
+    _log.warning("Could not refresh shared-object presence", exc_info=True)
 
 
 def _member_is_active(oid: str, host: str, now: float | None = None) -> bool:
-  observed_at = _object_presence.get((oid, host))
-  if observed_at is None:
+  try:
+    observed_at = _presence_path(oid, host).stat().st_mtime
+  except OSError:
     return False
   current = time.time() if now is None else now
-  return observed_at >= current - PRESENCE_TTL_S
+  return 0 <= current - observed_at <= PRESENCE_TTL_S
+
+
+def _forget_present(oid: str, host: str) -> None:
+  _presence_path(oid, host).unlink(missing_ok=True)
 
 
 # ── paths ────────────────────────────────────────────────────────────────────
@@ -480,6 +500,7 @@ async def peer_operation(oid: str, request: Request):
 
     if kind == "object_leave":
       obj["members"].pop(sender, None)
+      _forget_present(oid, sender)
       _save_object(obj)
       return {"status": "left"}
 
@@ -1043,7 +1064,7 @@ async def revoke_member(
         raise HTTPException(status_code=400, detail="The host cannot revoke itself.")
     for host in removed:
       obj["members"].pop(host, None)
-      _object_presence.pop((oid, host), None)
+      _forget_present(oid, host)
     _save_object(obj)
   return {"status": "revoked", "hosts": removed}
 
@@ -1065,6 +1086,7 @@ async def delete_object(
     _require_app_match(caller, obj["app"])
     d = _hosted_dir(oid)
     shutil.rmtree(d / "assets", ignore_errors=True)
+    shutil.rmtree(d / "presence", ignore_errors=True)
     for name in ("object.json", "doc.json"):
       (d / name).unlink(missing_ok=True)
     if d.is_dir():
@@ -1072,8 +1094,6 @@ async def delete_object(
         d.rmdir()
       except OSError:
         pass
-    for key in [key for key in _object_presence if key[0] == oid]:
-      _object_presence.pop(key, None)
   return {"status": "deleted"}
 
 
