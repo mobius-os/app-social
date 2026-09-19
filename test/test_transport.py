@@ -6,9 +6,11 @@ import gzip
 import importlib
 import os
 import socket
+import sys
 import tempfile
 import time
 import unittest
+from urllib.parse import urlparse
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -17,6 +19,7 @@ from fastapi import HTTPException
 import common_protocol
 import common_transport
 from common_protocol import ACTOR_FETCH_TIMEOUT_S, SIGNED_WRITE_TIMEOUT_S
+from net_utils import validate_url_safe
 
 
 REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -26,13 +29,14 @@ PUBLIC_IP = "93.184.216.34"
 def resolve_to(address):
   calls = []
 
-  def getaddrinfo(host, port, *_args, **_kwargs):
-    calls.append((host, port))
-    family = socket.AF_INET6 if ":" in address else socket.AF_INET
-    sockaddr = (address, 0, 0, 0) if family == socket.AF_INET6 else (address, 0)
-    return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+  async def resolve(url):
+    parsed = urlparse(url)
+    calls.append((parsed.hostname, None))
+    ip_host = f"[{address}]" if ":" in address else address
+    netloc = f"{ip_host}:{parsed.port}" if parsed.port else ip_host
+    return ([parsed._replace(netloc=netloc).geturl()], parsed.netloc, parsed.hostname)
 
-  return calls, getaddrinfo
+  return calls, resolve
 
 
 def client_factory(handler, options):
@@ -43,21 +47,27 @@ def client_factory(handler, options):
   return factory
 
 
-class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
-  async def test_deadline_includes_dns_validation(self):
-    def slow_validation(_url):
-      time.sleep(0.2)
-      return ([f"https://{PUBLIC_IP}/actor"], "peer.example", "peer.example")
-
+class FederationAdapterDeadlineTests(unittest.TestCase):
+  def test_deadline_reaps_dns_helper_before_asyncio_run_returns(self):
+    command = (sys.executable, "-c", "import time; time.sleep(0.4)")
     started = time.monotonic()
-    with patch.object(common_transport, "validate_url_safe", slow_validation):
+    with patch.object(common_transport, "_resolver_command", return_value=command):
       with self.assertRaises(httpx.TimeoutException) as raised:
-        await common_transport.federation_request(
-          "GET", "https://peer.example/actor", timeout_seconds=0.02,
+        asyncio.run(
+          common_transport.federation_request(
+            "GET", "https://peer.example/actor", timeout_seconds=0.02,
+          )
         )
 
     self.assertLess(time.monotonic() - started, 0.15)
     self.assertEqual(str(raised.exception.request.url), "https://peer.example/actor")
+
+
+class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
+  async def test_resolver_helper_preserves_ssrf_rejection(self):
+    with self.assertRaises(HTTPException) as raised:
+      await common_transport._resolve_url_safe("http://127.0.0.1/actor")
+    self.assertEqual(raised.exception.status_code, 400)
 
   async def test_deadline_includes_complete_response_stream(self):
     class SlowStream(httpx.AsyncByteStream):
@@ -80,7 +90,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       )
 
     with (
-      patch("socket.getaddrinfo", resolver),
+      patch.object(common_transport, "_resolve_url_safe", resolver),
       patch.object(
         common_transport.httpx,
         "AsyncClient",
@@ -190,20 +200,16 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       ("metadata.example", "169.254.169.254"),
     ):
       with self.subTest(host=host):
-        _calls, resolver = resolve_to(address)
+        def getaddrinfo(_host, _port, *_args, **_kwargs):
+          family = socket.AF_INET6 if ":" in address else socket.AF_INET
+          sockaddr = (
+            (address, 0, 0, 0) if family == socket.AF_INET6 else (address, 0)
+          )
+          return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
 
-        class MustNotConnect:
-          def __init__(self, **_kwargs):
-            raise AssertionError("unsafe destination reached the HTTP client")
-
-        with (
-          patch("socket.getaddrinfo", resolver),
-          patch.object(common_transport.httpx, "AsyncClient", MustNotConnect),
-        ):
+        with patch("socket.getaddrinfo", getaddrinfo):
           with self.assertRaises(HTTPException):
-            await common_transport.federation_request(
-              "GET", f"https://{host}/common/0/actor",
-            )
+            validate_url_safe(f"https://{host}/common/0/actor")
 
   async def test_dns_rebinding_cannot_change_pinned_host_or_tls_name(self):
     dns_calls, resolver = resolve_to(PUBLIC_IP)
@@ -215,7 +221,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       return httpx.Response(200, json={"status": "ok"})
 
     with (
-      patch("socket.getaddrinfo", resolver),
+      patch.object(common_transport, "_resolve_url_safe", resolver),
       patch.object(
         common_transport.httpx,
         "AsyncClient",
@@ -249,7 +255,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       )
 
     with (
-      patch("socket.getaddrinfo", resolver),
+      patch.object(common_transport, "_resolve_url_safe", resolver),
       patch.object(
         common_transport.httpx,
         "AsyncClient",
@@ -278,7 +284,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
           )
 
         with (
-          patch("socket.getaddrinfo", resolver),
+          patch.object(common_transport, "_resolve_url_safe", resolver),
           patch.object(
             common_transport.httpx,
             "AsyncClient",
@@ -300,7 +306,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       )
 
     with (
-      patch("socket.getaddrinfo", resolver),
+      patch.object(common_transport, "_resolve_url_safe", resolver),
       patch.object(
         common_transport.httpx,
         "AsyncClient",
@@ -324,7 +330,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       )
 
     with (
-      patch("socket.getaddrinfo", resolver),
+      patch.object(common_transport, "_resolve_url_safe", resolver),
       patch.object(
         common_transport.httpx,
         "AsyncClient",
@@ -354,7 +360,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       )
 
     with (
-      patch("socket.getaddrinfo", resolver),
+      patch.object(common_transport, "_resolve_url_safe", resolver),
       patch.object(
         common_transport.httpx,
         "AsyncClient",

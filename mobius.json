@@ -33,6 +33,7 @@
     "common_protocol.py",
     "common_public.py",
     "common_transport.py",
+    "dns_resolver.py",
     "net_utils.py",
     "social_routes.py",
     "social_groups.py",
