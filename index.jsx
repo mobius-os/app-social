@@ -171,9 +171,11 @@ export default function App({ appId, token }) {
   }
 
   useEffect(() => {
-    loadMe().then((profile) => {
-      if (profile) loadFeed()
-    })
+    // Public browsing does not depend on profile or directory verification.
+    // Start the visible board first so two slower identity checks cannot hold
+    // the primary surface behind them on every launch.
+    loadFeed()
+    loadMe()
     loadConversations()
     loadSavedParticipationIntent()
     api.getAppIcon(appId)
