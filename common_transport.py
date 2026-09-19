@@ -58,17 +58,49 @@ async def federation_request(
     raise ValueError("max_response_bytes must be positive")
   if response_format not in ("json", "binary"):
     raise ValueError("response_format must be 'json' or 'binary'")
+  if timeout_seconds <= 0:
+    raise ValueError("timeout_seconds must be positive")
 
   original_url = str(httpx.URL(url, params=params)) if params else url
+  # This request object is only the safe, unpinned URL attached to the returned
+  # response and any deadline error for status reporting. Do not serialize a
+  # potentially large envelope twice; the actual request below owns its body.
+  public_request = httpx.Request(method, original_url)
+  try:
+    # HTTPX timeouts bound individual network phases. This outer deadline also
+    # covers DNS validation, retries across pinned addresses, the complete
+    # response stream, and response validation as one operation.
+    async with asyncio.timeout(timeout_seconds):
+      return await _request_within_deadline(
+        method,
+        original_url,
+        public_request,
+        json=json,
+        max_response_bytes=max_response_bytes,
+        response_format=response_format,
+        timeout_seconds=timeout_seconds,
+      )
+  except TimeoutError as exc:
+    raise httpx.TimeoutException(
+      "Federation request exceeded its deadline.", request=public_request,
+    ) from exc
+
+
+async def _request_within_deadline(
+  method: str,
+  original_url: str,
+  public_request: httpx.Request,
+  *,
+  json: Any,
+  max_response_bytes: int,
+  response_format: Literal["json", "binary"],
+  timeout_seconds: float,
+) -> httpx.Response:
   # getaddrinfo is blocking.  Keep attacker-controlled DNS away from the
   # server's async event loop while retaining the canonical shared policy.
   pinned_urls, host_header, sni_host = await asyncio.to_thread(
     validate_url_safe, original_url
   )
-  # This request object is only the safe, unpinned URL attached to the returned
-  # response for status reporting. Do not serialize a potentially large
-  # envelope twice; the actual request below owns its body.
-  public_request = httpx.Request(method, original_url)
 
   async with httpx.AsyncClient(
     follow_redirects=False,
