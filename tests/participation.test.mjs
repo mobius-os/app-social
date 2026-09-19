@@ -117,7 +117,9 @@ test('board replies use the owner route that signs and forwards remote replies',
 
 test('the UI keeps a final explicit control for publish, reply and react', () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
-  assert.match(board, /onClick=\{\(\) => canInteract\s*\? publish\(\)/)
+  assert.match(board, /async function submitPost/)
+  assert.match(board, /if \(canInteract\) return publish\(\)/)
+  assert.match(board, /onClick=\{submitPost\}/)
   assert.match(board, /<form className=.*onSubmit=\{sendReply\}>/)
   assert.match(board, /onClick=\{\(\) => canInteract\s*\? toggleLike\(post\)/)
   assert.match(board, /Nothing was shared automatically/)

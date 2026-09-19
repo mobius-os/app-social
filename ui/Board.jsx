@@ -685,7 +685,6 @@ export default function Board({
                 placeholder="What’s happening?"
                 aria-label="Post text"
                 maxLength={4000}
-                autoFocus
               />
             </div>
             <SelectedImagesStrip selected={selectedImages} onRemove={removeImage} />
