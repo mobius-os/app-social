@@ -2,6 +2,11 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 import urllib.error
 
@@ -46,6 +51,42 @@ def opener_with_version(version):
 
 
 class CommunityImageContractTests(unittest.TestCase):
+  def test_packaged_runtime_can_resolve_and_reject_non_public_peer(self):
+    repository = Path(__file__).parents[1]
+    dockerfile = repository / "deploy" / "community" / "Dockerfile"
+    copy_line = next(
+      line for line in dockerfile.read_text().splitlines()
+      if line.startswith("COPY ") and "community_host.py" in line
+    )
+    copy_command = shlex.split(copy_line)
+    self.assertEqual(copy_command[-1], "./")
+
+    with tempfile.TemporaryDirectory() as runtime_dir:
+      for source in copy_command[1:-1]:
+        shutil.copy2(repository / source, Path(runtime_dir) / Path(source).name)
+      probe = subprocess.run(
+        [
+          sys.executable,
+          "-c",
+          """
+import asyncio
+from fastapi import HTTPException
+import common_transport
+
+try:
+  asyncio.run(common_transport._resolve_url_safe("http://127.0.0.1/actor"))
+except HTTPException as exc:
+  assert exc.status_code == 400
+else:
+  raise AssertionError("packaged resolver accepted a non-public peer")
+""",
+        ],
+        cwd=runtime_dir,
+        capture_output=True,
+        text=True,
+      )
+      self.assertEqual(probe.returncode, 0, probe.stderr)
+
   def test_expected_contract_passes(self):
     revision = "a" * 40
     verify_contract.verify(
