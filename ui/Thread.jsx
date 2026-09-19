@@ -4,18 +4,26 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptMessageRequest, blockMessageRequest, clearUnread, clockTime,
-  declineMessageRequest, getPeer, listMessages, sendMessage,
+  declineMessageRequest, getPeer, listMessages, retryMessage, sendMessage,
 } from '../api.js'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
+import {
+  isDefinitePrecommitRejection, reconcileLatestPage, reconcileOlderPage,
+  settleMessage,
+} from '../message_ui_state.js'
 
 export default function Thread({
   peer, peerHandle, me, version, request, onBack, showToast, onOpenImage,
 }) {
   const [messages, setMessages] = useState(null)
+  const [nextCursor, setNextCursor] = useState(null)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
+  const [loadError, setLoadError] = useState('')
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
+  const [retrying, setRetrying] = useState('')
   const [processingImage, setProcessingImage] = useState(false)
   const [selectedImage, setSelectedImage] = useState(null)
   const [replyTarget, setReplyTarget] = useState(null)
@@ -24,17 +32,49 @@ export default function Thread({
   const [requestBusy, setRequestBusy] = useState('')
   const [requestError, setRequestError] = useState('')
   const scrollRef = useRef(null)
+  const messagesRef = useRef(null)
+  const refreshRequest = useRef(0)
+  const paginationGeneration = useRef(0)
+  const seenVersion = useRef(version)
+  const stickToBottom = useRef(true)
   const inputRef = useRef(null)
   const fileRef = useRef(null)
 
-  async function refresh() {
-    const loaded = await listMessages(peer)
-    setMessages(loaded)
+  function updateMessages(next) {
+    const value = typeof next === 'function' ? next(messagesRef.current) : next
+    messagesRef.current = value
+    setMessages(value)
+  }
+
+  async function refresh({ replace = false } = {}) {
+    const request = ++refreshRequest.current
+    try {
+      const page = await listMessages(peer)
+      if (request !== refreshRequest.current) return false
+      const reconciled = reconcileLatestPage(messagesRef.current, page, { replace })
+      updateMessages(reconciled.messages)
+      if (reconciled.resetCursor) {
+        paginationGeneration.current += 1
+        setNextCursor(reconciled.nextCursor)
+      }
+      setLoadError('')
+      return true
+    } catch {
+      if (request === refreshRequest.current) {
+        setLoadError('Messages couldn’t be refreshed. Your saved history hasn’t been removed.')
+      }
+      return false
+    }
   }
 
   useEffect(() => {
-    refresh()
+    seenVersion.current = version
+    paginationGeneration.current += 1
+    updateMessages(null)
+    setNextCursor(null)
+    refresh({ replace: true })
     if (!requestPending) clearUnread(peer).catch(() => {})
+    return () => { refreshRequest.current += 1 }
   }, [peer])
 
   useEffect(() => {
@@ -48,11 +88,40 @@ export default function Thread({
   }, [peer, requestPending])
 
   useEffect(() => {
-    if (version > 0) {
+    if (version > 0 && version !== seenVersion.current) {
+      seenVersion.current = version
       refresh()
       if (!requestPending) clearUnread(peer).catch(() => {})
     }
   }, [version])
+
+  async function loadEarlier() {
+    if (!nextCursor || loadingEarlier) return
+    const el = scrollRef.current
+    const previousHeight = el?.scrollHeight || 0
+    stickToBottom.current = false
+    setLoadingEarlier(true)
+    const generation = paginationGeneration.current
+    try {
+      const page = await listMessages(peer, nextCursor)
+      const reconciled = reconcileOlderPage(
+        messagesRef.current, page, generation, paginationGeneration.current,
+      )
+      if (!reconciled) return
+      updateMessages(reconciled.messages)
+      setNextCursor(reconciled.nextCursor)
+      setLoadError('')
+      requestAnimationFrame(() => {
+        if (el) el.scrollTop += el.scrollHeight - previousHeight
+      })
+    } catch {
+      if (generation === paginationGeneration.current) {
+        setLoadError('Earlier messages couldn’t be loaded. Your saved history hasn’t been removed.')
+      }
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }
 
   async function decideRequest(action) {
     if (requestBusy) return
@@ -80,8 +149,16 @@ export default function Thread({
 
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = requestPending ? 0 : el.scrollHeight
+    if (!el) return
+    if (requestPending) el.scrollTop = 0
+    else if (stickToBottom.current) el.scrollTop = el.scrollHeight
   }, [messages?.length, selectedImage, replyTarget, requestPending])
+
+  function trackScroll() {
+    const el = scrollRef.current
+    if (!el || requestPending) return
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 72
+  }
 
   async function chooseImage(event) {
     const file = event.target.files?.[0]
@@ -106,12 +183,16 @@ export default function Thread({
     if ((!text && !image) || sending || processingImage) return
 
     setSending(true)
+    const messageId = crypto.randomUUID()
     const optimistic = {
-      id: `local-${Date.now()}`,
+      id: messageId,
       dir: 'out',
       text,
       sent_at: Date.now() / 1000,
       status: 'sending',
+      _client_retry: true,
+      _client_unconfirmed_history: true,
+      _retry_attachment: image?.payload,
       ...(image ? {
         attachment: {
           mime: image.payload.mime,
@@ -122,32 +203,71 @@ export default function Thread({
       } : {}),
       ...(reply ? { reply_to: reply } : {}),
     }
-    setMessages((prior) => [...(prior || []), optimistic])
+    updateMessages((prior) => [...(prior || []), optimistic])
     setDraft('')
     setSelectedImage(null)
     setReplyTarget(null)
     try {
-      const result = await sendMessage(peer, text, peerHandle, image?.payload, reply)
+      const result = await sendMessage(messageId, peer, text, peerHandle, image?.payload, reply)
       window.mobius?.signal?.('item_created', { type: 'message' })
       if (result.status === 'failed') {
         showToast(result.detail || 'This person couldn’t be reached.', 'error')
       }
+      // The send response is authoritative even when the follow-up history
+      // refresh is offline; never leave a delivered message looking retryable.
+      updateMessages((prior) => settleMessage(prior, messageId, result))
       await refresh()
     } catch (error) {
       window.mobius?.signal?.('error', { message: error.message, source: 'send' })
-      setDraft(text)
-      setSelectedImage(image)
-      setReplyTarget(reply)
-      showToast(
-        (error.status === 400 || error.status === 404) && (image || reply)
-          ? 'Photo attachments and quoted replies aren’t available on this server yet.'
-          : error.message,
-        'error',
-      )
+      const rejectedBeforeSave = isDefinitePrecommitRejection(error)
+      if (rejectedBeforeSave) {
+        updateMessages((prior) => (prior || []).filter((message) => message.id !== messageId))
+        setDraft(text)
+        setSelectedImage(image)
+        setReplyTarget(reply)
+        showToast(
+          (error.status === 400 || error.status === 404) && (image || reply)
+            ? 'Photo attachments and quoted replies aren’t available on this server yet.'
+            : error.message,
+          'error',
+        )
+      } else {
+        showToast('Delivery was interrupted. Retry the saved message below.', 'error')
+      }
       await refresh()
     } finally {
       setSending(false)
       inputRef.current?.focus()
+    }
+  }
+
+  async function retry(message) {
+    if (retrying || sending) return
+    const messageId = message.id
+    setRetrying(messageId)
+    try {
+      let result
+      try {
+        result = await retryMessage(peer, messageId)
+      } catch (error) {
+        if (error.status !== 404 || !message._client_retry) throw error
+        result = await sendMessage(
+          messageId, peer, message.text || '', peerHandle,
+          message._retry_attachment, message.reply_to,
+        )
+      }
+      updateMessages((prior) => settleMessage(prior, messageId, result))
+      if (result.status === 'delivered') {
+        showToast('Message delivered', 'success')
+      } else {
+        showToast(result.detail || 'This person still couldn’t be reached.', 'error')
+      }
+      await refresh()
+    } catch (error) {
+      showToast(error.message || 'Delivery couldn’t be retried yet.', 'error')
+      await refresh()
+    } finally {
+      setRetrying('')
     }
   }
 
@@ -200,8 +320,14 @@ export default function Thread({
       />,
     )
     lastDir = message.dir
-    if (message.status === 'failed') {
-      rendered.push(<span className="cn-failed-note" key={`fail-${message.id}`}>Not delivered</span>)
+    if (message.status === 'failed' || (message.status === 'sending' && !sending)) {
+      rendered.push(
+        <button className="cn-failed-note" type="button" key={`fail-${message.id}`}
+                disabled={!!retrying} onClick={() => retry(message)}>
+          {retrying === message.id ? 'Retrying…' : message.status === 'failed'
+            ? 'Not delivered · Retry' : 'Delivery interrupted · Retry'}
+        </button>,
+      )
     }
   }
 
@@ -223,7 +349,7 @@ export default function Thread({
           </span>
         </span>
       </div>
-      <div className="cn-thread-msgs" ref={scrollRef}>
+      <div className="cn-thread-msgs" ref={scrollRef} onScroll={trackScroll}>
         {requestPending && <section className="cn-request-panel" aria-labelledby="cn-request-title">
           <div>
             <strong id="cn-request-title">Message request</strong>
@@ -241,7 +367,14 @@ export default function Thread({
                     onClick={() => decideRequest('block')}>Block</button>
           </div>
         </section>}
-        {messages === null && <div className="cn-center"><div className="cn-spinner" /></div>}
+        {nextCursor && (
+          <button className="cn-history-more" type="button" disabled={loadingEarlier}
+                  onClick={loadEarlier}>
+            {loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
+          </button>
+        )}
+        {loadError && <div className="cn-directory-error" role="alert"><p>{loadError}</p><button className="cn-btn cn-btn-secondary" onClick={refresh}>Try again</button></div>}
+        {messages === null && !loadError && <div className="cn-center"><div className="cn-spinner" /></div>}
         {messages !== null && messages.length === 0 && (
           <div className="cn-empty">
             <div className="cn-empty-title">Say hello</div>
@@ -272,6 +405,7 @@ export default function Thread({
             ref={inputRef}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
+            disabled={sending || processingImage}
             placeholder="Message"
             autoComplete="off"
             aria-label="Message"

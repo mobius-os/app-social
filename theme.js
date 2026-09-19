@@ -254,6 +254,14 @@ export const CSS = `
   flex: 1; min-height: 0; overflow-y: auto; padding: 18px 16px;
   display: flex; flex-direction: column; gap: 8px;
 }
+.cn-history-more {
+  align-self: center; min-height: 34px; padding: 7px 13px; margin-bottom: 4px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); color: var(--muted); font: inherit;
+  font-size: 12.5px; font-weight: 650; cursor: pointer;
+}
+.cn-history-more:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+.cn-history-more:disabled { opacity: 0.65; cursor: wait; }
 .cn-request-panel {
   width: 100%; margin: 0 0 10px; padding: 16px;
   border-radius: 14px; background: var(--surface);
@@ -308,7 +316,12 @@ export const CSS = `
 .cn-bubble.is-theirs { border-bottom-left-radius: 7px; }
 .cn-bubble-time { display: block; margin-top: 3px; font-size: 10.5px; opacity: 0.62; text-align: right; }
 .cn-bubble.is-failed { border-color: var(--danger); }
-.cn-failed-note { font-size: 11px; color: var(--danger); align-self: flex-end; margin-top: -4px; }
+.cn-failed-note {
+  appearance: none; border: 0; background: transparent; padding: 0;
+  font: inherit; font-size: 11px; color: var(--danger); cursor: pointer;
+  align-self: flex-end; margin-top: -4px;
+}
+.cn-failed-note:disabled { cursor: default; opacity: 0.65; }
 .cn-message-line {
   width: 92%; display: flex; align-items: flex-end; gap: 6px; align-self: flex-start;
 }

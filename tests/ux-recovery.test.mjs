@@ -36,6 +36,29 @@ test('Social modal focus owns initial focus so it can restore the actual opener'
   }
 })
 
+test('conversation recovery is visible and new messages do not steal the reading position', () => {
+  for (const file of ['Thread.jsx', 'GroupThread.jsx']) {
+    const source = readFileSync(new URL(`../ui/${file}`, import.meta.url), 'utf8')
+    assert.match(source, /Messages couldn’t be refreshed/)
+    assert.match(source, /onClick=\{refresh\}>Try again/)
+    assert.match(source, /stickToBottom/)
+    assert.match(source, /scrollHeight - el\.scrollTop - el\.clientHeight < 72/)
+    assert.match(source, /paginationGeneration\.current \+= 1/)
+    assert.match(source, /reconcileOlderPage/)
+    assert.match(source, /generation === paginationGeneration\.current/)
+  }
+})
+
+test('direct messages keep one client identity and expose interrupted delivery retry', () => {
+  const thread = readFileSync(new URL('../ui/Thread.jsx', import.meta.url), 'utf8')
+  const api = readFileSync(new URL('../api.js', import.meta.url), 'utf8')
+  assert.match(thread, /const messageId = crypto\.randomUUID\(\)/)
+  assert.match(thread, /sendMessage\(messageId, peer/)
+  assert.match(thread, /Delivery interrupted · Retry/)
+  assert.match(thread, /retryMessage\(peer, messageId\)/)
+  assert.match(api, /id,\s*\n\s*to,/)
+  assert.match(api, /messages\/\$\{encodeURIComponent\(id\)\}\/retry/)
+})
 test('handle search accepts the displayed @handle form and surrounding spaces', async () => {
   const original = globalThis.fetch
   let url

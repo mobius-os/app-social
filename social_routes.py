@@ -50,6 +50,7 @@ the app UI reads it through `window.mobius.storage`.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -60,7 +61,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -84,6 +85,9 @@ from common_public import (
 )
 from common_transport import FederationTransportError, federation_request
 from service_io import atomic_write
+from message_history import (
+  begin_message_mutation, load_page, mark_version_covered, mirror_message,
+)
 from service_runtime import (
   APP, Principal, fs_locks, get_db, get_principal, get_settings,
   identity_app_id, notify, owner_profile, public_actor_metadata,
@@ -302,7 +306,7 @@ def _write_app_attachment(
   atomic_write(path, data)
   return {
     "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
-    "file": relative.as_posix(),
+    "file": relative.as_posix(), "sha256": hashlib.sha256(data).hexdigest(),
   }
 
 
@@ -457,7 +461,11 @@ def _conversation_dir(app, peer_host: str) -> Path:
   return _app_data_dir(app) / "conversations" / safe
 
 
-def _bump_version(app) -> None:
+def _message_path(app, peer_host: str, message_id: str) -> Path:
+  return _conversation_dir(app, peer_host) / "msgs" / f"{message_id}.json"
+
+
+def _bump_version(app, *, history_covered: bool = True) -> int:
   """Advance the app's change counter (call while holding its storage lock).
 
   The open app UI watches this one small file to learn that new federated
@@ -468,9 +476,11 @@ def _bump_version(app) -> None:
   version = 0
   if version_path.is_file():
     version = int(json.loads(version_path.read_text()).get("v") or 0)
-  atomic_write(
-    version_path, json.dumps({"v": version + 1, "updated_at": time.time()})
-  )
+  version += 1
+  atomic_write(version_path, json.dumps({"v": version, "updated_at": time.time()}))
+  if history_covered:
+    mark_version_covered(version)
+  return version
 
 
 async def _store_message(
@@ -505,6 +515,7 @@ async def _store_message(
     message_path = msgs / f"{record['id']}.json"
     if message_path.is_file():
       return False, state, False
+    owns_dirty_marker = begin_message_mutation("dm", peer_host)
     if attachment is not None:
       record["attachment"] = _write_app_attachment(
         convo, record["id"], attachment
@@ -528,9 +539,267 @@ async def _store_message(
     elif state != "accepted":
       meta["unread"] = 0
     atomic_write(meta_path, json.dumps(meta))
-    _bump_version(app)
+    version = _bump_version(app, history_covered=False)
+    mirror_message(
+      "dm", peer_host, record, message_path, version=version,
+      owns_dirty_marker=owns_dirty_marker,
+    )
     new_request = not had_meta and record["dir"] == "in" and state == "pending"
     return True, state, new_request
+
+
+async def _load_message(app, peer_host: str, message_id: str) -> dict:
+  async with fs_locks.app_storage_lock(app.id):
+    path = _message_path(app, peer_host, message_id)
+    if not path.is_file():
+      raise HTTPException(status_code=404, detail="Message not found.")
+    try:
+      value = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+      raise HTTPException(status_code=500, detail="Message record is invalid.") from exc
+    if not isinstance(value, dict):
+      raise HTTPException(status_code=500, detail="Message record is invalid.")
+    return value
+
+
+def _same_outgoing_intent(existing: dict, proposed: dict) -> bool:
+  """Reject accidental id reuse while permitting an exact delivery retry."""
+  if any(existing.get(field) != proposed.get(field) for field in (
+    "id", "dir", "peer", "text", "reply_to",
+  )):
+    return False
+  old_attachment = existing.get("attachment")
+  new_attachment = proposed.get("attachment")
+  if bool(old_attachment) != bool(new_attachment):
+    return False
+  if isinstance(old_attachment, dict) and isinstance(new_attachment, dict):
+    metadata_matches = all(
+      old_attachment.get(field) == new_attachment.get(field)
+      for field in ("mime", "w", "h")
+    )
+    old_hash = old_attachment.get("sha256")
+    return metadata_matches and (
+      not isinstance(old_hash, str) or old_hash == new_attachment.get("sha256")
+    )
+  return True
+
+
+async def _persist_outgoing_message(
+  db, app, peer_host: str, record: dict,
+  attachment: tuple[dict, bytes] | None,
+) -> dict:
+  """Commit author intent before delivery, reusing an exact stable id."""
+  created, _state, _new_request = await _store_message(
+    db, app, peer_host, record, attachment,
+  )
+  if created:
+    return record
+  existing = await _load_message(app, peer_host, record["id"])
+  comparable = dict(record)
+  if attachment is not None:
+    wire, _data = attachment
+    comparable["attachment"] = {
+      "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
+      "sha256": hashlib.sha256(_data).hexdigest(),
+    }
+  if not _same_outgoing_intent(existing, comparable):
+    raise HTTPException(
+      status_code=409, detail="This message id already belongs to another message."
+    )
+  return existing
+
+
+def _stored_attachment(app, peer_host: str, record: dict) -> tuple[dict, bytes] | None:
+  metadata = record.get("attachment")
+  if not isinstance(metadata, dict):
+    return None
+  relative = metadata.get("file")
+  if not isinstance(relative, str):
+    raise ValueError("Stored attachment path is missing.")
+  conversation = _conversation_dir(app, peer_host).resolve()
+  path = (conversation / relative).resolve()
+  if not path.is_relative_to(conversation) or not path.is_file():
+    raise ValueError("Stored attachment is unavailable.")
+  data = path.read_bytes()
+  wire = {
+    "mime": metadata.get("mime"),
+    "w": metadata.get("w"),
+    "h": metadata.get("h"),
+    "data_b64": base64.b64encode(data).decode(),
+  }
+  return _validate_attachment(wire)
+
+
+DELIVERY_LEASE_S = 30.0
+
+
+async def _begin_delivery_attempt(
+  app, peer_host: str, message_id: str,
+) -> tuple[str | None, dict]:
+  """Claim one bounded attempt without holding storage across the network."""
+  async with fs_locks.app_storage_lock(app.id):
+    path = _message_path(app, peer_host, message_id)
+    if not path.is_file():
+      raise HTTPException(status_code=404, detail="Message not found.")
+    record = json.loads(path.read_text())
+    if record.get("dir") != "out" or record.get("peer") != peer_host:
+      raise HTTPException(status_code=409, detail="Message cannot be retried.")
+    if record.get("status") == "delivered":
+      return None, record
+    now = time.time()
+    started = record.get("attempt_started_at")
+    if (
+      isinstance(record.get("attempt_id"), str)
+      and isinstance(started, (int, float))
+      and now - float(started) < DELIVERY_LEASE_S
+    ):
+      raise HTTPException(status_code=409, detail="Delivery is already in progress.")
+    attempt_id = str(uuid.uuid4())
+    record.update(
+      status="sending",
+      attempt_id=attempt_id,
+      attempt_started_at=now,
+      attempts=int(record.get("attempts") or 0) + 1,
+    )
+    record.pop("failure", None)
+    owns_dirty_marker = begin_message_mutation("dm", peer_host)
+    atomic_write(path, json.dumps(record))
+    version = _bump_version(app, history_covered=False)
+    mirror_message(
+      "dm", peer_host, record, path, version=version,
+      owns_dirty_marker=owns_dirty_marker,
+    )
+    return attempt_id, record
+
+
+async def _finish_delivery_attempt(
+  app, peer_host: str, message_id: str, attempt_id: str, *,
+  status: str, detail: str | None, encrypted: bool,
+) -> dict:
+  """Settle only the attempt that still owns this message's delivery lease."""
+  async with fs_locks.app_storage_lock(app.id):
+    path = _message_path(app, peer_host, message_id)
+    if not path.is_file():
+      raise HTTPException(status_code=404, detail="Message not found.")
+    record = json.loads(path.read_text())
+    if record.get("attempt_id") != attempt_id:
+      return record
+    record["status"] = status
+    record["last_attempt_at"] = time.time()
+    if encrypted:
+      record["encrypted"] = True
+    if status == "delivered":
+      record["delivered_at"] = time.time()
+      record.pop("failure", None)
+    elif detail:
+      record["failure"] = detail
+    record.pop("attempt_id", None)
+    record.pop("attempt_started_at", None)
+    owns_dirty_marker = begin_message_mutation("dm", peer_host)
+    atomic_write(path, json.dumps(record))
+    version = _bump_version(app, history_covered=False)
+    mirror_message(
+      "dm", peer_host, record, path, version=version,
+      owns_dirty_marker=owns_dirty_marker,
+    )
+    return record
+
+
+async def _require_encrypted_delivery(
+  app, peer_host: str, message_id: str, attempt_id: str,
+) -> dict:
+  """Persist the no-downgrade decision before encrypted bytes leave this host."""
+  async with fs_locks.app_storage_lock(app.id):
+    path = _message_path(app, peer_host, message_id)
+    if not path.is_file():
+      raise HTTPException(status_code=404, detail="Message not found.")
+    record = json.loads(path.read_text())
+    if record.get("attempt_id") != attempt_id:
+      raise HTTPException(status_code=409, detail="Delivery attempt was superseded.")
+    if record.get("encrypted") is True:
+      return record
+    record["encrypted"] = True
+    owns_dirty_marker = begin_message_mutation("dm", peer_host)
+    atomic_write(path, json.dumps(record))
+    version = _bump_version(app, history_covered=False)
+    mirror_message(
+      "dm", peer_host, record, path, version=version,
+      owns_dirty_marker=owns_dirty_marker,
+    )
+    return record
+
+
+async def _attempt_direct_delivery(app, peer_host: str, message_id: str) -> dict:
+  attempt_id, record = await _begin_delivery_attempt(app, peer_host, message_id)
+  if attempt_id is None:
+    return record
+
+  encrypted = bool(record.get("encrypted"))
+  status = "failed"
+  detail = "The peer could not be reached."
+  try:
+    attachment = _stored_attachment(app, peer_host, record)
+    actor = await _fetch_actor(peer_host)
+    identity = _load_identity()
+    envelope = {
+      "v": 0,
+      "type": "message",
+      "id": message_id,
+      "from": _own_host(),
+      "to": peer_host,
+      "text": record.get("text") or "",
+      # Transport signatures expire; renew this timestamp on every attempt
+      # while preserving the authored message id and local creation time.
+      "sent_at": time.time(),
+    }
+    encryption_key = actor.get("encryption_key")
+    peer_encrypts = (
+      isinstance(encryption_key, dict)
+      and encryption_key.get("alg") == "x25519"
+    )
+    if encrypted and not peer_encrypts:
+      raise ValueError("The peer no longer publishes its encryption key.")
+    if peer_encrypts:
+      recipient_key_b64 = encryption_key.get("key_b64")
+      if not isinstance(recipient_key_b64, str) or not recipient_key_b64:
+        raise ValueError("The peer published no valid encryption key.")
+      # Once an attempt selects encryption, persist that policy before the
+      # network side effect. A process exit after the peer accepts the message
+      # must never let an expired-lease retry downgrade it to plaintext.
+      record = await _require_encrypted_delivery(
+        app, peer_host, message_id, attempt_id,
+      )
+      encrypted = True
+      envelope["enc"] = _seal_dm(
+        message_id, recipient_key_b64, text=envelope["text"],
+        attachment=attachment[0] if attachment is not None else None,
+        reply_to=record.get("reply_to"),
+      )
+      envelope["text"] = ""
+      encrypted = True
+    else:
+      if attachment is not None:
+        envelope["attachment"] = attachment[0]
+      if record.get("reply_to") is not None:
+        envelope["reply_to"] = record["reply_to"]
+    envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+    response = await _post_signed_envelope(
+      _peer_service_url(peer_host, "inbox"), envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+    )
+    response.raise_for_status()
+    status = "delivered"
+    detail = None
+  except httpx.HTTPStatusError as exc:
+    detail = f"The peer rejected the message ({exc.response.status_code})."
+  except httpx.TimeoutException:
+    detail = "The peer took too long to respond."
+  except Exception:
+    detail = "The peer could not be reached."
+  return await _finish_delivery_attempt(
+    app, peer_host, message_id, attempt_id,
+    status=status, detail=detail, encrypted=encrypted,
+  )
 
 
 async def _prepare_outgoing_conversation(
@@ -579,6 +848,21 @@ async def _set_dm_request_state(
     atomic_write(meta_path, json.dumps(meta))
     _bump_version(app)
     return state
+
+
+async def _mark_dm_read(app, peer_host: str) -> bool:
+  """Clear unread state inside the transaction that owns message metadata."""
+  async with fs_locks.app_storage_lock(app.id):
+    meta_path = _conversation_dir(app, peer_host) / "meta.json"
+    if not meta_path.is_file():
+      raise HTTPException(status_code=404, detail="Conversation not found.")
+    meta = json.loads(meta_path.read_text())
+    if not meta.get("unread"):
+      return False
+    meta["unread"] = 0
+    atomic_write(meta_path, json.dumps(meta))
+    _bump_version(app)
+    return True
 
 
 # ── public peer surface ─────────────────────────────────────────────────────
@@ -769,6 +1053,7 @@ class ProfileUpdate(BaseModel):
 
 
 class SendMessage(BaseModel):
+  id: str | None = None
   to: str
   text: str
   peer_handle: str | None = None
@@ -987,13 +1272,46 @@ async def block_message_request(
   return {"status": state}
 
 
+@router.post("/conversations/{peer_host}/read")
+async def mark_direct_conversation_read(
+  peer_host: str,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  changed = await _mark_dm_read(app, _request_peer(peer_host))
+  return {"status": "read", "changed": changed}
+
+
+@router.get("/conversations/{peer_host}/messages")
+async def direct_message_history(
+  peer_host: str,
+  before: str | None = None,
+  limit: int = Query(default=50, ge=1, le=100),
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Read one bounded newest-first slice, returned in display order."""
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  peer = _request_peer(peer_host)
+  messages_dir = _conversation_dir(app, peer) / "msgs"
+  try:
+    return await load_page(
+      app.id, "dm", peer, messages_dir, cursor=before, limit=limit,
+    )
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/send")
 async def send_message(
   message: SendMessage,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Sign a DM, deliver it to the peer instance, and store our own copy."""
+  """Persist one stable DM identity, then make a bounded delivery attempt."""
   require_nondelegated_owner_control(principal)
   app = _require_owner_or_common_app(db, principal)
   to_host = message.to.strip().lower()
@@ -1003,79 +1321,55 @@ async def send_message(
   attachment = _validate_attachment(message.attachment)
   reply_to = _validate_reply_to(message.reply_to)
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
-  identity = _load_identity()
-  actor = await _fetch_actor(to_host)
+  message_id = message.id or str(uuid.uuid4())
+  if not _valid_id(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
   # The first deliberate outgoing message establishes consent. A reply to an
   # inbound request must instead go through the explicit acceptance action.
   await _prepare_outgoing_conversation(app, to_host)
-  message_id = str(uuid.uuid4())
-  envelope = {
-    "v": 0,
-    "type": "message",
-    "id": message_id,
-    "from": _own_host(),
-    "to": to_host,
-    "text": text,
-    "sent_at": time.time(),
-  }
-  encryption_key = actor.get("encryption_key")
-  encrypted = (
-    isinstance(encryption_key, dict)
-    and encryption_key.get("alg") == "x25519"
-  )
-  if encrypted:
-    recipient_key_b64 = encryption_key.get("key_b64")
-    if not isinstance(recipient_key_b64, str) or not recipient_key_b64:
-      raise HTTPException(
-        status_code=502, detail=f"{to_host} published no valid encryption key."
-      )
-    try:
-      envelope["enc"] = _seal_dm(
-        message_id, recipient_key_b64, text=text,
-        attachment=attachment[0] if attachment is not None else None,
-        reply_to=reply_to,
-      )
-    except Exception as exc:
-      raise HTTPException(
-        status_code=502, detail=f"{to_host} published no valid encryption key."
-      ) from exc
-    envelope["text"] = ""
-  else:
-    if attachment is not None:
-      envelope["attachment"] = attachment[0]
-    if reply_to is not None:
-      envelope["reply_to"] = reply_to
-  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-  status = "delivered"
-  detail = None
-  try:
-    response = await _post_signed_envelope(
-      _peer_service_url(to_host, "inbox"), envelope,
-      max_response_bytes=MAX_ENVELOPE_BYTES,
-    )
-    response.raise_for_status()
-  except httpx.HTTPStatusError as exc:
-    status = "failed"
-    detail = f"The peer rejected the message ({exc.response.status_code})."
-  except Exception:
-    status = "failed"
-    detail = "The peer could not be reached."
   record = {
-    "id": envelope["id"],
+    "id": message_id,
     "dir": "out",
     "peer": to_host,
     "text": text,
-    "sent_at": envelope["sent_at"],
-    "status": status,
+    "sent_at": time.time(),
+    "status": "sending",
   }
-  if encrypted:
-    record["encrypted"] = True
   if message.peer_handle:
     record["peer_handle"] = message.peer_handle.strip()[:MAX_NAME_CHARS]
   if reply_to is not None:
     record["reply_to"] = reply_to
-  await _store_message(db, app, to_host, record, attachment)
-  return {"status": status, "id": envelope["id"], "detail": detail}
+  record = await _persist_outgoing_message(
+    db, app, to_host, record, attachment,
+  )
+  if record.get("status") != "delivered":
+    record = await _attempt_direct_delivery(app, to_host, message_id)
+  return {
+    "status": record.get("status") or "failed",
+    "id": message_id,
+    "detail": record.get("failure"),
+  }
+
+
+@router.post("/conversations/{peer_host}/messages/{message_id}/retry")
+async def retry_direct_message(
+  peer_host: str,
+  message_id: str,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Retry a persisted outgoing message without creating a new identity."""
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  peer = _request_peer(peer_host)
+  if not _valid_id(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  record = await _attempt_direct_delivery(app, peer, message_id)
+  return {
+    "status": record.get("status") or "failed",
+    "id": message_id,
+    "detail": record.get("failure"),
+  }
 
 
 @router.post("/publish")

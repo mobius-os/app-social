@@ -58,7 +58,22 @@ def get_db():
 
 @asynccontextmanager
 async def app_storage_lock(_app_id: int):
-  yield
+  """Serialize app-owned state changes across private and public processes.
+
+  Möbius deliberately runs private requests and public federation callbacks in
+  separate execution lanes so an outbound request cannot deadlock the callback
+  that verifies it.  Those lanes may still update the same Social records, so
+  the service owns this short, filesystem-backed transaction boundary.  Every
+  current caller holds it only for local reads and atomic writes—never across a
+  peer or platform request.
+  """
+  STORAGE.mkdir(parents=True, exist_ok=True)
+  with (STORAGE / ".state.lock").open("a+b") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+      yield
+    finally:
+      fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 fs_locks = SimpleNamespace(app_storage_lock=app_storage_lock)

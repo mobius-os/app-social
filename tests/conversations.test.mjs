@@ -1,8 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { listGroups, listConversations, getGroup, requestStatus } from '../api.js'
+import {
+  getGroup, listConversations, listGroupMessages, listGroups, listMessages,
+  requestStatus,
+} from '../api.js'
 
-test.afterEach(() => { delete globalThis.window })
+test.afterEach(() => {
+  delete globalThis.window
+  delete globalThis.fetch
+})
 
 for (const [label, list, prefix, record] of [
   ['groups', listGroups, 'groups/', { gid: 'group-1', name: 'Planning' }],
@@ -56,4 +62,46 @@ test('request metadata is persistent while legacy conversations remain accepted'
   assert.equal(requestStatus({ request_status: 'accepted' }), 'accepted')
   assert.equal(requestStatus({ peer: 'legacy.example', unread: 2 }), 'accepted')
   assert.equal(requestStatus(null), 'accepted')
+})
+
+for (const [label, load, expected] of [
+  ['direct', () => listMessages('peer.example', 'older-page'), '/api/services/social/conversations/peer.example/messages?limit=50&before=older-page'],
+  ['group', () => listGroupMessages('deadbeef', 'older-page'), '/api/services/social/groups/deadbeef/messages?limit=50&before=older-page'],
+]) {
+  test(`${label} history asks Social for one bounded cursor page`, async () => {
+    globalThis.window = { mobius: { storage: {} } }
+    globalThis.fetch = async (url) => {
+      assert.equal(url, expected)
+      return {
+        ok: true,
+        async json() {
+          return { messages: [{ id: 'one', sent_at: 1 }], next_cursor: 'next' }
+        },
+      }
+    }
+    assert.deepEqual(await load(), {
+      messages: [{ id: 'one', sent_at: 1 }], next_cursor: 'next',
+    })
+  })
+}
+
+test('cached direct history remains readable when the local service is offline', async () => {
+  globalThis.fetch = async () => { throw new TypeError('offline') }
+  globalThis.window = { mobius: { storage: {
+    async list(path, options) {
+      assert.equal(path, 'conversations/peer.example/msgs/')
+      assert.deepEqual(options, { includeContent: true })
+      return [
+        { path: `${path}later.json`, content: { id: 'later', sent_at: 2 } },
+        { path: `${path}earlier.json`, content: { id: 'earlier', sent_at: 1 } },
+      ]
+    },
+  } } }
+  assert.deepEqual(await listMessages('peer.example'), {
+    messages: [
+      { id: 'earlier', sent_at: 1 },
+      { id: 'later', sent_at: 2 },
+    ],
+    next_cursor: null,
+  })
 })
