@@ -53,39 +53,7 @@ done
   exit 1
 }
 
-docker exec "$name" python - "$EXPECTED_SHA" <<'PY'
-import json
-import sys
-import urllib.error
-import urllib.request
-
-base = "http://127.0.0.1:8080"
-expected = sys.argv[1]
-
-def read(path):
-  with urllib.request.urlopen(base + path, timeout=3) as response:
-    return response.status, json.load(response)
-
-assert read("/healthz") == (200, {"status": "ok"})
-assert read("/version") == (
-  200, {"service": "mobius-social", "source_sha": expected},
-)
-status, board = read("/api/common/board?limit=1")
-assert status == 200 and isinstance(board, dict) and isinstance(board.get("posts"), list)
-
-request = urllib.request.Request(
-  base + "/api/common/board/delete",
-  data=b"{}",
-  headers={"Content-Type": "application/json"},
-  method="POST",
-)
-try:
-  urllib.request.urlopen(request, timeout=3)
-except urllib.error.HTTPError as error:
-  assert error.code == 400
-  assert json.load(error)["detail"] == "Unsupported envelope type."
-else:
-  raise AssertionError("malformed delete unexpectedly succeeded")
-PY
+docker exec -i "$name" python - "$EXPECTED_SHA" \
+  < "$(dirname "$0")/verify_contract.py"
 
 printf 'verified image=%s source_sha=%s\n' "$IMAGE" "$EXPECTED_SHA"
