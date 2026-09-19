@@ -2,6 +2,8 @@
 
 import base64
 import gzip
+import importlib
+import os
 import socket
 import tempfile
 import unittest
@@ -71,6 +73,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
 
   async def test_signed_write_budget_outlives_nested_actor_verification(self):
     self.assertGreater(SIGNED_WRITE_TIMEOUT_S, ACTOR_FETCH_TIMEOUT_S)
+    self.assertLess(SIGNED_WRITE_TIMEOUT_S, 15.0)
     response = httpx.Response(200, json={"status": "ok"})
     with patch.object(
       common_protocol, "federation_request",
@@ -85,6 +88,49 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       "POST", "https://peer.example/api/app-services/social/board",
       json={"sig": "signed"}, max_response_bytes=321,
       timeout_seconds=SIGNED_WRITE_TIMEOUT_S,
+    )
+
+  def test_community_write_errors_distinguish_peer_failures(self):
+    with tempfile.TemporaryDirectory() as storage:
+      with patch.dict(os.environ, {
+        "APP_STORAGE_DIR": storage,
+        "APP_ID": "7",
+        "APP_SLUG": "social",
+        "APP_TOKEN": "test-app-token",
+        "API_BASE_URL": "http://127.0.0.1:9",
+        "INSTANCE_DOMAIN": "self.example",
+        "INSTANCE_ORIGIN": "https://self.example",
+      }):
+        social_routes = importlib.import_module("social_routes")
+
+    request = httpx.Request("POST", "https://peer.example/write")
+    rejected = httpx.HTTPStatusError(
+      "rejected", request=request, response=httpx.Response(409, request=request),
+    )
+    denied = httpx.HTTPStatusError(
+      "denied", request=request, response=httpx.Response(403, request=request),
+    )
+    self.assertIn("rejected", social_routes._community_write_error(rejected, "reply"))
+    self.assertIn("verify", social_routes._community_write_error(denied, "reply"))
+    self.assertIn(
+      "too long",
+      social_routes._community_write_error(httpx.ReadTimeout("slow", request=request), "reply"),
+    )
+    self.assertIn(
+      "invalid response",
+      social_routes._community_write_error(
+        common_transport.FederationTransportError("bad json"), "reply",
+      ),
+    )
+    self.assertIn(
+      "could not be reached",
+      social_routes._community_write_error(
+        httpx.ConnectError("offline", request=request), "reply",
+      ),
+    )
+    self.assertIn(
+      "Social could not complete",
+      social_routes._community_write_error(RuntimeError("unexpected"), "reply"),
     )
 
   async def test_non_public_destinations_are_rejected_before_connect(self):
