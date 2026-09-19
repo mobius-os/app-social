@@ -11,18 +11,71 @@ from __future__ import annotations
 
 import asyncio
 import json as json_module
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-
-from net_utils import validate_url_safe
+from fastapi import HTTPException
 
 DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_RESOLVER_MAX_BYTES = 64 * 1024
+_RESOLVER_HELPER = Path(__file__).with_name("dns_resolver.py")
 
 
 class FederationTransportError(Exception):
   """A peer response violated the bounded federation transport contract."""
+
+
+def _resolver_command(url: str) -> tuple[str, ...]:
+  return (sys.executable, str(_RESOLVER_HELPER), url)
+
+
+async def _resolve_url_safe(url: str) -> tuple[list[str], str, str]:
+  """Resolve in a killable child so the request deadline owns DNS too."""
+  process = await asyncio.create_subprocess_exec(
+    *_resolver_command(url),
+    stdin=asyncio.subprocess.DEVNULL,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.DEVNULL,
+  )
+  try:
+    stdout, _stderr = await process.communicate()
+  except BaseException:
+    if process.returncode is None:
+      try:
+        process.kill()
+      except ProcessLookupError:
+        pass
+    await process.wait()
+    raise
+  if process.returncode != 0 or len(stdout) > _RESOLVER_MAX_BYTES:
+    raise FederationTransportError("Peer host resolution failed.")
+  try:
+    payload = json_module.loads(stdout)
+  except (UnicodeDecodeError, json_module.JSONDecodeError) as exc:
+    raise FederationTransportError("Peer host resolution failed.") from exc
+  if not isinstance(payload, dict):
+    raise FederationTransportError("Peer host resolution failed.")
+  if payload.get("ok") is not True:
+    status = payload.get("status")
+    detail = payload.get("detail")
+    if not isinstance(status, int) or not isinstance(detail, str):
+      raise FederationTransportError("Peer host resolution failed.")
+    raise HTTPException(status, detail)
+  pinned_urls = payload.get("pinned_urls")
+  host_header = payload.get("host_header")
+  sni_host = payload.get("sni_host")
+  if (
+    not isinstance(pinned_urls, list)
+    or not pinned_urls
+    or any(not isinstance(item, str) for item in pinned_urls)
+    or not isinstance(host_header, str)
+    or not isinstance(sni_host, str)
+  ):
+    raise FederationTransportError("Peer host resolution failed.")
+  return pinned_urls, host_header, sni_host
 
 
 def _json_object(body: bytes, content_type: str) -> None:
@@ -58,17 +111,48 @@ async def federation_request(
     raise ValueError("max_response_bytes must be positive")
   if response_format not in ("json", "binary"):
     raise ValueError("response_format must be 'json' or 'binary'")
+  if timeout_seconds <= 0:
+    raise ValueError("timeout_seconds must be positive")
 
   original_url = str(httpx.URL(url, params=params)) if params else url
-  # getaddrinfo is blocking.  Keep attacker-controlled DNS away from the
-  # server's async event loop while retaining the canonical shared policy.
-  pinned_urls, host_header, sni_host = await asyncio.to_thread(
-    validate_url_safe, original_url
-  )
   # This request object is only the safe, unpinned URL attached to the returned
-  # response for status reporting. Do not serialize a potentially large
-  # envelope twice; the actual request below owns its body.
+  # response and any deadline error for status reporting. Do not serialize a
+  # potentially large envelope twice; the actual request below owns its body.
   public_request = httpx.Request(method, original_url)
+  try:
+    # HTTPX timeouts bound individual network phases. This outer deadline also
+    # covers DNS validation, retries across pinned addresses, the complete
+    # response stream, and response validation as one operation.
+    async with asyncio.timeout(timeout_seconds):
+      return await _request_within_deadline(
+        method,
+        original_url,
+        public_request,
+        json=json,
+        max_response_bytes=max_response_bytes,
+        response_format=response_format,
+        timeout_seconds=timeout_seconds,
+      )
+  except TimeoutError as exc:
+    raise httpx.TimeoutException(
+      "Federation request exceeded its deadline.", request=public_request,
+    ) from exc
+
+
+async def _request_within_deadline(
+  method: str,
+  original_url: str,
+  public_request: httpx.Request,
+  *,
+  json: Any,
+  max_response_bytes: int,
+  response_format: Literal["json", "binary"],
+  timeout_seconds: float,
+) -> httpx.Response:
+  # getaddrinfo is blocking and a cancelled default-executor thread delays
+  # asyncio.run() shutdown. The killable helper makes the outer deadline bound
+  # both the coroutine and this short-lived service process.
+  pinned_urls, host_header, sni_host = await _resolve_url_safe(original_url)
 
   async with httpx.AsyncClient(
     follow_redirects=False,

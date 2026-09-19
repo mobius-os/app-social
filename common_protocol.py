@@ -42,11 +42,13 @@ MAX_AVATAR_BYTES = 512 * 1024
 ACTOR_CACHE_TTL_S = 3600
 ACTOR_CACHE_LIMIT = 4096
 # A signed delivery can make the receiver fetch the sender's actor card before
-# it answers. Keep that nested budget shorter than the delivery budget so a
-# cold cache cannot make both requests expire at the same instant.
+# it answers. Keep that nested budget shorter than the delivery budget, while
+# keeping the whole write below the platform service's 15-second hard ceiling.
+# Otherwise the platform kills the service before Social can classify the peer
+# timeout and return its own useful error.
 ACTOR_FETCH_TIMEOUT_S = 10.0
 OUTBOUND_TIMEOUT_S = 10.0
-SIGNED_WRITE_TIMEOUT_S = 20.0
+SIGNED_WRITE_TIMEOUT_S = 12.0
 
 CLOCK_SKEW_S = 600
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,250})(:\d{1,5})?$")

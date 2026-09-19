@@ -17,8 +17,6 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-from fastapi import HTTPException
-
 # Networks the fetcher must never reach. Hitting them from
 # our (network-privileged) backend turns the install endpoint into
 # an SSRF springboard: a malicious manifest URL could probe the
@@ -46,7 +44,14 @@ _BLOCKED_NETS = [
 ]
 
 
-def validate_url_safe(url: str) -> tuple[list[str], str, str]:
+class URLValidationError(ValueError):
+  def __init__(self, status_code: int, detail: str):
+    super().__init__(detail)
+    self.status_code = status_code
+    self.detail = detail
+
+
+def validate_url_safe_core(url: str) -> tuple[list[str], str, str]:
   """Validates a URL against the SSRF blocklist; returns `(pinned_urls, host_header, sni_host)`.
 
   `pinned_urls` are per-IP URLs that connect to a resolved address (defeats
@@ -78,7 +83,7 @@ def validate_url_safe(url: str) -> tuple[list[str], str, str]:
   """
   parsed = urlparse(url)
   if parsed.scheme not in ("http", "https"):
-    raise HTTPException(
+    raise URLValidationError(
       400, f"URL scheme must be http or https, got {parsed.scheme!r}",
     )
   # Reject embedded credentials: manifest URLs are public, and userinfo would
@@ -86,16 +91,16 @@ def validate_url_safe(url: str) -> tuple[list[str], str, str]:
   # otherwise turns it into a Basic-auth header), so a credentialed URL is both
   # a red flag and a footgun. Block it outright.
   if parsed.username or parsed.password:
-    raise HTTPException(
+    raise URLValidationError(
       400, "URL must not contain credentials (user:pass@) — manifests are public.",
     )
   host = parsed.hostname
   if not host:
-    raise HTTPException(400, f"URL is missing a hostname: {url}")
+    raise URLValidationError(400, f"URL is missing a hostname: {url}")
   try:
     infos = socket.getaddrinfo(host, None)
   except socket.gaierror as exc:
-    raise HTTPException(400, f"Cannot resolve host {host!r}: {exc}") from exc
+    raise URLValidationError(400, f"Cannot resolve host {host!r}: {exc}") from exc
   validated_ips: list[str] = []
   for info in infos:
     ip_str = info[4][0]
@@ -120,13 +125,13 @@ def validate_url_safe(url: str) -> tuple[list[str], str, str]:
       # multicast, documentation, and future special-use ranges can all be
       # routed inside a deployment and therefore remain SSRF targets.
       if not cand.is_global or cand.is_multicast:
-        raise HTTPException(
+        raise URLValidationError(
           400,
           f"URL {host!r} resolves to non-public address {ip}.",
         )
       for net in _BLOCKED_NETS:
         if cand in net:
-          raise HTTPException(
+          raise URLValidationError(
             400,
             f"URL {host!r} resolves to blocked address {ip} "
             f"(network {net}).",
@@ -136,7 +141,7 @@ def validate_url_safe(url: str) -> tuple[list[str], str, str]:
     if ip_str not in validated_ips:
       validated_ips.append(ip_str)
   if not validated_ips:
-    raise HTTPException(400, f"Cannot resolve host {host!r} to any address.")
+    raise URLValidationError(400, f"Cannot resolve host {host!r} to any address.")
   # Prefer IPv4, then IPv6. The transport pins each connection to one exact
   # address, so an unroutable family (this container has no IPv6 egress) must be
   # skippable rather than fatal. Ordering IPv4 first — while still returning the
@@ -154,3 +159,13 @@ def validate_url_safe(url: str) -> tuple[list[str], str, str]:
   # brackets preserved) per RFC 7230 §5.4; the SNI/cert name is the bare DNS
   # host. userinfo was rejected above, so parsed.netloc is exactly host[:port].
   return pinned_urls, parsed.netloc, host
+
+
+def validate_url_safe(url: str) -> tuple[list[str], str, str]:
+  """FastAPI adapter retained for callers that use HTTP errors as control flow."""
+  from fastapi import HTTPException
+
+  try:
+    return validate_url_safe_core(url)
+  except URLValidationError as exc:
+    raise HTTPException(exc.status_code, exc.detail) from exc

@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.lock \
     && rm /tmp/requirements.lock
 
 WORKDIR /srv/app
-COPY common_protocol.py common_public.py common_transport.py net_utils.py service_io.py community_host.py ./
+COPY common_protocol.py common_public.py common_transport.py dns_resolver.py net_utils.py service_io.py community_host.py ./
 RUN chown -R root:root /srv/app && chmod -R a-w /srv/app
 
 USER 1000:1000

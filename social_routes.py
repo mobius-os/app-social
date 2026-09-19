@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import time
@@ -81,7 +82,7 @@ from common_protocol import (
 from common_public import (
   BOARD_PAGE_LIMIT, CommonPublicStore, create_public_router,
 )
-from common_transport import federation_request
+from common_transport import FederationTransportError, federation_request
 from service_io import atomic_write
 from service_runtime import (
   APP, Principal, fs_locks, get_db, get_principal, get_settings,
@@ -90,6 +91,7 @@ from service_runtime import (
 )
 
 router = APIRouter(tags=["common"])
+_log = logging.getLogger(__name__)
 
 APP_SLUG = "social"
 PEER_AVATAR_CACHE_TTL_S = 24 * 3600
@@ -911,7 +913,14 @@ def _community_write_error(exc: Exception, action: str) -> str:
     if exc.response.status_code == 403:
       return "The community host could not verify this Social identity. Try again."
     return f"The community host rejected the {action}. Try again."
-  return "The community host could not be reached. Try again."
+  if isinstance(exc, httpx.TimeoutException):
+    return "The community host took too long to respond. Try again."
+  if isinstance(exc, FederationTransportError):
+    return "The community host returned an invalid response. Try again."
+  if isinstance(exc, httpx.TransportError):
+    return "The community host could not be reached. Try again."
+  _log.exception("Unexpected community %s failure", action, exc_info=exc)
+  return f"Social could not complete the {action}. Try again."
 
 
 @router.put("/me")
