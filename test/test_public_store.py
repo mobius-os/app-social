@@ -1,16 +1,222 @@
 """Scale and rollback contracts for Social's public board store."""
 
+import asyncio
+import base64
+import io
 import json
+import os
 import sqlite3
+import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from PIL import Image
 
-from common_public import CommonPublicStore
+from common_protocol import validate_attachment
+from common_public import CommonPublicStore, create_public_router, image_thumbnail_bytes
+
+
+def forged_png_header(width=20000, height=20000):
+  output = io.BytesIO()
+  Image.new("RGB", (1, 1)).save(output, format="PNG")
+  data = bytearray(output.getvalue())
+  data[16:24] = struct.pack(">II", width, height)
+  data[29:33] = struct.pack(">I", zlib.crc32(data[12:29]) & 0xffffffff)
+  return bytes(data)
 
 
 class PublicBoardIndexTests(unittest.TestCase):
+  def test_oversized_original_header_rejects_entire_gallery_before_media_write(self):
+    for size in ((6000, 5000), (20000, 20000)):
+      with self.subTest(size=size), tempfile.TemporaryDirectory() as directory:
+        store = CommonPublicStore(directory)
+        oversized = validate_attachment({
+          "mime": "image/png", "w": 1, "h": 1,
+          "data_b64": base64.b64encode(forged_png_header(*size)).decode(),
+        })
+        ordinary = ({"mime": "image/png", "w": 1, "h": 1}, b"legacy-image")
+        with self.assertRaises(HTTPException) as raised:
+          store.store_post({
+            "id": "oversized-gallery", "host": "author.example", "text": "Photo",
+            "created_at": 1.0, "replies": [],
+          }, attachments=[ordinary, oversized])
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertFalse((store.board_dir() / "oversized-gallery.json").exists())
+        self.assertEqual(list(store.board_media_dir().iterdir()), [])
+        self.assertEqual(list(store.board_thumbnail_dir().iterdir()), [])
+
+  def test_pillow_bomb_header_in_client_thumbnail_is_a_clean_rejection(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      with self.assertRaises(HTTPException) as raised:
+        store.store_post({
+          "id": "oversized-thumb", "host": "author.example", "text": "Photo",
+          "created_at": 1.0, "replies": [],
+        }, ({"mime": "image/png", "w": 1, "h": 1}, b"legacy-image"),
+          thumbnails=[({"mime": "image/png", "w": 1, "h": 1}, forged_png_header())])
+      self.assertEqual(raised.exception.status_code, 400)
+      self.assertEqual(list(store.board_media_dir().iterdir()), [])
+      self.assertEqual(list(store.board_thumbnail_dir().iterdir()), [])
+      self.assertFalse((store.board_dir() / "oversized-thumb.json").exists())
+
+  def test_oversized_backfill_is_rejected_without_cache_or_original_fallback(self):
+    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+      "APP_STORAGE_DIR": directory, "APP_ID": "7", "APP_SLUG": "social",
+    }):
+      import social_routes
+      store = CommonPublicStore(directory)
+      original = store.board_media_path("deadbeef", "image/png")
+      original.write_bytes(forged_png_header())
+      with self.assertRaises(HTTPException) as raised:
+        store.board_thumbnail("deadbeef")
+      self.assertEqual(raised.exception.status_code, 400)
+      self.assertEqual(list(store.board_thumbnail_dir().iterdir()), [])
+      self.assertTrue(original.exists(), "legacy source is retained, not deleted")
+
+      app = FastAPI()
+      router, _ = create_public_router(store, None)
+      app.include_router(router)
+      with TestClient(app) as client:
+        response = client.get("/board/thumbnail/deadbeef")
+      self.assertEqual(response.status_code, 400)
+      with patch.object(social_routes, "_public_store", store), patch.object(
+        social_routes, "_own_host", return_value="self.example",
+      ), patch.object(social_routes, "_serve_image") as serve:
+        with self.assertRaises(HTTPException) as raised:
+          asyncio.run(social_routes._serve_owner_board_media(
+            "self.example", "deadbeef", None, thumbnail=True,
+          ))
+        self.assertEqual(raised.exception.status_code, 400)
+        serve.assert_not_called()
+
+  def test_board_images_get_small_reusable_timeline_thumbnails(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      output = io.BytesIO()
+      Image.new("RGB", (1600, 1200), (48, 96, 160)).save(
+        output, format="JPEG", quality=88,
+      )
+      source = output.getvalue()
+      store.store_post({
+        "id": "post-image", "host": "author.example", "text": "Photo",
+        "created_at": 1.0, "replies": [],
+      }, ({"mime": "image/jpeg", "w": 1600, "h": 1200}, source))
+
+      found = store.board_thumbnail("post-image")
+      self.assertIsNotNone(found)
+      self.assertEqual(found[1], "image/webp")
+      self.assertLess(found[0].stat().st_size, len(source))
+      with Image.open(found[0]) as thumbnail:
+        self.assertLessEqual(max(thumbnail.size), 640)
+
+  def test_client_thumbnail_is_stored_without_reprocessing(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      original = b"full-image-bytes"
+      output = io.BytesIO()
+      Image.new("RGB", (64, 48), (10, 20, 30)).save(output, format="WEBP")
+      thumbnail = output.getvalue()
+      store.store_post({
+        "id": "post-client-thumb", "host": "author.example", "text": "Photo",
+        "created_at": 1.0, "replies": [],
+      }, ({"mime": "image/png", "w": 800, "h": 600}, original), None, [
+        ({"mime": "image/webp", "w": 64, "h": 48}, thumbnail),
+      ])
+
+      found = store.board_thumbnail("post-client-thumb")
+      self.assertIsNotNone(found)
+      self.assertEqual(found[1], "image/webp")
+      self.assertEqual(found[0].read_bytes(), thumbnail)
+
+  def test_invalid_client_thumbnail_leaves_no_partial_media(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      with self.assertRaisesRegex(HTTPException, "Post thumbnail is invalid") as raised:
+        store.store_post({
+          "id": "post-bad-thumb", "host": "author.example", "text": "Photo",
+          "created_at": 1.0, "replies": [],
+        }, ({"mime": "image/png", "w": 1, "h": 1}, b"source"), None, [
+          ({"mime": "image/webp", "w": 1, "h": 1}, b"not-an-image"),
+        ])
+
+      self.assertEqual(raised.exception.status_code, 400)
+      self.assertFalse((store.board_dir() / "post-bad-thumb.json").exists())
+      self.assertEqual(list(store.board_media_dir().iterdir()), [])
+
+  def test_oversized_image_is_rejected_before_raster_processing(self):
+    class HeaderOnlyImage:
+      format = "PNG"
+      width = 6000
+      height = 5000
+
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *_args):
+        pass
+
+    with patch("common_public.Image.open", return_value=HeaderOnlyImage()), patch(
+      "common_public.ImageOps.exif_transpose",
+    ) as transpose:
+      with self.assertRaisesRegex(ValueError, "dimensions are too large"):
+        image_thumbnail_bytes(b"header")
+      transpose.assert_not_called()
+
+  def test_standard_reactions_preserve_legacy_likes_and_viewer_state(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      store.store_post({
+        "id": "post-react", "host": "author.example", "text": "React",
+        "created_at": 1.0, "replies": [],
+        "likes": {"legacy.example": 1.0},
+      })
+      result = store.toggle_reaction("post-react", "viewer.example", "🎉")
+      presented = store.read_board(10, None, "viewer.example")[0]
+
+      self.assertEqual(result["reaction_counts"], {"❤️": 1, "🎉": 1})
+      self.assertEqual(result["reacted"], ["🎉"])
+      self.assertEqual(presented["like_count"], 1)
+      self.assertEqual([item["emoji"] for item in presented["reactions"]], ["❤️", "🎉"])
+      self.assertTrue(presented["reactions"][1]["reacted"])
+
+  def test_legacy_like_response_shape_survives_storage_migration(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      store.store_post({
+        "id": "post-like", "host": "author.example", "text": "Like",
+        "created_at": 1.0, "replies": [],
+        "likes": {"existing.example": 1.0},
+      })
+
+      result = store.toggle_like("post-like", "viewer.example")
+
+      self.assertEqual(set(result), {
+        "status", "likes", "liked", "author_host", "activity",
+      })
+      self.assertEqual(result["likes"], 2)
+      self.assertTrue(result["liked"])
+
+  def test_feed_includes_recent_unique_reply_authors_for_avatar_stack(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      store.store_post({
+        "id": "post-replies", "host": "author.example", "text": "Talk",
+        "created_at": 1.0, "replies": [],
+      })
+      store.add_reply("post-replies", "one", "alice.example", "alice", "Hi", 2.0)
+      store.add_reply("post-replies", "two", "bob.example", "bob", "Hey", 3.0)
+      store.add_reply("post-replies", "three", "alice.example", "alice", "Again", 4.0)
+
+      post = store.read_board(10, None)[0]
+      self.assertEqual(post["reply_authors"], [
+        {"host": "alice.example", "handle": "alice"},
+        {"host": "bob.example", "handle": "bob"},
+      ])
+
   def test_warm_feed_reads_use_the_index_instead_of_rescanning_every_post(self):
     with tempfile.TemporaryDirectory() as directory:
       store = CommonPublicStore(directory)
@@ -77,7 +283,7 @@ class PublicBoardIndexTests(unittest.TestCase):
       self.assertEqual(replied["reply_count"], 1)
       self.assertTrue(indexed["liked"])
       self.assertEqual(indexed["reply_count"], 1)
-      self.assertIn("viewer.example", rollback_record["likes"])
+      self.assertIn("viewer.example", rollback_record["reactions"]["❤️"])
       self.assertEqual(rollback_record["replies"][0]["id"], "reply-one")
 
       self.assertEqual(store.delete_post("post-one", "author.example"), {

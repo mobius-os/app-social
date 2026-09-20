@@ -51,6 +51,12 @@ def opener_with_version(version):
 
 
 class CommunityImageContractTests(unittest.TestCase):
+  def test_packaged_runtime_declares_thumbnail_dependency(self):
+    requirements = (
+      Path(__file__).parents[1] / "deploy" / "community" / "requirements.lock"
+    ).read_text().splitlines()
+    self.assertIn("pillow==12.3.0", requirements)
+
   def test_packaged_runtime_can_resolve_and_reject_non_public_peer(self):
     repository = Path(__file__).parents[1]
     dockerfile = repository / "deploy" / "community" / "Dockerfile"
