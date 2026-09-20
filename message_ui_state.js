@@ -20,7 +20,7 @@ export function reconcileLatestPage(prior, page, { replace = false } = {}) {
     .map((message) => message.id))
   const lostContinuity = !replace && prior?.length > 0 && page?.next_cursor &&
     !incoming.some((message) => priorIds.has(message.id))
-  const resetCursor = replace || prior === null || lostContinuity
+  const resetCursor = replace || prior == null || prior.length === 0 || lostContinuity
   const pendingLocal = (prior || []).filter((message) =>
     message._client_retry || message._client_pending || message._client_unconfirmed_history)
   return {

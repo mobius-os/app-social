@@ -96,7 +96,8 @@ test('posting a different draft cannot consume the preserved one', () => {
 
 test('public board and directory render independently from global-directory membership', () => {
   const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
-  assert.match(source, /if \(profile\) loadFeed\(\)/)
+  assert.match(source, /loadFeed\(\)\s*loadMe\(\)/)
+  assert.doesNotMatch(source, /loadMe\(\)\.then/)
   assert.match(source, /\{tab === 'board' && \(/)
   assert.match(source, /\{tab === 'people' && \(/)
   assert.doesNotMatch(source, /tab === 'board' && !needsJoin/)

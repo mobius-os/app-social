@@ -18,6 +18,15 @@ test('first successful recovery establishes its older-history cursor', () => {
   assert.deepEqual(result.messages.map(({ id }) => id), ['new'])
 })
 
+test('an initially empty thread establishes its older-history cursor', () => {
+  const result = reconcileLatestPage([], {
+    messages: [message('new', 2)], next_cursor: 'older-page',
+  })
+  assert.equal(result.resetCursor, true)
+  assert.equal(result.nextCursor, 'older-page')
+  assert.deepEqual(result.messages.map(({ id }) => id), ['new'])
+})
+
 test('overlapping latest refresh preserves already-loaded continuous history', () => {
   const result = reconcileLatestPage([
     message('old', 1), message('boundary', 2),
