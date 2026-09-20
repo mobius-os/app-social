@@ -1,22 +1,101 @@
 """Scale and rollback contracts for Social's public board store."""
 
+import asyncio
+import base64
 import io
 import json
+import os
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from PIL import Image
 
-from common_public import CommonPublicStore, image_thumbnail_bytes
+from common_protocol import validate_attachment
+from common_public import CommonPublicStore, create_public_router, image_thumbnail_bytes
+
+
+def forged_png_header(width=20000, height=20000):
+  output = io.BytesIO()
+  Image.new("RGB", (1, 1)).save(output, format="PNG")
+  data = bytearray(output.getvalue())
+  data[16:24] = struct.pack(">II", width, height)
+  data[29:33] = struct.pack(">I", zlib.crc32(data[12:29]) & 0xffffffff)
+  return bytes(data)
 
 
 class PublicBoardIndexTests(unittest.TestCase):
+  def test_oversized_original_header_rejects_entire_gallery_before_media_write(self):
+    for size in ((6000, 5000), (20000, 20000)):
+      with self.subTest(size=size), tempfile.TemporaryDirectory() as directory:
+        store = CommonPublicStore(directory)
+        oversized = validate_attachment({
+          "mime": "image/png", "w": 1, "h": 1,
+          "data_b64": base64.b64encode(forged_png_header(*size)).decode(),
+        })
+        ordinary = ({"mime": "image/png", "w": 1, "h": 1}, b"legacy-image")
+        with self.assertRaises(HTTPException) as raised:
+          store.store_post({
+            "id": "oversized-gallery", "host": "author.example", "text": "Photo",
+            "created_at": 1.0, "replies": [],
+          }, attachments=[ordinary, oversized])
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertFalse((store.board_dir() / "oversized-gallery.json").exists())
+        self.assertEqual(list(store.board_media_dir().iterdir()), [])
+        self.assertEqual(list(store.board_thumbnail_dir().iterdir()), [])
+
+  def test_pillow_bomb_header_in_client_thumbnail_is_a_clean_rejection(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      with self.assertRaises(HTTPException) as raised:
+        store.store_post({
+          "id": "oversized-thumb", "host": "author.example", "text": "Photo",
+          "created_at": 1.0, "replies": [],
+        }, ({"mime": "image/png", "w": 1, "h": 1}, b"legacy-image"),
+          thumbnails=[({"mime": "image/png", "w": 1, "h": 1}, forged_png_header())])
+      self.assertEqual(raised.exception.status_code, 400)
+      self.assertEqual(list(store.board_media_dir().iterdir()), [])
+      self.assertEqual(list(store.board_thumbnail_dir().iterdir()), [])
+      self.assertFalse((store.board_dir() / "oversized-thumb.json").exists())
+
+  def test_oversized_backfill_is_rejected_without_cache_or_original_fallback(self):
+    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+      "APP_STORAGE_DIR": directory, "APP_ID": "7", "APP_SLUG": "social",
+    }):
+      import social_routes
+      store = CommonPublicStore(directory)
+      original = store.board_media_path("deadbeef", "image/png")
+      original.write_bytes(forged_png_header())
+      with self.assertRaises(HTTPException) as raised:
+        store.board_thumbnail("deadbeef")
+      self.assertEqual(raised.exception.status_code, 400)
+      self.assertEqual(list(store.board_thumbnail_dir().iterdir()), [])
+      self.assertTrue(original.exists(), "legacy source is retained, not deleted")
+
+      app = FastAPI()
+      router, _ = create_public_router(store, None)
+      app.include_router(router)
+      with TestClient(app) as client:
+        response = client.get("/board/thumbnail/deadbeef")
+      self.assertEqual(response.status_code, 400)
+      with patch.object(social_routes, "_public_store", store), patch.object(
+        social_routes, "_own_host", return_value="self.example",
+      ), patch.object(social_routes, "_serve_image") as serve:
+        with self.assertRaises(HTTPException) as raised:
+          asyncio.run(social_routes._serve_owner_board_media(
+            "self.example", "deadbeef", None, thumbnail=True,
+          ))
+        self.assertEqual(raised.exception.status_code, 400)
+        serve.assert_not_called()
+
   def test_board_images_get_small_reusable_timeline_thumbnails(self):
     with tempfile.TemporaryDirectory() as directory:
       store = CommonPublicStore(directory)

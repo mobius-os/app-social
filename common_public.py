@@ -96,16 +96,28 @@ IMAGE_FORMAT_MIME = {
 }
 
 
+class BoardImageTooLarge(ValueError):
+  """A raster must be rejected before decoding or storing its media."""
+
+
+def _open_board_image(data: bytes) -> Image.Image:
+  try:
+    return Image.open(io.BytesIO(data))
+  except Image.DecompressionBombError as exc:
+    # Pillow can reject the header before our stricter pixel limit runs.
+    raise BoardImageTooLarge("Board image dimensions are too large.") from exc
+
+
 def _validate_image_header(image: Image.Image) -> None:
   if image.format not in IMAGE_FORMAT_MIME:
     raise ValueError("Board image format is unsupported.")
   if image.width * image.height > BOARD_THUMBNAIL_MAX_PIXELS:
-    raise ValueError("Board image dimensions are too large.")
+    raise BoardImageTooLarge("Board image dimensions are too large.")
 
 
 def image_thumbnail_bytes(data: bytes) -> tuple[str, bytes]:
   """Create the small, display-ready rendition used by board timelines."""
-  with Image.open(io.BytesIO(data)) as opened:
+  with _open_board_image(data) as opened:
     # Reject oversized inputs from their header before EXIF transposition or
     # decoding can allocate the full raster.
     _validate_image_header(opened)
@@ -125,7 +137,7 @@ def image_thumbnail_bytes(data: bytes) -> tuple[str, bytes]:
 
 def validate_thumbnail_bytes(wire: dict, data: bytes) -> None:
   """Verify a client-made thumbnail before it becomes served media."""
-  with Image.open(io.BytesIO(data)) as image:
+  with _open_board_image(data) as image:
     _validate_image_header(image)
     if max(image.size) > BOARD_THUMBNAIL_MAX_SIDE:
       raise ValueError("Board thumbnail dimensions are too large.")
@@ -538,6 +550,9 @@ class CommonPublicStore:
       target = self.board_thumbnail_dir() / f"{stem}.{ATTACHMENT_MIME_EXT[mime]}"
       atomic_write(target, data)
       return target, mime
+    except BoardImageTooLarge as exc:
+      # Do not let owner serving fall back to this oversized original.
+      raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
       return None
 
@@ -563,6 +578,17 @@ class CommonPublicStore:
     ``<id>.<ext>``. `attachments` also records a single `attachment` (its first
     image) so a reader that only understands one image still shows something.
     """
+    # Inspect all original headers before writing any media. Optional
+    # thumbnail failures still preserve ordinary legacy image posts, but an
+    # oversized raster must not leave an orphan image or become a fallback.
+    for _wire, data in attachments or ([attachment] if attachment else []):
+      try:
+        with _open_board_image(data) as image:
+          _validate_image_header(image)
+      except BoardImageTooLarge as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+      except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
+        pass
     image_count = len(attachments) if attachments else (1 if attachment else 0)
     if thumbnails and len(thumbnails) != image_count:
       raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
