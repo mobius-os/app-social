@@ -5,11 +5,8 @@ import base64
 import io
 import json
 import os
-import shutil
 import sqlite3
 import struct
-import subprocess
-import sys
 import tempfile
 import unittest
 import zlib
@@ -168,23 +165,6 @@ class PublicBoardIndexTests(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "dimensions are too large"):
         image_thumbnail_bytes(b"header")
       transpose.assert_not_called()
-
-  def test_package_mode_uses_the_packaged_service_io_module(self):
-    root = Path(__file__).parents[1]
-    with tempfile.TemporaryDirectory() as directory:
-      package = Path(directory) / "social_package"
-      package.mkdir()
-      (package / "__init__.py").write_text("")
-      for name in (
-        "common_protocol.py", "common_public.py", "common_transport.py",
-        "service_io.py",
-      ):
-        shutil.copy2(root / name, package / name)
-      probe = subprocess.run(
-        [sys.executable, "-c", "import social_package.common_public"],
-        cwd=directory, text=True, capture_output=True,
-      )
-      self.assertEqual(probe.returncode, 0, probe.stderr)
 
   def test_standard_reactions_preserve_legacy_likes_and_viewer_state(self):
     with tempfile.TemporaryDirectory() as directory:

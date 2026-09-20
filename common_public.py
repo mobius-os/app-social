@@ -31,42 +31,23 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 
-if __package__:
-  from .common_protocol import (
-    ATTACHMENT_MIME_EXT,
-    CLOCK_SKEW_S,
-    MAX_BOARD_ATTACHMENTS,
-    MAX_BIO_CHARS,
-    MAX_NAME_CHARS,
-    MAX_REPLY_TEXT_CHARS,
-    ActorVerifier,
-    canonical,
-    read_envelope,
-    valid_host,
-    valid_id,
-    validate_attachment,
-    validate_attachments,
-    validate_text_or_attachment,
-  )
-  from .service_io import atomic_write
-else:
-  from common_protocol import (
-    ATTACHMENT_MIME_EXT,
-    CLOCK_SKEW_S,
-    MAX_BOARD_ATTACHMENTS,
-    MAX_BIO_CHARS,
-    MAX_NAME_CHARS,
-    MAX_REPLY_TEXT_CHARS,
-    ActorVerifier,
-    canonical,
-    read_envelope,
-    valid_host,
-    valid_id,
-    validate_attachment,
-    validate_attachments,
-    validate_text_or_attachment,
-  )
-  from service_io import atomic_write
+from common_protocol import (
+  ATTACHMENT_MIME_EXT,
+  CLOCK_SKEW_S,
+  MAX_BOARD_ATTACHMENTS,
+  MAX_BIO_CHARS,
+  MAX_NAME_CHARS,
+  MAX_REPLY_TEXT_CHARS,
+  ActorVerifier,
+  canonical,
+  read_envelope,
+  valid_host,
+  valid_id,
+  validate_attachment,
+  validate_attachments,
+  validate_text_or_attachment,
+)
+from service_io import atomic_write
 
 BOARD_PAGE_LIMIT = 50
 BOARD_REPLY_LIMIT = 200
