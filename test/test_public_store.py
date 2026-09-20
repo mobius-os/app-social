@@ -1,16 +1,163 @@
 """Scale and rollback contracts for Social's public board store."""
 
+import io
 import json
+import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from fastapi import HTTPException
+from PIL import Image
 
-from common_public import CommonPublicStore
+from common_public import CommonPublicStore, image_thumbnail_bytes
 
 
 class PublicBoardIndexTests(unittest.TestCase):
+  def test_board_images_get_small_reusable_timeline_thumbnails(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      output = io.BytesIO()
+      Image.new("RGB", (1600, 1200), (48, 96, 160)).save(
+        output, format="JPEG", quality=88,
+      )
+      source = output.getvalue()
+      store.store_post({
+        "id": "post-image", "host": "author.example", "text": "Photo",
+        "created_at": 1.0, "replies": [],
+      }, ({"mime": "image/jpeg", "w": 1600, "h": 1200}, source))
+
+      found = store.board_thumbnail("post-image")
+      self.assertIsNotNone(found)
+      self.assertEqual(found[1], "image/webp")
+      self.assertLess(found[0].stat().st_size, len(source))
+      with Image.open(found[0]) as thumbnail:
+        self.assertLessEqual(max(thumbnail.size), 640)
+
+  def test_client_thumbnail_is_stored_without_reprocessing(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      original = b"full-image-bytes"
+      output = io.BytesIO()
+      Image.new("RGB", (64, 48), (10, 20, 30)).save(output, format="WEBP")
+      thumbnail = output.getvalue()
+      store.store_post({
+        "id": "post-client-thumb", "host": "author.example", "text": "Photo",
+        "created_at": 1.0, "replies": [],
+      }, ({"mime": "image/png", "w": 800, "h": 600}, original), None, [
+        ({"mime": "image/webp", "w": 64, "h": 48}, thumbnail),
+      ])
+
+      found = store.board_thumbnail("post-client-thumb")
+      self.assertIsNotNone(found)
+      self.assertEqual(found[1], "image/webp")
+      self.assertEqual(found[0].read_bytes(), thumbnail)
+
+  def test_invalid_client_thumbnail_leaves_no_partial_media(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      with self.assertRaisesRegex(HTTPException, "Post thumbnail is invalid") as raised:
+        store.store_post({
+          "id": "post-bad-thumb", "host": "author.example", "text": "Photo",
+          "created_at": 1.0, "replies": [],
+        }, ({"mime": "image/png", "w": 1, "h": 1}, b"source"), None, [
+          ({"mime": "image/webp", "w": 1, "h": 1}, b"not-an-image"),
+        ])
+
+      self.assertEqual(raised.exception.status_code, 400)
+      self.assertFalse((store.board_dir() / "post-bad-thumb.json").exists())
+      self.assertEqual(list(store.board_media_dir().iterdir()), [])
+
+  def test_oversized_image_is_rejected_before_raster_processing(self):
+    class HeaderOnlyImage:
+      format = "PNG"
+      width = 6000
+      height = 5000
+
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *_args):
+        pass
+
+    with patch("common_public.Image.open", return_value=HeaderOnlyImage()), patch(
+      "common_public.ImageOps.exif_transpose",
+    ) as transpose:
+      with self.assertRaisesRegex(ValueError, "dimensions are too large"):
+        image_thumbnail_bytes(b"header")
+      transpose.assert_not_called()
+
+  def test_package_mode_uses_the_packaged_service_io_module(self):
+    root = Path(__file__).parents[1]
+    with tempfile.TemporaryDirectory() as directory:
+      package = Path(directory) / "social_package"
+      package.mkdir()
+      (package / "__init__.py").write_text("")
+      for name in (
+        "common_protocol.py", "common_public.py", "common_transport.py",
+        "service_io.py",
+      ):
+        shutil.copy2(root / name, package / name)
+      probe = subprocess.run(
+        [sys.executable, "-c", "import social_package.common_public"],
+        cwd=directory, text=True, capture_output=True,
+      )
+      self.assertEqual(probe.returncode, 0, probe.stderr)
+
+  def test_standard_reactions_preserve_legacy_likes_and_viewer_state(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      store.store_post({
+        "id": "post-react", "host": "author.example", "text": "React",
+        "created_at": 1.0, "replies": [],
+        "likes": {"legacy.example": 1.0},
+      })
+      result = store.toggle_reaction("post-react", "viewer.example", "🎉")
+      presented = store.read_board(10, None, "viewer.example")[0]
+
+      self.assertEqual(result["reaction_counts"], {"❤️": 1, "🎉": 1})
+      self.assertEqual(result["reacted"], ["🎉"])
+      self.assertEqual(presented["like_count"], 1)
+      self.assertEqual([item["emoji"] for item in presented["reactions"]], ["❤️", "🎉"])
+      self.assertTrue(presented["reactions"][1]["reacted"])
+
+  def test_legacy_like_response_shape_survives_storage_migration(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      store.store_post({
+        "id": "post-like", "host": "author.example", "text": "Like",
+        "created_at": 1.0, "replies": [],
+        "likes": {"existing.example": 1.0},
+      })
+
+      result = store.toggle_like("post-like", "viewer.example")
+
+      self.assertEqual(set(result), {
+        "status", "likes", "liked", "author_host", "activity",
+      })
+      self.assertEqual(result["likes"], 2)
+      self.assertTrue(result["liked"])
+
+  def test_feed_includes_recent_unique_reply_authors_for_avatar_stack(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      store.store_post({
+        "id": "post-replies", "host": "author.example", "text": "Talk",
+        "created_at": 1.0, "replies": [],
+      })
+      store.add_reply("post-replies", "one", "alice.example", "alice", "Hi", 2.0)
+      store.add_reply("post-replies", "two", "bob.example", "bob", "Hey", 3.0)
+      store.add_reply("post-replies", "three", "alice.example", "alice", "Again", 4.0)
+
+      post = store.read_board(10, None)[0]
+      self.assertEqual(post["reply_authors"], [
+        {"host": "alice.example", "handle": "alice"},
+        {"host": "bob.example", "handle": "bob"},
+      ])
+
   def test_warm_feed_reads_use_the_index_instead_of_rescanning_every_post(self):
     with tempfile.TemporaryDirectory() as directory:
       store = CommonPublicStore(directory)
@@ -77,7 +224,7 @@ class PublicBoardIndexTests(unittest.TestCase):
       self.assertEqual(replied["reply_count"], 1)
       self.assertTrue(indexed["liked"])
       self.assertEqual(indexed["reply_count"], 1)
-      self.assertIn("viewer.example", rollback_record["likes"])
+      self.assertIn("viewer.example", rollback_record["reactions"]["❤️"])
       self.assertEqual(rollback_record["replies"][0]["id"], "reply-one")
 
       self.assertEqual(store.delete_post("post-one", "author.example"), {

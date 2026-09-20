@@ -20,8 +20,12 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
-from common_transport import federation_request
-from service_io import atomic_write, read_capped_body
+if __package__:
+  from .common_transport import federation_request
+  from .service_io import atomic_write, read_capped_body
+else:
+  from common_transport import federation_request
+  from service_io import atomic_write, read_capped_body
 
 PROTOCOL = "common/0"
 PUBLIC_SERVICE_PATH = "/api/app-services/social"

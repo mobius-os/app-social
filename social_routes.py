@@ -81,7 +81,8 @@ from common_protocol import (
   validate_text_or_attachment as _validate_text_or_attachment,
 )
 from common_public import (
-  BOARD_PAGE_LIMIT, CommonPublicStore, create_public_router,
+  BOARD_PAGE_LIMIT, BOARD_REACTION_EMOJIS, CommonPublicStore,
+  create_public_router, image_thumbnail_bytes,
 )
 from common_transport import FederationTransportError, federation_request
 from service_io import atomic_write
@@ -121,6 +122,7 @@ _serve_image = _public_store.serve_image
 _read_board = _public_store.read_board
 _store_board_post = _public_store.store_post
 _toggle_board_like = _public_store.toggle_like
+_toggle_board_reaction = _public_store.toggle_reaction
 _add_board_reply = _public_store.add_reply
 _fetch_actor = _actor_verifier.fetch_actor
 _verify_peer_envelope = _actor_verifier.verify_envelope
@@ -1072,6 +1074,7 @@ class PublishPost(BaseModel):
   text: str
   attachment: Any = None
   attachments: Any = None
+  thumbnails: Any = None
 
 
 async def _refresh_profile_cache(db, principal: Principal) -> dict:
@@ -1385,6 +1388,10 @@ async def publish_post(
   text = post.text.strip()
   attachment = _validate_attachment(post.attachment)
   attachments = _validate_attachments(post.attachments)
+  thumbnails = _validate_attachments(post.thumbnails)
+  image_count = len(attachments) if attachments else (1 if attachment else 0)
+  if thumbnails and len(thumbnails) != image_count:
+    raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
   first = attachment or (attachments[0] if attachments else None)
   _validate_text_or_attachment(text, first, "Post text is invalid.")
   identity = _load_identity()
@@ -1403,6 +1410,8 @@ async def publish_post(
     envelope["attachment"] = attachments[0][0]
   elif attachment is not None:
     envelope["attachment"] = attachment[0]
+  if thumbnails:
+    envelope["thumbnails"] = [wire for wire, _ in thumbnails]
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   host = _browse_community_host(community_host)
   if host == _own_host():
@@ -1414,7 +1423,7 @@ async def publish_post(
       "created_at": envelope["sent_at"],
       "replies": [],
     }
-    _store_board_post(board_post, attachment, attachments)
+    _store_board_post(board_post, attachment, attachments, thumbnails)
     return {"status": "posted", "id": envelope["id"]}
   try:
     response = await _post_signed_envelope(
@@ -1473,27 +1482,52 @@ async def get_replies_for_owner(
     ) from exc
 
 
-async def _serve_owner_board_media(host: str, post_id: str, index: int | None):
+async def _serve_owner_board_media(
+  host: str, post_id: str, index: int | None, thumbnail: bool = False,
+):
   """Serve one community-board image (a gallery index or the first/legacy one),
   caching remote hosts for 24 hours."""
   if host == _own_host():
-    return _serve_image(_public_store.board_image(post_id, index))
+    found = (
+      _public_store.board_thumbnail(post_id, index)
+      if thumbnail else _public_store.board_image(post_id, index)
+    )
+    return _serve_image(found or _public_store.board_image(post_id, index))
 
   cache_dir = _peer_board_media_dir()
   base_stem = _peer_board_media_name(host, post_id)
   stem = base_stem if index is None else f"{base_stem}-{index}"
+  if thumbnail:
+    stem = f"{stem}-thumb"
   cached = _find_image(cache_dir, stem)
   if (
     cached is not None
     and time.time() - cached[0].stat().st_mtime < BOARD_MEDIA_CACHE_TTL_S
   ):
     return _serve_image(cached)
+  media_kind = "thumbnail" if thumbnail else "media"
   suffix = (
-    f"board/media/{post_id}" if index is None
-    else f"board/media/{post_id}/{index}"
+    f"board/{media_kind}/{post_id}" if index is None
+    else f"board/{media_kind}/{post_id}/{index}"
   )
   try:
-    mime, data = await _download_board_media(_peer_service_url(host, suffix))
+    try:
+      mime, data = await _download_board_media(_peer_service_url(host, suffix))
+    except Exception:
+      if not thumbnail:
+        raise
+      full_suffix = (
+        f"board/media/{post_id}" if index is None
+        else f"board/media/{post_id}/{index}"
+      )
+      _source_mime, source = await _download_board_media(
+        _peer_service_url(host, full_suffix)
+      )
+      mime, data = _source_mime, source
+    if thumbnail:
+      # Peer bytes are untrusted even when served from a thumbnail route.
+      # Re-encode after the header-size guard before caching or serving them.
+      mime, data = image_thumbnail_bytes(data)
     target = cache_dir / f"{stem}.{_ATTACHMENT_MIME_EXT[mime]}"
     atomic_write(target, data)
     for _old_mime, ext in _ATTACHMENT_MIME_EXT.items():
@@ -1510,6 +1544,7 @@ async def _serve_owner_board_media(host: str, post_id: str, index: int | None):
 @router.get("/board-media/{post_id}")
 async def get_board_media_for_owner(
   post_id: str,
+  thumbnail: bool = False,
   community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
@@ -1518,13 +1553,16 @@ async def get_board_media_for_owner(
   _require_owner_or_common_app(db, principal)
   if not _valid_id(post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
-  return await _serve_owner_board_media(_browse_community_host(community_host), post_id, None)
+  return await _serve_owner_board_media(
+    _browse_community_host(community_host), post_id, None, thumbnail,
+  )
 
 
 @router.get("/board-media/{post_id}/{index}")
 async def get_board_media_index_for_owner(
   post_id: str,
   index: int,
+  thumbnail: bool = False,
   community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
@@ -1535,7 +1573,9 @@ async def get_board_media_index_for_owner(
     raise HTTPException(status_code=400, detail="Post id is invalid.")
   if not 0 <= index < _MAX_BOARD_ATTACHMENTS:
     raise HTTPException(status_code=400, detail="Image index is invalid.")
-  return await _serve_owner_board_media(_browse_community_host(community_host), post_id, index)
+  return await _serve_owner_board_media(
+    _browse_community_host(community_host), post_id, index, thumbnail,
+  )
 
 
 @router.get("/feed")
@@ -1551,7 +1591,11 @@ async def get_feed(
   host = _browse_community_host(community_host)
   if host == _own_host():
     posts = _read_board(min(max(limit, 1), BOARD_PAGE_LIMIT), before, _own_host())
-    return {"host": host, "posts": posts}
+    return {
+      "host": host,
+      "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
+      "posts": posts,
+    }
   try:
     response = await federation_request(
       "GET", _peer_service_url(host, "board"),
@@ -1575,6 +1619,11 @@ class LikePost(BaseModel):
   post_id: str
 
 
+class ReactionPost(BaseModel):
+  post_id: str
+  emoji: str
+
+
 class ReplyPost(BaseModel):
   post_id: str
   text: str
@@ -1588,15 +1637,42 @@ async def like_post(
   principal: Principal = Depends(get_principal),
 ):
   """Toggle a like on a community-board post, signed as this instance."""
+  return await _react_to_post(body.post_id, None, community_host, db, principal)
+
+
+@router.post("/reaction")
+async def react_to_post(
+  body: ReactionPost,
+  community_host: str | None = None,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Toggle one standard emoji reaction on a community-board post."""
+  return await _react_to_post(body.post_id, body.emoji, community_host, db, principal)
+
+
+async def _react_to_post(
+  post_id_value: str,
+  emoji: str | None,
+  community_host: str | None,
+  db: object,
+  principal: Principal,
+) -> dict:
   require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
-  post_id = body.post_id.strip()
+  post_id = str(post_id_value).strip()
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
+  if emoji is not None and emoji not in BOARD_REACTION_EMOJIS:
+    raise HTTPException(status_code=400, detail="Reaction is not supported.")
   identity = _load_identity()
   host = _browse_community_host(community_host)
   if host == _own_host():
-    result = _toggle_board_like(post_id, _own_host())
+    result = (
+      _toggle_board_like(post_id, _own_host())
+      if emoji is None
+      else _toggle_board_reaction(post_id, _own_host(), emoji)
+    )
     author_host = result.pop("author_host", None)
     if result.pop("activity", False) and author_host:
       await _relay_board_activity(
@@ -1610,6 +1686,8 @@ async def like_post(
     "from": _own_host(),
     "sent_at": time.time(),
   }
+  if emoji is not None:
+    envelope["emoji"] = emoji
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await _post_signed_envelope(

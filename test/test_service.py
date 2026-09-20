@@ -592,6 +592,24 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
       })
       created = self.call(root, "board", method="POST", body=post)
       self.assertEqual(created["body"], {"status": "posted"})
+      legacy_reaction = signed(key, {
+        "v": 0, "type": "board_react", "post_id": post_id,
+        "from": "peer.example", "sent_at": time.time(),
+      })
+      legacy_result = self.call(
+        root, "board/react", method="POST", body=legacy_reaction,
+      )["body"]
+      self.assertEqual(set(legacy_result), {"status", "likes", "liked"})
+      self.assertEqual(legacy_result["likes"], 1)
+      emoji_reaction = signed(key, {
+        "v": 0, "type": "board_react", "post_id": post_id, "emoji": "🎉",
+        "from": "peer.example", "sent_at": time.time(),
+      })
+      emoji_result = self.call(
+        root, "board/react", method="POST", body=emoji_reaction,
+      )["body"]
+      self.assertEqual(emoji_result["reaction_counts"], {"❤️": 1, "🎉": 1})
+      self.assertEqual(emoji_result["reacted"], ["❤️", "🎉"])
       media = self.call(root, f"board/media/{post_id}")
       self.assertEqual(media["media_type"], "image/png")
       self.assertEqual(base64.b64decode(media["body_base64"]), b"image")

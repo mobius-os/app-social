@@ -17,6 +17,7 @@ cross-process file locks, and every installed file is written atomically.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import fcntl
 import sqlite3
@@ -28,24 +29,44 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
+from PIL import Image, ImageOps
 
-from common_protocol import (
-  ATTACHMENT_MIME_EXT,
-  CLOCK_SKEW_S,
-  MAX_BOARD_ATTACHMENTS,
-  MAX_BIO_CHARS,
-  MAX_NAME_CHARS,
-  MAX_REPLY_TEXT_CHARS,
-  ActorVerifier,
-  canonical,
-  read_envelope,
-  valid_host,
-  valid_id,
-  validate_attachment,
-  validate_attachments,
-  validate_text_or_attachment,
-)
-from service_io import atomic_write
+if __package__:
+  from .common_protocol import (
+    ATTACHMENT_MIME_EXT,
+    CLOCK_SKEW_S,
+    MAX_BOARD_ATTACHMENTS,
+    MAX_BIO_CHARS,
+    MAX_NAME_CHARS,
+    MAX_REPLY_TEXT_CHARS,
+    ActorVerifier,
+    canonical,
+    read_envelope,
+    valid_host,
+    valid_id,
+    validate_attachment,
+    validate_attachments,
+    validate_text_or_attachment,
+  )
+  from .service_io import atomic_write
+else:
+  from common_protocol import (
+    ATTACHMENT_MIME_EXT,
+    CLOCK_SKEW_S,
+    MAX_BOARD_ATTACHMENTS,
+    MAX_BIO_CHARS,
+    MAX_NAME_CHARS,
+    MAX_REPLY_TEXT_CHARS,
+    ActorVerifier,
+    canonical,
+    read_envelope,
+    valid_host,
+    valid_id,
+    validate_attachment,
+    validate_attachments,
+    validate_text_or_attachment,
+  )
+  from service_io import atomic_write
 
 BOARD_PAGE_LIMIT = 50
 BOARD_REPLY_LIMIT = 200
@@ -62,6 +83,57 @@ REACTION_REPLAY_TTL_S = 2 * CLOCK_SKEW_S
 # Bound per-post metadata; saturation rejects new reactions rather than
 # discarding live tokens and making earlier requests replayable.
 REACTION_REPLAY_LIMIT = 2048
+BOARD_REACTION_EMOJIS = (
+  "❤️", "👍", "👎", "😂", "😮", "😢", "😡", "🎉", "🚀", "👀", "🙌", "🔥",
+  "✅", "💯", "🤔", "👏", "🙏", "💪", "🤝", "✨", "😍", "🤯", "🫡", "🫶",
+)
+BOARD_THUMBNAIL_MAX_SIDE = 640
+BOARD_THUMBNAIL_MAX_PIXELS = 24_000_000
+IMAGE_FORMAT_MIME = {
+  "JPEG": "image/jpeg",
+  "PNG": "image/png",
+  "WEBP": "image/webp",
+}
+
+
+def _validate_image_header(image: Image.Image) -> None:
+  if image.format not in IMAGE_FORMAT_MIME:
+    raise ValueError("Board image format is unsupported.")
+  if image.width * image.height > BOARD_THUMBNAIL_MAX_PIXELS:
+    raise ValueError("Board image dimensions are too large.")
+
+
+def image_thumbnail_bytes(data: bytes) -> tuple[str, bytes]:
+  """Create the small, display-ready rendition used by board timelines."""
+  with Image.open(io.BytesIO(data)) as opened:
+    # Reject oversized inputs from their header before EXIF transposition or
+    # decoding can allocate the full raster.
+    _validate_image_header(opened)
+    image = ImageOps.exif_transpose(opened)
+    image.thumbnail(
+      (BOARD_THUMBNAIL_MAX_SIDE, BOARD_THUMBNAIL_MAX_SIDE),
+      Image.Resampling.LANCZOS,
+    )
+    has_alpha = image.mode in ("RGBA", "LA") or (
+      image.mode == "P" and "transparency" in image.info
+    )
+    prepared = image.convert("RGBA" if has_alpha else "RGB")
+    output = io.BytesIO()
+    prepared.save(output, format="WEBP", quality=72, method=4)
+    return "image/webp", output.getvalue()
+
+
+def validate_thumbnail_bytes(wire: dict, data: bytes) -> None:
+  """Verify a client-made thumbnail before it becomes served media."""
+  with Image.open(io.BytesIO(data)) as image:
+    _validate_image_header(image)
+    if max(image.size) > BOARD_THUMBNAIL_MAX_SIDE:
+      raise ValueError("Board thumbnail dimensions are too large.")
+    if IMAGE_FORMAT_MIME[image.format] != wire["mime"]:
+      raise ValueError("Board thumbnail media type does not match its data.")
+    if image.size != (wire["w"], wire["h"]):
+      raise ValueError("Board thumbnail dimensions do not match its data.")
+    image.verify()
 
 
 class CommonPublicStore:
@@ -274,16 +346,42 @@ class CommonPublicStore:
   @staticmethod
   def _present_board_record(raw: dict, viewer: str | None) -> dict:
     post = dict(raw)
-    likes = post.pop("likes", {})
-    if not isinstance(likes, dict):
-      likes = {}
-    post["like_count"] = len(likes)
+    reactions = CommonPublicStore._reaction_hosts(post)
+    post.pop("likes", None)
+    post.pop("reactions", None)
+    heart = reactions.get("❤️", {})
+    post["like_count"] = len(heart)
     if viewer is not None:
-      post["liked"] = viewer in likes
+      post["liked"] = viewer in heart
+    post["reactions"] = [
+      {
+        "emoji": emoji,
+        "count": len(reactions.get(emoji, {})),
+        "reacted": bool(viewer and viewer in reactions.get(emoji, {})),
+      }
+      for emoji in BOARD_REACTION_EMOJIS
+      if reactions.get(emoji)
+    ]
     replies = post.pop("replies", [])
     if not isinstance(replies, list):
       replies = []
     post["reply_count"] = len(replies)
+    seen_hosts = set()
+    reply_authors = []
+    for reply in reversed(replies):
+      if not isinstance(reply, dict):
+        continue
+      host = str(reply.get("host") or "")
+      if not host or host in seen_hosts:
+        continue
+      seen_hosts.add(host)
+      reply_authors.append({
+        "host": host,
+        "handle": str(reply.get("handle") or ""),
+      })
+      if len(reply_authors) == 3:
+        break
+    post["reply_authors"] = reply_authors
     post.pop("_reaction_replays", None)
     return post
 
@@ -316,6 +414,11 @@ class CommonPublicStore:
 
   def board_media_dir(self) -> Path:
     path = self.common_dir() / "board-media"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+  def board_thumbnail_dir(self) -> Path:
+    path = self.common_dir() / "board-thumbnails"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -421,9 +524,37 @@ class CommonPublicStore:
       return self.find_image(directory, f"{post_id}-0") or self.find_image(directory, post_id)
     return self.find_image(directory, f"{post_id}-{index}")
 
+  def board_thumbnail(self, post_id: str, index: int | None = None) -> tuple[Path, str] | None:
+    """Return a cached thumbnail, lazily backfilling older image posts."""
+    stem = f"{post_id}-{0 if index is None else index}"
+    found = self.find_image(self.board_thumbnail_dir(), stem)
+    if found is not None:
+      return found
+    source = self.board_image(post_id, index)
+    if source is None:
+      return None
+    try:
+      mime, data = image_thumbnail_bytes(source[0].read_bytes())
+      target = self.board_thumbnail_dir() / f"{stem}.{ATTACHMENT_MIME_EXT[mime]}"
+      atomic_write(target, data)
+      return target, mime
+    except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
+      return None
+
+  def _write_board_thumbnail(self, post_id: str, index: int, data: bytes) -> None:
+    try:
+      mime, thumbnail = image_thumbnail_bytes(data)
+      target = self.board_thumbnail_dir() / f"{post_id}-{index}.{ATTACHMENT_MIME_EXT[mime]}"
+      atomic_write(target, thumbnail)
+    except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
+      # The durable full image remains valid even if its optional rendition
+      # cannot be generated; the serving path falls back to that original.
+      return
+
   def store_post(
     self, post: dict, attachment: tuple[dict, bytes] | None = None,
     attachments: list[tuple[dict, bytes]] | None = None,
+    thumbnails: list[tuple[dict, bytes]] | None = None,
   ) -> bool:
     """Store once by stable id; return False without changing a duplicate.
 
@@ -432,6 +563,14 @@ class CommonPublicStore:
     ``<id>.<ext>``. `attachments` also records a single `attachment` (its first
     image) so a reader that only understands one image still shows something.
     """
+    image_count = len(attachments) if attachments else (1 if attachment else 0)
+    if thumbnails and len(thumbnails) != image_count:
+      raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
+    try:
+      for wire, data in thumbnails or []:
+        validate_thumbnail_bytes(wire, data)
+    except (OSError, ValueError, Image.UnidentifiedImageError) as exc:
+      raise HTTPException(status_code=400, detail="Post thumbnail is invalid.") from exc
     try:
       self._ensure_board_index()
     except sqlite3.Error:
@@ -447,12 +586,26 @@ class CommonPublicStore:
         metas = []
         for index, (wire, data) in enumerate(attachments):
           atomic_write(self.board_media_index_path(post["id"], index, wire["mime"]), data)
+          if thumbnails and index < len(thumbnails):
+            thumb_wire, thumb_data = thumbnails[index]
+            target = self.board_thumbnail_dir() / (
+              f"{post['id']}-{index}.{ATTACHMENT_MIME_EXT[thumb_wire['mime']]}"
+            )
+            atomic_write(target, thumb_data)
+          else:
+            self._write_board_thumbnail(post["id"], index, data)
           metas.append({"mime": wire["mime"], "w": wire["w"], "h": wire["h"]})
         record["attachments"] = metas
         record["attachment"] = metas[0]
       elif attachment is not None:
         wire, data = attachment
         atomic_write(self.board_media_path(post["id"], wire["mime"]), data)
+        if thumbnails:
+          thumb_wire, thumb_data = thumbnails[0]
+          target = self.board_thumbnail_dir() / f"{post['id']}-0.{ATTACHMENT_MIME_EXT[thumb_wire['mime']]}"
+          atomic_write(target, thumb_data)
+        else:
+          self._write_board_thumbnail(post["id"], 0, data)
         record["attachment"] = {
           "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
         }
@@ -465,7 +618,41 @@ class CommonPublicStore:
   def toggle_like(
     self, post_id: str, host: str, *, replay_token: str | None = None,
   ) -> dict:
-    """Toggle a like once, making an exact signed-envelope retry idempotent."""
+    """Compatibility wrapper for the original single-heart reaction."""
+    result = self.toggle_reaction(
+      post_id, host, "❤️", replay_token=replay_token,
+    )
+    return {
+      "status": result["status"],
+      "likes": result["reaction_counts"].get("❤️", 0),
+      "liked": "❤️" in result["reacted"],
+      "author_host": result.get("author_host"),
+      "activity": result.get("activity", False),
+    }
+
+  @staticmethod
+  def _reaction_hosts(post: dict) -> dict[str, dict]:
+    reactions = post.get("reactions")
+    reactions = dict(reactions) if isinstance(reactions, dict) else {}
+    normalized = {
+      emoji: dict(hosts) for emoji, hosts in reactions.items()
+      if emoji in BOARD_REACTION_EMOJIS and isinstance(hosts, dict)
+    }
+    likes = post.get("likes")
+    if isinstance(likes, dict) and likes:
+      heart = normalized.setdefault("❤️", {})
+      for host, created_at in likes.items():
+        if isinstance(host, str):
+          heart.setdefault(host, created_at)
+    return normalized
+
+  def toggle_reaction(
+    self, post_id: str, host: str, emoji: str,
+    *, replay_token: str | None = None,
+  ) -> dict:
+    """Toggle one standard emoji reaction with idempotent envelope retries."""
+    if emoji not in BOARD_REACTION_EMOJIS:
+      raise HTTPException(status_code=400, detail="Reaction is not supported.")
     try:
       self._ensure_board_index()
     except sqlite3.Error:
@@ -475,10 +662,10 @@ class CommonPublicStore:
       if not path.is_file():
         raise HTTPException(status_code=404, detail="Unknown post.")
       post = self._load_object(path)
-      likes = post.setdefault("likes", {})
-      if not isinstance(likes, dict):
-        likes = {}
-        post["likes"] = likes
+      reactions = self._reaction_hosts(post)
+      hosts = reactions.setdefault(emoji, {})
+      post["reactions"] = reactions
+      post.pop("likes", None)
       author_host = post.get("host")
       now = time.time()
       if replay_token is not None:
@@ -494,20 +681,22 @@ class CommonPublicStore:
         }
         if replay_token in live:
           return {
-            "status": "ok", "likes": len(likes), "liked": host in likes,
+            "status": "ok",
+            "reaction_counts": {key: len(value) for key, value in reactions.items()},
+            "reacted": [key for key, value in reactions.items() if host in value],
             "author_host": author_host, "activity": False,
           }
         if len(live) >= REACTION_REPLAY_LIMIT:
           raise HTTPException(status_code=429, detail="Reaction replay journal is full.")
         live[replay_token] = now + REACTION_REPLAY_TTL_S
         post["_reaction_replays"] = live
-      if host not in likes and len(likes) >= BOARD_LIKE_LIMIT:
+      if host not in hosts and len(hosts) >= BOARD_LIKE_LIMIT:
         raise HTTPException(status_code=507, detail="Post reaction limit reached.")
-      added = host not in likes
-      if host in likes:
-        del likes[host]
+      added = host not in hosts
+      if host in hosts:
+        del hosts[host]
       else:
-        likes[host] = now
+        hosts[host] = now
       owns_dirty_marker = self._mark_board_index_dirty()
       atomic_write(path, json.dumps(post))
       if self._refresh_board_index(post, path) and owns_dirty_marker:
@@ -515,7 +704,9 @@ class CommonPublicStore:
       # `activity` is True only for a genuine new like (not an unlike or a
       # replay), so the router notifies the post's author exactly once.
       return {
-        "status": "ok", "likes": len(likes), "liked": host in likes,
+        "status": "ok",
+        "reaction_counts": {key: len(value) for key, value in reactions.items()},
+        "reacted": [key for key, value in reactions.items() if host in value],
         "author_host": author_host, "activity": added,
       }
 
@@ -606,6 +797,12 @@ class CommonPublicStore:
             found[0].unlink()
           except OSError:
             pass
+        thumb = self.find_image(self.board_thumbnail_dir(), stem)
+        if thumb is not None:
+          try:
+            thumb[0].unlink()
+          except OSError:
+            pass
       try:
         owns_dirty_marker = self._mark_board_index_dirty()
         path.unlink()
@@ -657,6 +854,7 @@ def create_public_router(
     if viewer is not None and not valid_host(viewer):
       viewer = None
     return {
+      "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
       "posts": store.read_board(
         min(max(limit, 1), BOARD_PAGE_LIMIT), before, viewer,
       )
@@ -676,6 +874,20 @@ def create_public_router(
       raise HTTPException(status_code=400, detail="Image index is invalid.")
     return store.serve_image(store.board_image(post_id, index))
 
+  @router.get("/board/thumbnail/{post_id}")
+  def get_board_thumbnail(post_id: str):
+    if not valid_id(post_id):
+      raise HTTPException(status_code=400, detail="Post id is invalid.")
+    return store.serve_image(store.board_thumbnail(post_id))
+
+  @router.get("/board/thumbnail/{post_id}/{index}")
+  def get_board_thumbnail_at(post_id: str, index: int):
+    if not valid_id(post_id):
+      raise HTTPException(status_code=400, detail="Post id is invalid.")
+    if not 0 <= index < MAX_BOARD_ATTACHMENTS:
+      raise HTTPException(status_code=400, detail="Image index is invalid.")
+    return store.serve_image(store.board_thumbnail(post_id, index))
+
   @router.get("/board/{post_id}/replies")
   def get_board_replies(post_id: str):
     if not valid_id(post_id):
@@ -692,8 +904,13 @@ def create_public_router(
       raise HTTPException(status_code=400, detail="Post id is invalid.")
     actor = await verifier.verify_envelope(envelope)
     replay_token = hashlib.sha256(canonical(envelope)).hexdigest()
-    result = store.toggle_like(
-      post_id, envelope["from"], replay_token=replay_token,
+    emoji = envelope.get("emoji")
+    result = (
+      store.toggle_like(post_id, envelope["from"], replay_token=replay_token)
+      if emoji is None
+      else store.toggle_reaction(
+        post_id, envelope["from"], emoji, replay_token=replay_token,
+      )
     )
     author_host = result.pop("author_host", None)
     if on_activity and result.pop("activity", False) and author_host:
@@ -749,6 +966,10 @@ def create_public_router(
       raise HTTPException(status_code=400, detail="Unsupported envelope type.")
     attachment = validate_attachment(envelope.get("attachment"))
     attachments = validate_attachments(envelope.get("attachments"))
+    thumbnails = validate_attachments(envelope.get("thumbnails"))
+    image_count = len(attachments) if attachments else (1 if attachment else 0)
+    if thumbnails and len(thumbnails) != image_count:
+      raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
     text = envelope.get("text")
     first = attachment or (attachments[0] if attachments else None)
     validate_text_or_attachment(text, first, "Post text is invalid.")
@@ -763,7 +984,7 @@ def create_public_router(
       "text": text,
       "created_at": envelope["sent_at"],
       "replies": [],
-    }, attachment, attachments)
+    }, attachment, attachments, thumbnails)
     return {"status": "posted"}
 
   return router, None
