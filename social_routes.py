@@ -50,6 +50,7 @@ the app UI reads it through `window.mobius.storage`.
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import json
 import logging
@@ -100,6 +101,14 @@ _log = logging.getLogger(__name__)
 
 APP_SLUG = "social"
 PEER_AVATAR_CACHE_TTL_S = 24 * 3600
+# An unreachable peer or one with no avatar should not cost a federation
+# timeout on every request (the service runs one process per request, so an
+# in-memory negative cache would not survive); a short-lived on-disk miss marker
+# does.
+PEER_AVATAR_MISS_TTL_S = 15 * 60
+# Peer avatars are re-encoded to a small validated raster before caching, so a
+# malicious raster never reaches the browser and cached blobs stay tiny.
+AVATAR_MAX_SIDE = 128
 BOARD_MEDIA_CACHE_TTL_S = 24 * 3600
 REQUEST_STATES = {"pending", "accepted", "declined", "blocked"}
 
@@ -146,7 +155,27 @@ def _peer_avatar_path(host: str) -> Path:
   safe = re.sub(r"[^a-z0-9.-]", "_", host)
   path = _peers_dir() / "avatars"
   path.mkdir(parents=True, exist_ok=True)
-  return path / f"{safe}.png"
+  # Re-encoded WebP; a legacy `.png` cache is simply re-fetched once.
+  return path / f"{safe}.webp"
+
+
+def _peer_avatar_miss_path(host: str) -> Path:
+  safe = re.sub(r"[^a-z0-9.-]", "_", host)
+  return _peers_dir() / "avatars" / f"{safe}.miss"
+
+
+def _mark_avatar_miss(host: str) -> None:
+  try:
+    atomic_write(_peer_avatar_miss_path(host), b"")
+  except OSError:
+    pass
+
+
+def _clear_avatar_miss(host: str) -> None:
+  try:
+    _peer_avatar_miss_path(host).unlink()
+  except OSError:
+    pass
 
 
 def _peer_board_media_dir() -> Path:
@@ -883,10 +912,17 @@ async def get_actor(db=Depends(get_db)):
   return _actor_doc(identity, await public_actor_metadata())
 
 
-def _serve_avatar(path: Path) -> FileResponse:
+def _serve_avatar(path: Path, media_type: str = "image/png") -> FileResponse:
   if not path.is_file():
     raise HTTPException(status_code=404, detail="Avatar not found.")
-  return FileResponse(str(path), media_type="image/png")
+  return FileResponse(
+    str(path),
+    media_type=media_type,
+    headers={
+      "Cache-Control": "private, max-age=3600",
+      "X-Content-Type-Options": "nosniff",
+    },
+  )
 
 
 @router.get("/avatar")
@@ -1116,10 +1152,7 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
   return {"identity": identity, "profile": profile, "account_error": account_error}
 
 
-@router.get("/me")
-async def get_me(
-  db: object = Depends(get_db), principal: Principal = Depends(get_principal)
-):
+async def _me_payload(db: object, principal: Principal) -> dict:
   _require_owner_or_common_app(db, principal)
   state = await _refresh_profile_cache(db, principal)
   identity = state["identity"]
@@ -1134,6 +1167,30 @@ async def get_me(
     "account_error": state["account_error"],
     "identity_app_id": await identity_app_id(),
   }
+
+
+async def _cached_me_payload(db: object, principal: Principal) -> dict:
+  """Return saved identity context without waiting on the account service."""
+  _require_owner_or_common_app(db, principal)
+  identity = _load_identity()
+  return {
+    "host": _own_host(),
+    "name": identity.get("name") or "",
+    "handle": identity.get("handle") or "",
+    "bio": identity.get("bio") or "",
+    "community_host": _canonical_community_host(identity.get("community_host")),
+    "connected": bool(identity.get("name")),
+    "joined": bool(identity.get("joined_at")),
+    "account_error": None,
+    "identity_app_id": await identity_app_id(),
+  }
+
+
+@router.get("/me")
+async def get_me(
+  db: object = Depends(get_db), principal: Principal = Depends(get_principal)
+):
+  return await _me_payload(db, principal)
 
 
 @router.post("/join")
@@ -1578,15 +1635,13 @@ async def get_board_media_index_for_owner(
   )
 
 
-@router.get("/feed")
-async def get_feed(
+async def _feed_payload(
   limit: int = 30,
   before: float | None = None,
   community_host: str | None = None,
-  db: object = Depends(get_db),
-  principal: Principal = Depends(get_principal),
-):
-  """The community host's board, proxied for the app UI."""
+  db: object = None,
+  principal: Principal = None,
+) -> dict:
   _require_owner_or_common_app(db, principal)
   host = _browse_community_host(community_host)
   if host == _own_host():
@@ -1615,6 +1670,18 @@ async def get_feed(
     ) from exc
 
 
+@router.get("/feed")
+async def get_feed(
+  limit: int = 30,
+  before: float | None = None,
+  community_host: str | None = None,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """The community host's board, proxied for the app UI."""
+  return await _feed_payload(limit, before, community_host, db, principal)
+
+
 class LikePost(BaseModel):
   post_id: str
 
@@ -1637,7 +1704,7 @@ async def like_post(
   principal: Principal = Depends(get_principal),
 ):
   """Toggle a like on a community-board post, signed as this instance."""
-  return await _react_to_post(body.post_id, None, community_host, db, principal)
+  return await _react_to_post(body.post_id, "❤️", community_host, db, principal)
 
 
 @router.post("/reaction")
@@ -1651,28 +1718,18 @@ async def react_to_post(
   return await _react_to_post(body.post_id, body.emoji, community_host, db, principal)
 
 
-async def _react_to_post(
-  post_id_value: str,
-  emoji: str | None,
-  community_host: str | None,
-  db: object,
-  principal: Principal,
-) -> dict:
+async def _react_to_post(post_id_value, emoji, community_host, db, principal):
   require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   post_id = str(post_id_value).strip()
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
-  if emoji is not None and emoji not in BOARD_REACTION_EMOJIS:
+  if emoji not in BOARD_REACTION_EMOJIS:
     raise HTTPException(status_code=400, detail="Reaction is not supported.")
   identity = _load_identity()
   host = _browse_community_host(community_host)
   if host == _own_host():
-    result = (
-      _toggle_board_like(post_id, _own_host())
-      if emoji is None
-      else _toggle_board_reaction(post_id, _own_host(), emoji)
-    )
+    result = _toggle_board_reaction(post_id, _own_host(), emoji)
     author_host = result.pop("author_host", None)
     if result.pop("activity", False) and author_host:
       await _relay_board_activity(
@@ -1683,6 +1740,7 @@ async def _react_to_post(
     "v": 0,
     "type": "board_react",
     "post_id": post_id,
+    "emoji": emoji,
     "from": _own_host(),
     "sent_at": time.time(),
   }
@@ -1816,14 +1874,12 @@ async def delete_own_post(
     ) from exc
 
 
-@router.get("/people")
-async def search_people(
+async def _people_payload(
   q: str = "",
   community_host: str | None = None,
-  db: object = Depends(get_db),
-  principal: Principal = Depends(get_principal),
-):
-  """Search the community host's user directory, proxied for the app UI."""
+  db: object = None,
+  principal: Principal = None,
+) -> dict:
   _require_owner_or_common_app(db, principal)
   host = _browse_community_host(community_host)
   if host == _own_host():
@@ -1839,6 +1895,47 @@ async def search_people(
     raise HTTPException(
       status_code=502, detail="Community host could not be reached."
     ) from exc
+
+
+@router.get("/people")
+async def search_people(
+  q: str = "",
+  community_host: str | None = None,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Search the community host's user directory, proxied for the app UI."""
+  return await _people_payload(q, community_host, db, principal)
+
+
+@router.get("/bootstrap")
+async def bootstrap_social(
+  community_host: str | None = None,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Return first-paint board and identity state in one service invocation."""
+  me, feed = await asyncio.gather(
+    _cached_me_payload(db, principal),
+    _feed_payload(30, None, community_host, db, principal),
+  )
+  if not me.get("joined"):
+    registration = "not_joined"
+  else:
+    try:
+      people = await _people_payload(me.get("host") or "", community_host, db, principal)
+      registration = (
+        "registered"
+        if any(
+          str(user.get("host") or "").strip().lower()
+          == str(me.get("host") or "").strip().lower()
+          for user in people.get("users", [])
+        )
+        else "missing"
+      )
+    except HTTPException:
+      registration = "unavailable"
+  return {"me": {**me, "registration": registration}, "feed": feed}
 
 
 @router.get("/peer/{host}")
@@ -1867,25 +1964,43 @@ async def get_peer_avatar(
   if host == _own_host():
     return _serve_avatar(_avatar_path())
   cache = _peer_avatar_path(host)
+  now = time.time()
+  # Serve a fresh cached avatar without any federation hop (the common path).
+  if cache.is_file() and now - cache.stat().st_mtime < PEER_AVATAR_CACHE_TTL_S:
+    return _serve_avatar(cache, "image/webp")
+  # A recent miss (offline peer or no avatar) short-circuits before we spend
+  # another federation timeout, unless a stale cache is still available.
+  miss = _peer_avatar_miss_path(host)
+  if (
+    not cache.is_file()
+    and miss.is_file()
+    and now - miss.stat().st_mtime < PEER_AVATAR_MISS_TTL_S
+  ):
+    raise HTTPException(status_code=404, detail="Peer avatar not found.")
   try:
     actor = await _fetch_actor(host)
   except Exception:
     if cache.is_file():
-      return _serve_avatar(cache)
+      return _serve_avatar(cache, "image/webp")
+    _mark_avatar_miss(host)
     raise HTTPException(status_code=404, detail="Peer avatar not found.")
   if actor.get("avatar") is not True:
+    # The peer removed their avatar: honor it promptly instead of serving stale.
+    if cache.is_file():
+      cache.unlink(missing_ok=True)
+    _mark_avatar_miss(host)
     raise HTTPException(status_code=404, detail="Peer avatar not found.")
-  if (
-    cache.is_file()
-    and time.time() - cache.stat().st_mtime < PEER_AVATAR_CACHE_TTL_S
-  ):
-    return _serve_avatar(cache)
   try:
-    avatar = await _download_avatar(
-      _peer_service_url(host, "avatar")
-    )
-    atomic_write(cache, avatar)
+    raw = await _download_avatar(_peer_service_url(host, "avatar"))
+    # Untrusted peer bytes: validate and re-encode through the same #21 guards
+    # (rejects SVG, oversized dimensions and decompression bombs) and shrink to
+    # an avatar-sized WebP before it is ever cached or served.
+    _mime, encoded = image_thumbnail_bytes(raw, AVATAR_MAX_SIDE)
+    atomic_write(cache, encoded)
+    _clear_avatar_miss(host)
   except Exception:
-    if not cache.is_file():
-      raise HTTPException(status_code=404, detail="Peer avatar not found.")
-  return _serve_avatar(cache)
+    if cache.is_file():
+      return _serve_avatar(cache, "image/webp")
+    _mark_avatar_miss(host)
+    raise HTTPException(status_code=404, detail="Peer avatar not found.")
+  return _serve_avatar(cache, "image/webp")

@@ -266,7 +266,7 @@ export default function GroupThread({
         mine={mine}
         tick={tick}
         avatar={!mine && firstOfCluster
-          ? <Avatar name={message.author_handle} host={requestStatus(currentGroup) === 'pending' ? undefined : message.author} size="small" />
+          ? <Avatar name={message.author_handle} host={requestStatus(currentGroup) === 'pending' ? undefined : message.author} size="small" remote />
           : null}
         indent={!mine && !firstOfCluster}
         conversationPath={`groups/${gid}`}

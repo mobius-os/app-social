@@ -17,8 +17,25 @@ import {
   saveParticipationIntent,
 } from './participation.js'
 
-function ParticipationNotice({ me, busy, onJoin, onAccount, onCheck }) {
+function ParticipationNotice({ me, state, busy, onJoin, onAccount, onCheck }) {
+  if (state === 'loading') {
+    return null
+  }
+
+  if (state === 'error') {
+    return (
+      <section className="cn-welcome is-quiet" aria-label="Account status unavailable">
+        <div className="cn-welcome-copy">
+          <h2>Keep browsing</h2>
+          <p>Your account details couldn’t be checked. The public board is still available.</p>
+        </div>
+        <button className="cn-btn cn-btn-secondary" onClick={onCheck}>Check again</button>
+      </section>
+    )
+  }
+
   if (me?.joined && me?.name) {
+    if (!me.registration) return null
     if (me.registration === 'registered') return null
     const missing = me.registration === 'missing'
     return (
@@ -84,6 +101,8 @@ export default function App({ appId, token }) {
   const [tab, setTab] = useState('board')
   const [feed, setFeed] = useState([])
   const [feedState, setFeedState] = useState('loading')
+  const [feedHasEarlier, setFeedHasEarlier] = useState(false)
+  const [feedCapabilities, setFeedCapabilities] = useState({})
   const [conversations, setConversations] = useState([])
   const [groups, setGroups] = useState([])
   const [messagesState, setMessagesState] = useState('loading')
@@ -96,6 +115,7 @@ export default function App({ appId, token }) {
   const [lightbox, setLightbox] = useState(null)
   const [profileRequest, setProfileRequest] = useState(null)
   const [composing, setComposing] = useState(false)
+  const [threadExpanded, setThreadExpanded] = useState(false)
   const [creatingGroup, setCreatingGroup] = useState(false)
   const [participationIntent, setParticipationIntent] = useState(null)
   const [intentState, setIntentState] = useState('loading')
@@ -103,6 +123,7 @@ export default function App({ appId, token }) {
   const navHandle = useRef(null)
   const toastTimer = useRef(null)
   const readySignalled = useRef(false)
+  const freshFeedLoaded = useRef(false)
 
   function showToast(text, kind) {
     setToast({ text, kind })
@@ -114,6 +135,11 @@ export default function App({ appId, token }) {
     try {
       const loaded = await api.getMe()
       const profile = loaded
+      // Identity is useful context, not a prerequisite for the public board.
+      // Reveal it after the local profile read while directory verification
+      // continues in the background.
+      setMe(profile)
+      setMeState('ready')
       const registration = await checkGlobalRegistration(profile, api.searchPeople)
       const checked = { ...profile, registration }
       setMe(checked)
@@ -137,16 +163,70 @@ export default function App({ appId, token }) {
     }
   }
 
+  const acceptFeed = useCallback((posts, background = false, capabilities = null) => {
+    freshFeedLoaded.current = true
+    setFeed((current) => {
+      if (!background) return posts
+      const byId = new Map(current.map((post) => [post.id, post]))
+      for (const post of posts) byId.set(post.id, post)
+      return [...byId.values()].sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0))
+    })
+    if (!background) setFeedHasEarlier(posts.length === api.BOARD_PAGE_SIZE)
+    setFeedState('ready')
+    if (capabilities) setFeedCapabilities(capabilities)
+    window.mobius?.storage?.set('cache/board.json', {
+      posts: posts.slice(0, api.BOARD_PAGE_SIZE),
+      cached_at: Date.now(),
+    }).catch(() => null)
+    if (!readySignalled.current) {
+      readySignalled.current = true
+      window.mobius?.signal?.('app_ready', { item_count: posts.length })
+    }
+  }, [])
+
   const loadFeed = useCallback(async (background = false) => {
     try {
       const result = await api.getFeed()
-      setFeed(result.posts || [])
-      setFeedState('ready')
+      const posts = result.posts || []
+      acceptFeed(posts, background, result.capabilities)
       return true
     } catch {
       if (!background) setFeedState('error')
       return false
     }
+  }, [acceptFeed])
+
+  async function loadBootstrap() {
+    try {
+      const result = await api.getBootstrap()
+      acceptFeed(result.feed?.posts || [], false, result.feed?.capabilities)
+      setMe(result.me || null)
+      setMeState('ready')
+      if (!result.me?.connected) loadMe({ background: true })
+      return true
+    } catch {
+      // A partially updated installation still gets the established separate
+      // paths rather than losing both public browsing and identity context.
+      loadFeed()
+      loadMe()
+      return false
+    }
+  }
+
+  const loadEarlierFeed = useCallback(async (before) => {
+    const result = await api.getFeed(before)
+    const older = result.posts || []
+    setFeed((current) => {
+      const seen = new Set(current.map((post) => post.id))
+      return [...current, ...older.filter((post) => !seen.has(post.id))]
+    })
+    setFeedHasEarlier(older.length === api.BOARD_PAGE_SIZE)
+    return older.length
+  }, [])
+
+  const acceptPublishedPost = useCallback((post) => {
+    setFeed((current) => [post, ...current.filter((item) => item.id !== post.id)])
+    setFeedState('ready')
   }, [])
 
   async function loadConversations() {
@@ -159,12 +239,6 @@ export default function App({ appId, token }) {
       setConversations(loaded)
       setGroups(loadedGroups)
       setMessagesState('ready')
-      if (!readySignalled.current) {
-        readySignalled.current = true
-        window.mobius?.signal?.('app_ready', {
-          item_count: loaded.length + loadedGroups.length,
-        })
-      }
     } catch {
       if (request === conversationLoad.current) setMessagesState('error')
     }
@@ -174,13 +248,35 @@ export default function App({ appId, token }) {
     // Public browsing does not depend on profile or directory verification.
     // Start the visible board first so two slower identity checks cannot hold
     // the primary surface behind them on every launch.
-    loadFeed()
-    loadMe()
+    window.mobius?.storage?.get('cache/board.json')
+      .then((cached) => {
+        if (freshFeedLoaded.current || !Array.isArray(cached?.posts)) return
+        setFeed(cached.posts)
+        setFeedHasEarlier(cached.posts.length === api.BOARD_PAGE_SIZE)
+        setFeedState('ready')
+      })
+      .catch(() => null)
+    loadBootstrap()
     loadConversations()
     loadSavedParticipationIntent()
-    api.getAppIcon(appId)
-      .then((blob) => setAppIconUrl(URL.createObjectURL(blob)))
-      .catch(() => {})
+    const loadDeferred = () => {
+      api.getAppIcon(appId)
+        .then((blob) => setAppIconUrl(URL.createObjectURL(blob)))
+        .catch(() => {})
+      api.searchPeople('')
+        .then((found) => window.mobius?.storage?.set('cache/people.json', {
+          users: found.users,
+          cached_at: Date.now(),
+        }))
+        .catch(() => null)
+    }
+    const idleId = window.requestIdleCallback
+      ? window.requestIdleCallback(loadDeferred, { timeout: 1800 })
+      : window.setTimeout(loadDeferred, 800)
+    return () => {
+      if (window.cancelIdleCallback) window.cancelIdleCallback(idleId)
+      else window.clearTimeout(idleId)
+    }
   }, [])
 
   // Identity linking happens in Möbius · You. When the owner returns, read the
@@ -303,6 +399,10 @@ export default function App({ appId, token }) {
     loadConversations()
   }
 
+  function openLightbox(url, alt, cleanup) {
+    setLightbox({ url, alt, cleanup })
+  }
+
   // ── onboarding: join with the shared Möbius identity ──────────────────────
   const [saving, setSaving] = useState(false)
   const [joinError, setJoinError] = useState(null)
@@ -367,30 +467,6 @@ export default function App({ appId, token }) {
   const canParticipate = Boolean(me?.joined && me?.name)
 
   // ── render ────────────────────────────────────────────────────────────────
-  if (meState === 'loading') {
-    return (
-      <div className="cn-root"><style>{CSS}</style>
-        <div className="cn-center" style={{ flex: 1 }} role="status" aria-label="Loading Social">
-          <div className="cn-spinner" aria-hidden="true" />
-        </div>
-      </div>
-    )
-  }
-
-  if (meState === 'error') {
-    return (
-      <div className="cn-root"><style>{CSS}</style>
-        <div className="cn-empty" style={{ margin: 'auto' }}>
-          <div className="cn-empty-title">Social couldn’t connect</div>
-          <p className="cn-empty-text">
-            Your profile couldn’t be loaded. Check your connection and try again.
-          </p>
-          <button className="cn-btn cn-btn-secondary" onClick={loadMe}>Try again</button>
-        </div>
-      </div>
-    )
-  }
-
   if (thread) {
     return (
       <div className="cn-root"><style>{CSS}</style>
@@ -431,10 +507,10 @@ export default function App({ appId, token }) {
           {appIconUrl
             ? <img className="cn-app-icon" src={appIconUrl} alt="" draggable="false" />
             : <span className="cn-mark" aria-hidden="true"><span className="cn-mark-orbit" /></span>}
-          <h1 className="cn-title">Social</h1>
+          <h1 className="cn-title">{tab === 'board' ? 'Home' : tab === 'messages' ? 'Messages' : 'People'}</h1>
         </div>
         <div className="cn-header-chip">
-          <Avatar name={me?.handle || '?'} host={me?.host} size="small" />
+          <Avatar name={me?.handle || '?'} host={me?.host} size="small" remote />
           <span>{me?.handle ? `@${me.handle}` : 'Browsing'}</span>
         </div>
       </header>
@@ -457,6 +533,7 @@ export default function App({ appId, token }) {
         <div className="cn-content">
           <ParticipationNotice
             me={me}
+            state={meState}
             busy={saving}
             onJoin={join}
             onAccount={openIdentityApp}
@@ -471,16 +548,21 @@ export default function App({ appId, token }) {
         </div>
         {tab === 'board' && (
           <Board me={me} feed={feed} feedState={feedState} onRefresh={loadFeed}
+                 hasEarlier={feedHasEarlier} onLoadEarlier={loadEarlierFeed}
                  composing={composing} setComposing={setComposing}
                  canInteract={canParticipate}
                  participationIntent={participationIntent}
                  intentState={intentState}
                  participationBusy={saving}
+                 emojiReactions={Boolean(feedCapabilities.emoji_reactions)}
+                 onThreadOpenChange={setThreadExpanded}
                  onRetryIntent={loadSavedParticipationIntent}
                  onRequestParticipation={requestParticipation}
                  onCompleteParticipation={completeParticipationIntent}
+                 onPostConfirmed={acceptPublishedPost}
                  onOpenPerson={(host) => { setProfileRequest(host); setTab('people') }} showToast={showToast}
-                 onOpenImage={(url, alt) => setLightbox({ url, alt })} />
+                 onMessageUser={(host, name) => openThread(host, name)}
+                 onOpenImage={openLightbox} />
         )}
         {tab === 'messages' && (
           me?.joined && me?.name ? (
@@ -508,15 +590,16 @@ export default function App({ appId, token }) {
           )
         )}
         {tab === 'people' && (
-          <People me={me} onMessage={(host, name) => openThread(host, name)} showToast={showToast}
-                  canMessage={canParticipate}
+          <People me={me} canMessage={canParticipate}
+                  onMessage={(host, name) => openThread(host, name)} showToast={showToast}
                   requestedProfile={profileRequest}
                   onProfileRequestHandled={() => setProfileRequest(null)} />
         )}
       </div>
 
-      {tab === 'board' && (
-        <button className="cn-fab" onClick={() => setComposing(true)} aria-label="New post" title="New post">
+      {tab === 'board' && !composing && !threadExpanded && (
+        <button className="cn-compose-fab" type="button" onClick={() => setComposing(true)}
+                aria-label={canParticipate ? 'Create post' : 'Write a post to share after joining'}>
           <Plus aria-hidden="true" />
         </button>
       )}

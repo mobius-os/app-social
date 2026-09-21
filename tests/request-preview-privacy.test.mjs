@@ -14,13 +14,17 @@ test('pending DM previews gate actor discovery and every peer avatar until accep
   assert.match(source, /\[peer, requestPending\]/)
   const avatars = source.match(/<Avatar[^>]+>/g)
   assert.equal(avatars.length, 2)
-  for (const avatar of avatars) assert.match(avatar, /host=\{requestPending \? undefined : peer\}/)
+  for (const avatar of avatars) {
+    assert.match(avatar, /host=\{requestPending \? undefined : peer\}/)
+    assert.match(avatar, /\bremote\b/)
+  }
 })
 
 test('pending group previews cannot supply participant avatar hosts', () => {
   const avatars = read('GroupThread').match(/<Avatar[^>]+>/g)
   assert.equal(avatars.length, 1)
   assert.match(avatars[0], /host=\{requestStatus\(currentGroup\) === 'pending' \? undefined : message.author\}/)
+  assert.match(avatars[0], /\bremote\b/)
 })
 
 test('an avatar without a host stops before remote cache lookup', () => {
@@ -36,6 +40,15 @@ test('pending group details keep all member avatars local and cannot open invita
   assert.match(source, /if \(!canManage \|\| mode !== 'invite'\) return/)
   const avatars = source.match(/<Avatar[^>]+>/g)
   assert.equal(avatars.length, 2)
-  for (const avatar of avatars) assert.match(avatar, /host=\{accepted \? (member|person).host : undefined\}/)
+  for (const avatar of avatars) {
+    assert.match(avatar, /host=\{accepted \? (member|person).host : undefined\}/)
+    assert.match(avatar, /\bremote\b/)
+  }
   assert.match(read('GroupThread'), /<GroupDetails group=\{currentGroup\}/)
+})
+
+test('public board reply and composer avatars opt into remote loading', () => {
+  const source = read('Board')
+  assert.match(source, /<Avatar name=\{reply.handle\} host=\{reply.host\} size="small" remote \/>/)
+  assert.match(source, /<Avatar name=\{me\?\.handle\} host=\{me\?\.host\} size="small" remote \/>/)
 })

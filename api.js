@@ -28,6 +28,7 @@ async function call(path, options = {}, responseType = 'json') {
 }
 
 export const getMe = () => call('me')
+export const getBootstrap = () => call(`bootstrap?community_host=${encodeURIComponent(SHARED_COMMUNITY_HOST)}`)
 export const join = () => call('join', { method: 'POST', body: JSON.stringify({}) })
 export const saveMe = (settings) =>
   call('me', { method: 'PUT', body: JSON.stringify(settings) })
@@ -47,26 +48,37 @@ export const retryMessage = (peer, id) =>
   call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/retry`, {
     method: 'POST', body: JSON.stringify({}),
   })
-export const publishPost = (text, attachment, attachments) =>
+export const publishPost = (text, attachment, attachments, thumbnails) =>
   call('publish', {
     method: 'POST',
     body: JSON.stringify({
       text,
       ...(attachment ? { attachment } : {}),
       ...(attachments && attachments.length ? { attachments } : {}),
+      ...(thumbnails && thumbnails.length ? { thumbnails } : {}),
     }),
   })
 const browseQuery = `community_host=${encodeURIComponent(SHARED_COMMUNITY_HOST)}`
-export const getFeed = () => call(`feed?${browseQuery}`)
-export const getBoardMedia = (postId, index) =>
+export const BOARD_PAGE_SIZE = 30
+export const getFeed = (before = null) => {
+  const query = new URLSearchParams({
+    community_host: SHARED_COMMUNITY_HOST,
+    limit: String(BOARD_PAGE_SIZE),
+  })
+  if (before) query.set('before', String(before))
+  return call(`feed?${query}`)
+}
+export const getBoardMedia = (postId, index, { thumbnail = false } = {}) =>
   call(
     index === undefined || index === null
-      ? `board-media/${encodeURIComponent(postId)}?${browseQuery}`
-      : `board-media/${encodeURIComponent(postId)}/${index}?${browseQuery}`,
+      ? `board-media/${encodeURIComponent(postId)}?${browseQuery}&thumbnail=${thumbnail ? 'true' : 'false'}`
+      : `board-media/${encodeURIComponent(postId)}/${index}?${browseQuery}&thumbnail=${thumbnail ? 'true' : 'false'}`,
     {}, 'blob',
   )
 export const likePost = (postId) =>
   call('like', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
+export const reactToPost = (postId, emoji) =>
+  call('reaction', { method: 'POST', body: JSON.stringify({ post_id: postId, emoji }) })
 export const deletePost = (postId) =>
   call('delete', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
 export const getReplies = (postId) =>
@@ -224,6 +236,13 @@ export function timeAgo(ts) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
   const date = new Date(ts * 1000)
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+export function postDateTime(ts) {
+  if (!ts) return ''
+  return new Date(ts * 1000).toLocaleString(undefined, {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  })
 }
 
 export function clockTime(ts) {

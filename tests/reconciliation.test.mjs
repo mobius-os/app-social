@@ -4,6 +4,8 @@ import test from 'node:test'
 import {
   boardRefreshDelay,
   optimisticLikeChange,
+  optimisticReactionChange,
+  reactionState,
   reconcileReplies,
   threadRefreshDelay,
 } from '../reconciliation.js'
@@ -39,9 +41,21 @@ test('a failed follow-up like can restore the last confirmed local state', () =>
   assert.strictEqual(change.current, confirmed)
 })
 
+test('emoji reactions optimistically change only the selected reaction', () => {
+  const post = { reactions: [
+    { emoji: '❤️', count: 2, reacted: false },
+    { emoji: '🎉', count: 1, reacted: true },
+  ] }
+  const { current, next } = optimisticReactionChange(post, null, '🎉')
+  assert.deepEqual(current['❤️'], { count: 2, reacted: false })
+  assert.deepEqual(next['❤️'], current['❤️'])
+  assert.deepEqual(next['🎉'], { count: 0, reacted: false })
+  assert.deepEqual(reactionState(post, next), next)
+})
+
 test('visible Social surfaces refresh quickly after activity and relax when idle', () => {
-  assert.equal(boardRefreshDelay(10_000, 20_000), 1800)
-  assert.equal(boardRefreshDelay(1_000, 20_000), 5000)
-  assert.equal(threadRefreshDelay(10_000, 20_000), 1200)
-  assert.equal(threadRefreshDelay(1_000, 20_000), 3000)
+  assert.equal(boardRefreshDelay(10_000, 20_000), 2500)
+  assert.equal(boardRefreshDelay(1_000, 20_000), 15000)
+  assert.equal(threadRefreshDelay(10_000, 20_000), 1500)
+  assert.equal(threadRefreshDelay(1_000, 20_000), 5000)
 })

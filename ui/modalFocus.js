@@ -10,10 +10,12 @@ const FOCUSABLE = [
 ].join(',')
 
 // Shared modal behavior for sheets, panels, and in-place confirmations.
-export function useModalFocus(open, onClose) {
+export function useModalFocus(open, onClose, shouldRestoreFocus = true) {
   const dialogRef = useRef(null)
   const closeRef = useRef(onClose)
+  const restoreRef = useRef(shouldRestoreFocus)
   closeRef.current = onClose
+  restoreRef.current = shouldRestoreFocus
 
   useEffect(() => {
     if (!open) return undefined
@@ -48,7 +50,10 @@ export function useModalFocus(open, onClose) {
     document.addEventListener('keydown', onKeyDown, true)
     return () => {
       document.removeEventListener('keydown', onKeyDown, true)
-      if (opener && typeof opener.focus === 'function' && opener.isConnected !== false) opener.focus()
+      const restore = typeof restoreRef.current === 'function'
+        ? restoreRef.current()
+        : restoreRef.current
+      if (restore && opener && typeof opener.focus === 'function' && opener.isConnected !== false) opener.focus()
     }
   }, [open])
 

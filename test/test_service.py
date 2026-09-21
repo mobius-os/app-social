@@ -721,6 +721,59 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
       thread.join()
       server.server_close()
 
+  def test_bootstrap_returns_board_identity_and_registration_in_one_request(self):
+    class Handler(BaseHTTPRequestHandler):
+      def do_GET(self):
+        if self.headers.get("Authorization") != "Bearer test-app-token":
+          self.send_error(401)
+          return
+        if self.path == "/api/identity":
+          payload = {"profile": {"handle": "owner", "display_name": "Owner"}}
+        elif self.path == "/api/apps/":
+          payload = []
+        else:
+          self.send_error(404)
+          return
+        encoded = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+      def log_message(self, _format, *_args):
+        pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        common = root / "apps/7/server/common"
+        common.mkdir(parents=True)
+        (common / "identity.json").write_text(json.dumps({
+          "name": "Owner", "handle": "owner", "joined_at": 1,
+          "community_host": "self.example",
+        }))
+        result = self.call(
+          root, "bootstrap", actor={"scope": "owner", "delegated": False},
+          query={"community_host": ["self.example"]},
+          api_base_url=f"http://127.0.0.1:{server.server_port}",
+        )
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["body"]["feed"], {
+          "host": "self.example",
+          "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
+          "posts": [],
+        })
+        self.assertEqual(result["body"]["me"]["handle"], "owner")
+        self.assertEqual(result["body"]["me"]["registration"], "missing")
+    finally:
+      server.shutdown()
+      thread.join()
+      server.server_close()
+
   def test_federation_source_has_no_legacy_platform_route(self):
     for name in (
       "common_protocol.py", "social_routes.py", "social_groups.py",

@@ -5,12 +5,12 @@ import { getBoardMedia } from '../api.js'
 const MAX_BYTES = 1024 * 1024
 const MAX_SIDE = 1600
 
-function canvasBlob(canvas, mime) {
+function canvasBlob(canvas, mime, quality) {
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => (blob ? resolve(blob) : reject(new Error('This image couldn’t be prepared.'))),
       mime,
-      mime === 'image/jpeg' ? 0.82 : undefined,
+      quality ?? (mime === 'image/jpeg' ? 0.82 : undefined),
     )
   })
 }
@@ -86,8 +86,40 @@ export async function prepareImage(file, maxBytes = MAX_BYTES) {
     }
 
     const data_b64 = await blobBase64(blob)
+
+    // Upload a compact display rendition beside the original. Community
+    // hosts can serve it immediately, without decoding the full photo on the
+    // first feed view or needing an image-processing dependency of their own.
+    const thumbScale = Math.min(1, 640 / Math.max(width, height))
+    let thumbWidth = Math.max(1, Math.round(width * thumbScale))
+    let thumbHeight = Math.max(1, Math.round(height * thumbScale))
+    const thumbCanvas = document.createElement('canvas')
+    const transparent = mime === 'image/png'
+    const thumbContext = thumbCanvas.getContext('2d', { alpha: transparent })
+    if (!thumbContext) throw new Error('This image couldn’t be prepared.')
+    const drawThumbnail = () => {
+      thumbCanvas.width = thumbWidth
+      thumbCanvas.height = thumbHeight
+      if (!transparent) {
+        thumbContext.fillStyle = '#fff'
+        thumbContext.fillRect(0, 0, thumbWidth, thumbHeight)
+      }
+      thumbContext.drawImage(canvas, 0, 0, width, height, 0, 0, thumbWidth, thumbHeight)
+    }
+    drawThumbnail()
+    let thumbBlob = await canvasBlob(thumbCanvas, 'image/webp', 0.74)
+    while (thumbBlob.size > 120 * 1024 && Math.max(thumbWidth, thumbHeight) > 320) {
+      thumbWidth = Math.max(1, Math.round(thumbWidth * 0.84))
+      thumbHeight = Math.max(1, Math.round(thumbHeight * 0.84))
+      drawThumbnail()
+      thumbBlob = await canvasBlob(thumbCanvas, 'image/webp', 0.7)
+    }
+    const thumbnail_b64 = await blobBase64(thumbBlob)
     return {
       payload: { mime, data_b64, w: width, h: height },
+      thumbnailPayload: {
+        mime: 'image/webp', data_b64: thumbnail_b64, w: thumbWidth, h: thumbHeight,
+      },
       previewUrl: `data:${mime};base64,${data_b64}`,
     }
   } finally {
@@ -114,7 +146,7 @@ function ManagedImage({ attachment, storagePath, postId, index, className, alt, 
     }
     setUrl(null)
     const load = postId
-      ? getBoardMedia(postId, index)
+      ? getBoardMedia(postId, index, { thumbnail: true })
       : window.mobius?.storage?.getBlob?.(storagePath)
     if (!load?.then) {
       setFailed(true)
@@ -149,10 +181,23 @@ function ManagedImage({ attachment, storagePath, postId, index, className, alt, 
 
   return (
     <button
-      className={`cn-media ${className}`}
+      className={`cn-media ${className}${attachment?.mime === 'image/png' ? ' is-transparent' : ''}`}
       type="button"
       style={square ? undefined : { aspectRatio: `${width} / ${height}` }}
-      onClick={() => url && onOpen(url, alt)}
+      onClick={async () => {
+        if (!url) return
+        if (!postId) {
+          onOpen(url, alt)
+          return
+        }
+        try {
+          const full = await getBoardMedia(postId, index)
+          const fullUrl = URL.createObjectURL(full)
+          onOpen(fullUrl, alt, () => URL.revokeObjectURL(fullUrl))
+        } catch {
+          onOpen(url, alt)
+        }
+      }}
       disabled={!url}
       aria-label={url ? `Open ${alt}` : failed ? `${alt} unavailable` : `Loading ${alt}`}
     >
@@ -287,6 +332,7 @@ export function Lightbox({ image, onClose }) {
     closeRef.current?.focus()
     return () => {
       document.removeEventListener('keydown', onKeyDown)
+      image.cleanup?.()
       returnFocus.current?.focus?.()
     }
   }, [image?.url])

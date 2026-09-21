@@ -27,6 +27,9 @@
     "message_ui_state.js",
     "community.js",
     "participation.js",
+    "profile.js",
+    "links.js",
+    "emoji_art.js",
     "reconciliation.js",
     "service.py",
     "service_io.py",
@@ -42,15 +45,16 @@
     "social_objects.py",
     "theme.js",
     "ui/Board.jsx",
+    "ui/RichText.jsx",
     "ui/Messages.jsx",
     "ui/Thread.jsx",
     "ui/GroupThread.jsx",
     "ui/People.jsx",
     "ui/Media.jsx",
     "ui/MessageBubble.jsx",
-    "ui/landingImage.js",
     "ui/modalFocus.js",
-    "ui/GroupDetails.jsx"
+    "ui/GroupDetails.jsx",
+    "legacy_authority.py"
   ],
   "store": {
     "tagline": "Your people, across every Möbius.",

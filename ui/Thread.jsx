@@ -308,7 +308,7 @@ export default function Thread({
         message={{ ...message, time: clockTime(message.sent_at) }}
         mine={mine}
         tick={tick}
-        avatar={!mine && firstOfCluster ? <Avatar name={handle} host={requestPending ? undefined : peer} size="small" /> : null}
+        avatar={!mine && firstOfCluster ? <Avatar name={handle} host={requestPending ? undefined : peer} size="small" remote /> : null}
         indent={!mine && !firstOfCluster}
         conversationPath={`conversations/${peer}`}
         onOpenImage={onOpenImage}
@@ -337,7 +337,7 @@ export default function Thread({
         <button className="cn-btn cn-btn-ghost cn-btn-icon" onClick={onBack} aria-label="Back">
           <ArrowLeft />
         </button>
-        <Avatar name={displayName} host={requestPending ? undefined : peer} size="small" />
+        <Avatar name={displayName} host={requestPending ? undefined : peer} size="small" remote />
         <span className="cn-thread-person">
           <span className="cn-thread-name">
             <span className="cn-person-name">{displayName}</span>

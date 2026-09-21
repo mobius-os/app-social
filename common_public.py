@@ -31,23 +31,42 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 
-from common_protocol import (
-  ATTACHMENT_MIME_EXT,
-  CLOCK_SKEW_S,
-  MAX_BOARD_ATTACHMENTS,
-  MAX_BIO_CHARS,
-  MAX_NAME_CHARS,
-  MAX_REPLY_TEXT_CHARS,
-  ActorVerifier,
-  canonical,
-  read_envelope,
-  valid_host,
-  valid_id,
-  validate_attachment,
-  validate_attachments,
-  validate_text_or_attachment,
-)
-from service_io import atomic_write
+if __package__:
+  from .common_protocol import (
+    ATTACHMENT_MIME_EXT,
+    CLOCK_SKEW_S,
+    MAX_BOARD_ATTACHMENTS,
+    MAX_BIO_CHARS,
+    MAX_NAME_CHARS,
+    MAX_REPLY_TEXT_CHARS,
+    ActorVerifier,
+    canonical,
+    read_envelope,
+    valid_host,
+    valid_id,
+    validate_attachment,
+    validate_attachments,
+    validate_text_or_attachment,
+  )
+  from .storage_io import atomic_write
+else:
+  from common_protocol import (
+    ATTACHMENT_MIME_EXT,
+    CLOCK_SKEW_S,
+    MAX_BOARD_ATTACHMENTS,
+    MAX_BIO_CHARS,
+    MAX_NAME_CHARS,
+    MAX_REPLY_TEXT_CHARS,
+    ActorVerifier,
+    canonical,
+    read_envelope,
+    valid_host,
+    valid_id,
+    validate_attachment,
+    validate_attachments,
+    validate_text_or_attachment,
+  )
+  from service_io import atomic_write
 
 BOARD_PAGE_LIMIT = 50
 BOARD_REPLY_LIMIT = 200
@@ -96,15 +115,22 @@ def _validate_image_header(image: Image.Image) -> None:
     raise BoardImageTooLarge("Board image dimensions are too large.")
 
 
-def image_thumbnail_bytes(data: bytes) -> tuple[str, bytes]:
-  """Create the small, display-ready rendition used by board timelines."""
+def image_thumbnail_bytes(
+  data: bytes, max_side: int = BOARD_THUMBNAIL_MAX_SIDE,
+) -> tuple[str, bytes]:
+  """Create a small, display-ready, header-validated rendition.
+
+  `max_side` bounds the long edge (board timelines use the default; avatars pass
+  a smaller cap). The same header/decompression-bomb guards run either way, so
+  every caller re-encodes untrusted image bytes through one validated path.
+  """
   with _open_board_image(data) as opened:
     # Reject oversized inputs from their header before EXIF transposition or
     # decoding can allocate the full raster.
     _validate_image_header(opened)
     image = ImageOps.exif_transpose(opened)
     image.thumbnail(
-      (BOARD_THUMBNAIL_MAX_SIDE, BOARD_THUMBNAIL_MAX_SIDE),
+      (max_side, max_side),
       Image.Resampling.LANCZOS,
     )
     has_alpha = image.mode in ("RGBA", "LA") or (

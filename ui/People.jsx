@@ -1,42 +1,19 @@
 import { useEffect, useState } from 'react'
 import { Search, Telescope } from '@openai/apps-sdk-ui/components/Icon'
-import { searchPeople, getPeer } from '../api.js'
-import { Avatar } from './Board.jsx'
+import { searchPeople } from '../api.js'
+import { Avatar, useProfile } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
+import { membershipDuration } from '../profile.js'
 
-const monthYear = new Intl.DateTimeFormat(undefined, {
-  month: 'short', year: 'numeric', timeZone: 'UTC',
-})
-
-function formatMonthYear(value, unixSeconds = false) {
-  if (value === null || value === undefined || value === '') return ''
-  const date = unixSeconds ? new Date(Number(value) * 1000) : new Date(value)
-  return Number.isNaN(date.getTime()) ? '' : monthYear.format(date)
-}
-
-function tenureLine(profile) {
-  const memberSince = formatMonthYear(profile.member_since)
-  const joinedSocial = formatMonthYear(profile.joined_at, true)
-  if (memberSince && joinedSocial) {
-    return `On Möbius since ${memberSince} · joined Social ${joinedSocial}`
-  }
-  if (memberSince) return `On Möbius since ${memberSince}`
-  if (joinedSocial) return `Joined Social ${joinedSocial}`
-  return ''
-}
-
-function appInitial(name) {
-  return Array.from(String(name || '').trim())[0]?.toLocaleUpperCase() || 'A'
-}
+const DIRECTORY_CACHE_MAX_AGE_MS = 60_000
 
 export default function People({ me, canMessage, onMessage, showToast, requestedProfile, onProfileRequestHandled }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState(null)
   const [state, setState] = useState('loading')
-  const [profile, setProfile] = useState(null)
-  const [profileState, setProfileState] = useState('idle')
   const [searchAttempt, setSearchAttempt] = useState(0)
   const [selectedHost, setSelectedHost] = useState(null)
+  const [selectedSeed, setSelectedSeed] = useState(null)
   const [profileAttempt, setProfileAttempt] = useState(0)
   const closeProfile = () => setSelectedHost(null)
   const profileRef = useModalFocus(Boolean(selectedHost), closeProfile)
@@ -44,56 +21,62 @@ export default function People({ me, canMessage, onMessage, showToast, requested
   useEffect(() => {
     const controller = new AbortController()
     let active = true
+    let timer = null
+    const normalizedQuery = query.trim()
     setState('loading')
-    setResults(null)
-    // Debounce belongs to this query; cleanup invalidates both timer and response.
-    const timer = setTimeout(async () => {
+    if (normalizedQuery) setResults(null)
+
+    const search = async () => {
       try {
         const found = await searchPeople(query, controller.signal)
         if (!active) return
         setResults(found.users)
         setState('ready')
+        if (!normalizedQuery) {
+          window.mobius?.storage?.set('cache/people.json', {
+            users: found.users,
+            cached_at: Date.now(),
+          }).catch(() => null)
+        }
       } catch (error) {
         if (!active) return
         window.mobius?.signal?.('error', { message: error.message, source: 'people' })
         setState('error')
       }
-    }, query ? 250 : 0)
+    }
+
+    if (normalizedQuery) {
+      // Debounce belongs to this query; cleanup invalidates both timer and response.
+      timer = setTimeout(search, 180)
+    } else {
+      window.mobius?.storage?.get('cache/people.json').then((cached) => {
+        if (!active) return
+        const hasPeople = Array.isArray(cached?.users)
+        if (hasPeople) {
+          setResults(cached.users)
+          setState('ready')
+        }
+        if (hasPeople && Date.now() - Number(cached.cached_at || 0) < DIRECTORY_CACHE_MAX_AGE_MS) return
+        search()
+      }).catch(search)
+    }
     return () => { active = false; clearTimeout(timer); controller.abort() }
   }, [query, searchAttempt])
 
   useEffect(() => {
     if (requestedProfile) {
       setSelectedHost(requestedProfile)
+      setSelectedSeed(null)
       onProfileRequestHandled?.()
     }
   }, [requestedProfile])
 
-  useEffect(() => {
-    if (!selectedHost) return
-    const controller = new AbortController()
-    let active = true
-    setProfile(null)
-    setProfileState('loading')
-    getPeer(selectedHost, controller.signal).then(actor => {
-      if (!active) return
-      setProfile(actor)
-      setProfileState('ready')
-    }).catch(() => {
-      if (active) setProfileState('error')
-    })
-    return () => { active = false; controller.abort() }
-  }, [selectedHost, profileAttempt])
+  // Optimistic profile: paints the row's known handle/bio (or shared cache) at
+  // once and reconciles the full actor quietly — no spinner when we already
+  // know who this is, and no "unavailable" when the seed is enough.
+  const { profile, state: profileState } = useProfile(selectedHost, selectedSeed, profileAttempt)
 
-  const profileTenure = profileState === 'ready' && profile ? tenureLine(profile) : ''
-  const profileApps = profileState === 'ready' && Array.isArray(profile?.apps)
-    ? profile.apps
-      .map((app) => ({
-        name: String(app?.name || '').trim(),
-        description: String(app?.description || '').trim(),
-      }))
-      .filter((app) => app.name)
-    : []
+  const profileTenure = profileState === 'ready' && profile ? membershipDuration(profile) : ''
 
   return (
     <div className={`cn-content cn-screen${selectedHost ? ' has-dialog' : ''}`}>
@@ -121,8 +104,9 @@ export default function People({ me, canMessage, onMessage, showToast, requested
 
       <div className="cn-people-list">
         {(results || []).map((user) => (
-          <button className="cn-row" key={user.host} onClick={() => setSelectedHost(user.host)}>
-            <Avatar name={user.handle} host={user.host} />
+          <button className="cn-row" key={user.host}
+                  onClick={() => { setSelectedHost(user.host); setSelectedSeed(user) }}>
+            <Avatar name={user.handle} host={user.host} remote lazy />
             <span className="cn-row-copy">
               <span className="cn-row-top">
                 <strong>{user.handle ? `@${user.handle}` : 'Social member'}{user.host === me?.host ? ' (you)' : ''}</strong>
@@ -142,7 +126,7 @@ export default function People({ me, canMessage, onMessage, showToast, requested
               <button
                 className="cn-btn cn-btn-primary"
                 style={{ marginTop: '0.75rem' }}
-                onClick={() => setSelectedHost(query.trim().replace(/^@/, ''))}
+                onClick={() => { const h = query.trim().replace(/^@/, ''); setSelectedHost(h); setSelectedSeed({ host: h }) }}
               >
                 Connect with {query.trim()} directly
               </button>
@@ -174,38 +158,20 @@ export default function People({ me, canMessage, onMessage, showToast, requested
             {profileState === 'ready' && profile && (
               <>
                 <div className="cn-profile-head">
-                  <Avatar name={profile.handle} host={profile.host} size="large" />
+                  <Avatar name={profile.handle} host={profile.host} size="large" remote />
                   <div className="cn-profile-copy">
                     <h3 className="cn-profile-name">{profile.handle ? `@${profile.handle}` : 'Social member'}</h3>
-                    {profile.bio && <p className="cn-bio">{profile.bio}</p>}
                     {profileTenure && <p className="cn-profile-tenure">{profileTenure}</p>}
                   </div>
                 </div>
-                {profileApps.length > 0 && (
-                  <section className="cn-profile-apps" aria-labelledby="cn-profile-apps-title">
-                    <h4 className="cn-profile-section-title" id="cn-profile-apps-title">Apps</h4>
-                    <div className="cn-profile-app-list">
-                      {profileApps.map((app, index) => (
-                        <div className="cn-profile-app-row" key={`${app.name}-${index}`}>
-                          <span className="cn-profile-app-initial" aria-hidden="true">
-                            {appInitial(app.name)}
-                          </span>
-                          <span className="cn-profile-app-copy">
-                            <strong>{app.name}</strong>
-                            <span>{app.description}</span>
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                )}
+                {profile.bio ? <p className="cn-bio">{profile.bio}</p> : null}
                 <div className="cn-sheet-actions">
                   {canMessage && profile.host !== me?.host && (
                     <button
                       className="cn-btn cn-btn-primary"
                       onClick={() => { const p = profile; closeProfile(); onMessage(p.host, p.handle) }}
                     >
-                      Message
+                      Message directly
                     </button>
                   )}
                 </div>
