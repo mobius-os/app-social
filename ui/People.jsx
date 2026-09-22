@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Search, Telescope } from '@openai/apps-sdk-ui/components/Icon'
 import { searchPeople } from '../api.js'
 import { Avatar, useProfile } from './Board.jsx'
@@ -15,8 +15,27 @@ export default function People({ me, canMessage, onMessage, showToast, requested
   const [selectedHost, setSelectedHost] = useState(null)
   const [selectedSeed, setSelectedSeed] = useState(null)
   const [profileAttempt, setProfileAttempt] = useState(0)
-  const closeProfile = () => setSelectedHost(null)
+  const peopleSearchRef = useRef(null)
+  const profileReturnFocus = useRef(null)
+  const restoreProfileFocus = useRef(false)
+  const closeProfile = () => {
+    restoreProfileFocus.current = true
+    setSelectedHost(null)
+  }
   const profileRef = useModalFocus(Boolean(selectedHost), closeProfile)
+
+  // A profile opened from the Board crosses into this People surface, so its
+  // original avatar button is already disconnected when the sheet closes.
+  // Restore to a visible People control instead of leaving keyboard focus on
+  // BODY (or on a detached feed button).
+  useEffect(() => {
+    if (selectedHost || !restoreProfileFocus.current) return
+    restoreProfileFocus.current = false
+    const target = profileReturnFocus.current
+    profileReturnFocus.current = null
+    if (target?.isConnected) target.focus()
+    else peopleSearchRef.current?.focus()
+  }, [selectedHost])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -84,6 +103,7 @@ export default function People({ me, canMessage, onMessage, showToast, requested
       <div className="cn-search">
         <Search aria-hidden="true" />
         <input
+          ref={peopleSearchRef}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           type="search" autoComplete="off" spellCheck={false}
@@ -105,7 +125,11 @@ export default function People({ me, canMessage, onMessage, showToast, requested
       <div className="cn-people-list">
         {(results || []).map((user) => (
           <button className="cn-row" key={user.host}
-                  onClick={() => { setSelectedHost(user.host); setSelectedSeed(user) }}>
+                  onClick={(event) => {
+                    profileReturnFocus.current = event.currentTarget
+                    setSelectedHost(user.host)
+                    setSelectedSeed(user)
+                  }}>
             <Avatar name={user.handle} host={user.host} remote lazy />
             <span className="cn-row-copy">
               <span className="cn-row-top">

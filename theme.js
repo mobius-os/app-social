@@ -99,7 +99,12 @@ export const CSS = `
 .cn-avatar-image { width: 100%; height: 100%; display: block; object-fit: cover; }
 .cn-avatar.is-small { width: 30px; height: 30px; font-size: 10px; }
 .cn-avatar.is-micro { width: 21px; height: 21px; font-size: 7px; border-width: 1px; }
-.cn-avatar-btn { padding: 0; border: 0; cursor: pointer; -webkit-appearance: none; appearance: none; }
+.cn-avatar-btn {
+  min-width: 44px; min-height: 44px; padding: 2px; border: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none;
+}
+.cn-avatar-btn .cn-avatar-visual { flex: 0 0 auto; }
 .cn-avatar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (hover: hover) { .cn-avatar-btn:hover { filter: brightness(1.06); } }
 .cn-avatar-btn:active { transform: scale(0.94); }
@@ -241,7 +246,7 @@ export const CSS = `
 .cn-profile-preview-actions { display: flex; align-items: center; gap: 7px; padding-right: 30px; }
 .cn-profile-preview-status { grid-column: 1 / -1; min-height: 44px; display: flex; align-items: center; }
 .cn-profile-preview-close {
-  position: absolute; top: 4px; right: 4px; width: 34px; height: 34px; padding: 0;
+  position: absolute; top: 4px; right: 4px; min-width: 44px; min-height: 44px; padding: 0;
   display: flex; align-items: center; justify-content: center; border: 0; border-radius: 50%;
   background: transparent; color: var(--muted); cursor: pointer;
 }

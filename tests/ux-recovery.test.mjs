@@ -24,7 +24,7 @@ for (const [name, request] of [['people search', signal => searchPeople('a b', s
 test('closing a profile invalidates its request instead of allowing it to reopen', () => {
   const source = readFileSync(new URL('../ui/People.jsx', import.meta.url), 'utf8')
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
-  assert.match(source, /const closeProfile = \(\) => setSelectedHost\(null\)/)
+  assert.match(source, /const closeProfile = \(\) => \{[\s\S]*restoreProfileFocus\.current = true[\s\S]*setSelectedHost\(null\)/)
   // Profile fetching lives in the shared useProfile hook. Closing sets
   // selectedHost to null, which changes the hook key and runs its cleanup, so an
   // in-flight result cannot reopen the sheet. (A shared in-flight request can't

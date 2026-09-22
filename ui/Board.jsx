@@ -175,13 +175,14 @@ function Avatar({ name, host, size, remote = false, lazy = false, onOpen = null 
       <button
         ref={elementRef}
         type="button"
-        className={`${className} cn-avatar-btn`}
-        style={{ background }}
+        className="cn-avatar-btn"
         onClick={(event) => { event.stopPropagation(); onOpen() }}
         aria-label={`View ${name ? `@${name}` : 'member'} profile`}
         title={name ? `@${name}` : 'View profile'}
       >
-        {inner}
+        <span className={`${className} cn-avatar-visual`} style={{ background }}>
+          {inner}
+        </span>
       </button>
     )
   }
