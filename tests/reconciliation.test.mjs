@@ -5,6 +5,7 @@ import {
   boardRefreshDelay,
   optimisticReactionChange,
   reactionState,
+  reconcileFeedPage,
   reconcileReplies,
   threadRefreshDelay,
 } from '../reconciliation.js'
@@ -30,6 +31,64 @@ test('a canonical id never appears twice during reconciliation', () => {
   assert.deepEqual(reconcileReplies([{ ...reply, pending: false }], [reply]), [
     { ...reply, pending: false },
   ])
+})
+
+const post = (id, createdAt, extra = {}) => ({ id, created_at: createdAt, ...extra })
+
+test('a first-page refresh removes remotely deleted rows from its owned range', () => {
+  const current = [
+    post('newest', 5), post('deleted', 4), post('third', 3),
+    post('boundary', 2), post('older', 1),
+  ]
+  const authoritative = [
+    post('newest', 5, { text: 'updated' }), post('third', 3), post('boundary', 2),
+  ]
+
+  const result = reconcileFeedPage(authoritative, current, 3)
+
+  assert.deepEqual(result.map(item => item.id), ['newest', 'third', 'boundary', 'older'])
+  assert.equal(result[0].text, 'updated')
+})
+
+test('a full first-page refresh retains every already-loaded older page', () => {
+  const current = [5, 4, 3, 2, 1].map(value => post(`post-${value}`, value))
+  const authoritative = [7, 6, 5].map(value => post(`post-${value}`, value))
+
+  assert.deepEqual(
+    reconcileFeedPage(authoritative, current, 3).map(item => item.id),
+    ['post-7', 'post-6', 'post-5', 'post-4', 'post-3', 'post-2', 'post-1'],
+  )
+})
+
+test('a short first page is a complete snapshot and removes stale older rows', () => {
+  const current = [5, 4, 3, 2, 1].map(value => post(`post-${value}`, value))
+  const authoritative = [post('post-5', 5), post('post-3', 3)]
+
+  assert.deepEqual(
+    reconcileFeedPage(authoritative, current, 3).map(item => item.id),
+    ['post-5', 'post-3'],
+  )
+})
+
+test('the timestamp boundary stays conservative and page ids remain unique', () => {
+  const current = [
+    post('stale-above', 10),
+    post('canonical', 9, { text: 'old' }),
+    post('same-time-spill', 9),
+    post('older', 8),
+    post('older', 8),
+  ]
+  const authoritative = [
+    post('new', 11), post('canonical', 9, { text: 'fresh' }),
+  ]
+
+  const result = reconcileFeedPage(authoritative, current, 2)
+
+  assert.deepEqual(
+    result.map(item => item.id),
+    ['new', 'canonical', 'same-time-spill', 'older'],
+  )
+  assert.equal(result[1].text, 'fresh')
 })
 
 test('emoji reactions isolate the selected reaction and preserve rollback state', () => {

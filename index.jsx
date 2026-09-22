@@ -16,6 +16,7 @@ import {
   participationActionLabel, participationIntentMatches, participationStep,
   saveParticipationIntent,
 } from './participation.js'
+import { reconcileFeedPage } from './reconciliation.js'
 
 function ParticipationNotice({ me, state, busy, onJoin, onAccount, onCheck }) {
   if (state === 'loading') {
@@ -167,11 +168,11 @@ export default function App({ appId, token }) {
     freshFeedLoaded.current = true
     setFeed((current) => {
       if (!background) return posts
-      const byId = new Map(current.map((post) => [post.id, post]))
-      for (const post of posts) byId.set(post.id, post)
-      return [...byId.values()].sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0))
+      return reconcileFeedPage(posts, current, api.BOARD_PAGE_SIZE)
     })
-    if (!background) setFeedHasEarlier(posts.length === api.BOARD_PAGE_SIZE)
+    if (!background || posts.length < api.BOARD_PAGE_SIZE) {
+      setFeedHasEarlier(posts.length === api.BOARD_PAGE_SIZE)
+    }
     setFeedState('ready')
     if (capabilities) setFeedCapabilities(capabilities)
     window.mobius?.storage?.set('cache/board.json', {

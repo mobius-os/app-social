@@ -15,6 +15,37 @@ export function reconcileReplies(authoritative, current) {
   return [...landed, ...pending].sort(chronological)
 }
 
+function uniquePosts(posts) {
+  const seen = new Set()
+  return (Array.isArray(posts) ? posts : []).filter((post) => {
+    const id = post?.id
+    if (!id || seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
+}
+
+// A refresh owns only the first page. Its timestamp-only `before` cursor makes
+// rows at the final timestamp ambiguous: they may have moved just beyond the
+// page rather than been deleted. Keep that boundary and every loaded row below
+// it, while replacing the range the response can prove authoritative.
+export function reconcileFeedPage(authoritative, current, pageSize) {
+  const incoming = Array.isArray(authoritative) ? authoritative : []
+  const page = uniquePosts(incoming)
+  if (incoming.length < pageSize) return page
+
+  const boundary = Number(incoming.at(-1)?.created_at)
+  if (!Number.isFinite(boundary)) {
+    return uniquePosts([...page, ...(Array.isArray(current) ? current : [])])
+  }
+
+  const retained = (Array.isArray(current) ? current : []).filter((post) => {
+    const createdAt = Number(post?.created_at)
+    return !Number.isFinite(createdAt) || createdAt <= boundary
+  })
+  return uniquePosts([...page, ...retained])
+}
+
 export const BOARD_REACTION_EMOJIS = [
   '❤️', '👍', '👎', '😂', '😮', '😢', '😡', '🎉', '🚀', '👀', '🙌', '🔥',
   '✅', '💯', '🤔', '👏', '🙏', '💪', '🤝', '✨', '😍', '🤯', '🫡', '🫶',
