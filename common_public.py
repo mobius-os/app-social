@@ -89,15 +89,18 @@ def _open_board_image(data: bytes) -> Image.Image:
     raise BoardImageTooLarge("Board image dimensions are too large.") from exc
 
 
-def _validate_image_header(image: Image.Image) -> None:
+def _validate_image_header(
+  image: Image.Image, max_pixels: int = BOARD_THUMBNAIL_MAX_PIXELS,
+) -> None:
   if image.format not in IMAGE_FORMAT_MIME:
     raise ValueError("Board image format is unsupported.")
-  if image.width * image.height > BOARD_THUMBNAIL_MAX_PIXELS:
+  if image.width * image.height > max_pixels:
     raise BoardImageTooLarge("Board image dimensions are too large.")
 
 
 def image_thumbnail_bytes(
   data: bytes, max_side: int = BOARD_THUMBNAIL_MAX_SIDE,
+  max_pixels: int = BOARD_THUMBNAIL_MAX_PIXELS,
 ) -> tuple[str, bytes]:
   """Create a small, display-ready, header-validated rendition.
 
@@ -108,7 +111,7 @@ def image_thumbnail_bytes(
   with _open_board_image(data) as opened:
     # Reject oversized inputs from their header before EXIF transposition or
     # decoding can allocate the full raster.
-    _validate_image_header(opened)
+    _validate_image_header(opened, max_pixels)
     image = ImageOps.exif_transpose(opened)
     image.thumbnail(
       (max_side, max_side),

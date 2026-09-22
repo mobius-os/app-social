@@ -7,6 +7,7 @@ import {
   reactionState,
   reconcileFeedPage,
   reconcileReplies,
+  replyActionLabel,
   threadRefreshDelay,
 } from '../reconciliation.js'
 
@@ -31,6 +32,12 @@ test('a canonical id never appears twice during reconciliation', () => {
   assert.deepEqual(reconcileReplies([{ ...reply, pending: false }], [reply]), [
     { ...reply, pending: false },
   ])
+})
+
+test('every post exposes a keyboard-named reply action, including empty threads', () => {
+  assert.equal(replyActionLabel(0), 'Reply')
+  assert.equal(replyActionLabel(1), '1 reply')
+  assert.equal(replyActionLabel(12), '12 replies')
 })
 
 const post = (id, createdAt, extra = {}) => ({ id, created_at: createdAt, ...extra })

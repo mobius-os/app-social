@@ -79,6 +79,7 @@ from common_protocol import (
   read_envelope as _read_envelope, sign as _sign,
   valid_host as _valid_host, valid_id as _valid_id,
   validate_attachment as _validate_attachment,
+  validate_attachment_envelope_size as _validate_attachment_envelope_size,
   validate_attachments as _validate_attachments,
   validate_reply_to as _validate_reply_to,
   validate_text_or_attachment as _validate_text_or_attachment,
@@ -110,6 +111,7 @@ PEER_AVATAR_FAILURE_TTL_S = 45
 # Peer avatars are re-encoded to a small validated raster before caching, so a
 # malicious raster never reaches the browser and cached blobs stay tiny.
 AVATAR_MAX_SIDE = 128
+AVATAR_MAX_PIXELS = 8_000_000
 BOARD_MEDIA_CACHE_TTL_S = 24 * 3600
 REQUEST_STATES = {"pending", "accepted", "declined", "blocked"}
 
@@ -1515,6 +1517,7 @@ async def publish_post(
   if thumbnails:
     envelope["thumbnails"] = [wire for wire, _ in thumbnails]
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+  _validate_attachment_envelope_size(envelope)
   host = _browse_community_host(community_host)
   if host == _own_host():
     board_post = {
@@ -2041,7 +2044,9 @@ async def get_peer_avatar(
     # across the short-lived workers. This preserves the established #21 input
     # contract while preventing four worst-case images from expanding at once.
     with _peer_avatar_decode_lock():
-      _mime, encoded = image_thumbnail_bytes(raw, AVATAR_MAX_SIDE)
+      _mime, encoded = image_thumbnail_bytes(
+        raw, AVATAR_MAX_SIDE, AVATAR_MAX_PIXELS,
+      )
     atomic_write(cache, encoded)
     _clear_avatar_markers(host)
   except httpx.HTTPStatusError as exc:

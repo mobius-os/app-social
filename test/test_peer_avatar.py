@@ -64,6 +64,18 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(avatar.format, "WEBP")
       self.assertEqual(avatar.size, (128, 64))
 
+  async def test_avatar_specific_pixel_cap_rejects_before_cache(self):
+    with self.route_context(), patch.object(
+      social_routes, "_fetch_actor", AsyncMock(return_value={"avatar": True}),
+    ), patch.object(
+      social_routes, "_download_avatar", AsyncMock(return_value=png(3000, 3000)),
+    ):
+      with self.assertRaises(HTTPException) as raised:
+        await social_routes.get_peer_avatar("peer.example", None, None)
+
+    self.assertEqual(raised.exception.status_code, 502)
+    self.assertFalse((self.root / "avatars" / "peer.example.webp").exists())
+
   def test_avatar_decode_lock_serializes_short_lived_service_processes(self):
     context = multiprocessing.get_context("fork")
     acquired = context.Event()

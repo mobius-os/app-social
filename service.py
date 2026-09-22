@@ -12,9 +12,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import FastAPI
 
-from service_runtime import migrate_legacy_state, reset_actor, set_actor, get_settings
-from legacy_authority import LegacyAuthority, HandoffError
-from social_objects import _objects_dir
+from service_runtime import migrate_legacy_state, reset_actor, set_actor
 from social_groups import router as groups_router
 from social_objects import router as objects_router
 from social_routes import router as social_router
@@ -27,23 +25,6 @@ app.include_router(objects_router)
 
 
 async def dispatch(request: dict) -> dict:
-  # Migration boundary belongs to the legacy data owner. It is not a proxy
-  # to Kanban and carries no board semantics into the platform.
-  path = str(request.get("path") or "").lstrip("/")
-  if path.split("/", 1)[0] != "objects":
-    return await _dispatch(request)
-  migrate_legacy_state()
-  authority = LegacyAuthority(_objects_dir(), get_settings().domain)
-  try:
-    with authority.request(path):
-      return await _dispatch(request)
-  except HandoffError:
-    return {"status":409,"body":{"protocol":"kanban/1","code":"authority-retired",
-      "detail":"Board migration is in progress. Pending edits are retained."},
-      "headers":{"cache-control":"no-store"}}
-
-
-async def _dispatch(request: dict) -> dict:
   migrate_legacy_state()
   query = request.get("query") if isinstance(request.get("query"), dict) else {}
   suffix = "/" + str(request.get("path") or "").lstrip("/")

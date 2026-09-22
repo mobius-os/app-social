@@ -27,6 +27,7 @@
     "message_ui_state.js",
     "community.js",
     "participation.js",
+    "board_payload.js",
     "profile.js",
     "links.js",
     "emoji_art.js",
@@ -53,8 +54,7 @@
     "ui/Media.jsx",
     "ui/MessageBubble.jsx",
     "ui/modalFocus.js",
-    "ui/GroupDetails.jsx",
-    "legacy_authority.py"
+    "ui/GroupDetails.jsx"
   ],
   "store": {
     "tagline": "Your people, across every Möbius.",

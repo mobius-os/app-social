@@ -3,7 +3,7 @@ import { Search, Telescope } from '@openai/apps-sdk-ui/components/Icon'
 import { searchPeople } from '../api.js'
 import { Avatar, useProfile } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
-import { membershipDuration } from '../profile.js'
+import { focusProfileReturnTarget, membershipDuration } from '../profile.js'
 
 const DIRECTORY_CACHE_MAX_AGE_MS = 60_000
 
@@ -33,8 +33,7 @@ export default function People({ me, canMessage, onMessage, showToast, requested
     restoreProfileFocus.current = false
     const target = profileReturnFocus.current
     profileReturnFocus.current = null
-    if (target?.isConnected) target.focus()
-    else peopleSearchRef.current?.focus()
+    focusProfileReturnTarget(target, peopleSearchRef.current)
   }, [selectedHost])
 
   useEffect(() => {

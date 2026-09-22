@@ -445,10 +445,8 @@ export default function App({ appId, token }) {
     return true
   }
 
-  async function completeParticipationIntent(kind, postId, completedIntent) {
-    if (!participationIntent || participationIntent.kind !== kind) return
-    if (postId && participationIntent.post_id !== postId) return
-    if (completedIntent && !participationIntentMatches(participationIntent, completedIntent)) return
+  async function completeParticipationIntent(completedIntent) {
+    if (!participationIntentMatches(participationIntent, completedIntent)) return
     try {
       await clearParticipationIntent(window.mobius?.storage, participationIntent)
       setParticipationIntent(await loadParticipationIntent(window.mobius?.storage))

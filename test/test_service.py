@@ -11,7 +11,13 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from common_protocol import PUBLIC_SERVICE_PATH, canonical, peer_service_url
+import httpx
+from fastapi import HTTPException
+
+from common_protocol import (
+  MAX_ATTACHMENT_ENVELOPE_BYTES, PUBLIC_SERVICE_PATH, canonical,
+  peer_service_url, validate_attachment_envelope_size, wire_json_size,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -40,6 +46,24 @@ def signed(key, body):
 
 
 class SocialServiceTests(unittest.TestCase):
+  def test_wire_json_size_matches_the_http_transport(self):
+    envelope = {
+      "type": "board_post", "text": "Four photos 📸",
+      "attachment": {"mime": "image/jpeg", "data_b64": "AAAA", "w": 2, "h": 1},
+    }
+    request = httpx.Request("POST", "https://peer.example", json=envelope)
+    self.assertEqual(wire_json_size(envelope), len(request.content))
+
+  def test_outbound_attachment_envelope_enforces_the_receiver_boundary(self):
+    exact = {"data": "A" * (MAX_ATTACHMENT_ENVELOPE_BYTES - 11)}
+    oversized = {"data": "A" * (MAX_ATTACHMENT_ENVELOPE_BYTES - 10)}
+
+    self.assertEqual(wire_json_size(exact), MAX_ATTACHMENT_ENVELOPE_BYTES)
+    validate_attachment_envelope_size(exact)
+    with self.assertRaises(HTTPException) as raised:
+      validate_attachment_envelope_size(oversized)
+    self.assertEqual(raised.exception.status_code, 413)
+
   def test_manifest_packaged_service_imports_every_runtime_dependency(self):
     manifest = json.loads((ROOT / "mobius.json").read_text())
     python_sources = [

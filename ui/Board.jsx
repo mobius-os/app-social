@@ -8,16 +8,19 @@ import {
 } from '../api.js'
 import {
   BOARD_REACTION_EMOJIS, boardRefreshDelay, optimisticReactionChange,
-  reactionState, reconcileReplies, threadRefreshDelay,
+  reactionState, reconcileReplies, replyActionLabel, threadRefreshDelay,
 } from '../reconciliation.js'
 import { useModalFocus } from './modalFocus.js'
 import { BoardImage, prepareImage, SelectedImagesStrip } from './Media.jsx'
 import RichText from './RichText.jsx'
-import { membershipDuration } from '../profile.js'
+import {
+  avatarCacheIsFresh, avatarFailureState, membershipDuration,
+} from '../profile.js'
 import { EMOJI_ART } from '../emoji_art.js'
+import { boardPostFitsWireLimit } from '../board_payload.js'
 
 const MAX_POST_IMAGES = 4
-const GALLERY_BUDGET_BYTES = 1.05 * 1024 * 1024
+const GALLERY_BUDGET_BYTES = 960 * 1024
 import {
   createParticipationIntent, participationActionLabel, participationStep,
 } from '../participation.js'
@@ -68,7 +71,6 @@ function FlatEmoji({ emoji }) {
   return <img className="cn-flat-emoji" src={EMOJI_ART[emoji]} alt="" aria-hidden="true" draggable="false" />
 }
 
-const AVATAR_RETRY_MS = 45_000
 const AVATAR_CONCURRENCY = 4
 let avatarActive = 0
 const avatarQueue = []
@@ -84,12 +86,7 @@ function cachedAvatar(host) {
   const key = hostKey(host)
   const now = Date.now()
   let record = avatarCache.get(key)
-  if (record) {
-    // Resolved image, a known 404 (no avatar), or an in-flight request: reuse.
-    if (record.url || record.notFound || record.promise) return record
-    // A transient failure recently: keep showing initials until the retry window.
-    if (record.failedAt && now - record.failedAt < AVATAR_RETRY_MS) return record
-  }
+  if (avatarCacheIsFresh(record, now)) return record
   record = record || { url: null, promise: null }
   // One request per unique host, shared across every visible post, and capped:
   // each peer-avatar call is a cold per-request process, so a screenful of new
@@ -97,12 +94,16 @@ function cachedAvatar(host) {
   record.promise = new Promise((resolve) => {
     avatarQueue.push(() => Promise.resolve(getPeerAvatar(key))
       .then((blob) => {
-        if (blob?.size) { record.url = URL.createObjectURL(blob); record.failedAt = null }
-        else { record.notFound = true }
+        if (blob?.size) {
+          Object.assign(record, {
+            url: URL.createObjectURL(blob), failedAt: null, notFoundAt: null,
+          })
+        } else {
+          Object.assign(record, avatarFailureState(null))
+        }
       })
       .catch((error) => {
-        if (error?.status === 404) record.notFound = true
-        else record.failedAt = Date.now()
+        Object.assign(record, avatarFailureState(error))
       })
       .finally(() => { record.promise = null; resolve() }))
     pumpAvatars()
@@ -531,7 +532,7 @@ export default function Board({
       )))
       await loadReplies(post, { background: true, force: true })
       window.mobius?.signal?.('item_created', { type: 'board_reply' })
-      onCompleteParticipation?.('reply', post.id, completedIntent)
+      onCompleteParticipation?.(completedIntent)
       onRefresh(true)
     } catch (error) {
       setReplies((prior) => prior.filter((reply) => reply.id !== localId))
@@ -546,6 +547,9 @@ export default function Board({
   }
 
   async function toggleReaction(post, emoji) {
+    const completedIntent = createParticipationIntent('like', {
+      postId: post.id, emoji,
+    })
     markActivity()
     const { current, next } = optimisticReactionChange(
       post, reactionOverrides[post.id], emoji,
@@ -572,7 +576,7 @@ export default function Board({
           return nextOverrides
         })
       }
-      onCompleteParticipation?.('like', post.id)
+      onCompleteParticipation?.(completedIntent)
     } catch (error) {
       setReactionOverrides((prior) => ({ ...prior, [post.id]: current }))
       showToast(error.message, 'error')
@@ -702,7 +706,7 @@ export default function Board({
   // Compress each selected image now, sharing a byte budget so the whole
   // gallery (plus the first image kept for old hosts) fits one federation
   // envelope. Items resumed from a saved draft already carry a payload.
-  async function collectImagePayloads(images) {
+  async function collectImagePayloads(images, text = '') {
     if (!images.length) return {
       attachment: undefined, attachments: undefined, thumbnails: undefined, previews: [],
     }
@@ -725,9 +729,13 @@ export default function Board({
         preview_url: prepared.previewUrl,
       })
     }
-    return payloads.length === 1
+    const result = payloads.length === 1
       ? { attachment: payloads[0], attachments: undefined, thumbnails, previews }
       : { attachment: undefined, attachments: payloads, thumbnails, previews }
+    if (!boardPostFitsWireLimit({ text, ...result })) {
+      throw new Error('These photos are too large to send together. Remove one or choose smaller images.')
+    }
+    return result
   }
 
   async function publish() {
@@ -754,7 +762,7 @@ export default function Board({
     let thumbnails
     let previews
     try {
-      ({ attachment, attachments, thumbnails, previews } = await collectImagePayloads(images))
+      ({ attachment, attachments, thumbnails, previews } = await collectImagePayloads(images, text))
       setPending((current) => current ? { ...current, phase: 'sending' } : current)
     } catch (error) {
       setPending(null)
@@ -786,7 +794,7 @@ export default function Board({
       })
       setPending(null)
       window.mobius?.signal?.('item_created', { type: 'board_post' })
-      onCompleteParticipation?.('post', null, completedIntent)
+      onCompleteParticipation?.(completedIntent)
       // Release the local previews now that the post succeeded (on failure we
       // restore them for a retry, so only revoke on the happy path).
       for (const image of images) {
@@ -818,7 +826,7 @@ export default function Board({
     setPosting(true)
     let payloads
     try {
-      payloads = await collectImagePayloads(selectedImages)
+      payloads = await collectImagePayloads(selectedImages, draft.trim())
     } catch (error) {
       setPosting(false)
       showToast(error.message || 'An image couldn’t be prepared.', 'error')
@@ -977,14 +985,15 @@ export default function Board({
                   )}
                 />
                 <div className="cn-post-actions">
-                {replyCount > 0 && (
-                  <button
-                    className={`cn-react cn-reply-summary${threadOpen ? ' is-active' : ''}`}
-                    onClick={() => openReplies(post)}
-                    aria-expanded={threadOpen}
-                    aria-controls={`cn-thread-${post.id}`}
-                    aria-label={`${threadOpen ? 'Hide' : 'Show'} ${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}`}
-                  >
+                <button
+                  className={`cn-react cn-reply-summary${threadOpen ? ' is-active' : ''}`}
+                  onClick={() => openReplies(post)}
+                  aria-expanded={threadOpen}
+                  aria-controls={`cn-thread-${post.id}`}
+                  aria-label={replyCount === 0
+                    ? 'Reply to post'
+                    : `${threadOpen ? 'Hide' : 'Show'} ${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}`}
+                >
                   {Array.isArray(post.reply_authors) && post.reply_authors.length > 0 && (
                     <span className="cn-reply-avatars" aria-hidden="true">
                       {post.reply_authors.map((author) => (
@@ -992,9 +1001,8 @@ export default function Board({
                       ))}
                     </span>
                   )}
-                  <span>{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span>
-                  </button>
-                )}
+                  <span>{replyActionLabel(replyCount)}</span>
+                </button>
                 <div className="cn-reactions" aria-label="Post reactions">
                   {visibleReactions.map((emoji) => (
                     <button key={emoji} id={!emojiReactions && emoji === '❤️' ? `cn-react-${post.id}` : undefined}

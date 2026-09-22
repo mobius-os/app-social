@@ -167,6 +167,17 @@ test('stale completion cannot erase a different saved intent', async () => {
   assert.deepEqual(await loadParticipationIntent(storage), next)
 })
 
+test('completing a different emoji cannot erase a saved reaction', async () => {
+  const storage = memoryStorage()
+  const saved = createParticipationIntent('like', { postId: 'same-post', emoji: '🎉' })
+  const completed = createParticipationIntent('like', { postId: 'same-post', emoji: '❤️' })
+  await saveParticipationIntent(storage, saved)
+
+  assert.equal(await clearParticipationIntent(storage, completed), false)
+  assert.deepEqual(await loadParticipationIntent(storage), saved)
+  assert.equal(await clearParticipationIntent(storage, saved), true)
+})
+
 test('repeating the same saved draft is idempotent', async () => {
   const storage = memoryStorage()
   const post = createParticipationIntent('post', { text: 'Keep' })

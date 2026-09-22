@@ -4,6 +4,7 @@ import { getBoardMedia } from '../api.js'
 
 const MAX_BYTES = 1024 * 1024
 const MAX_SIDE = 1600
+const THUMBNAIL_MAX_BYTES = 120 * 1024
 
 function canvasBlob(canvas, mime, quality) {
   return new Promise((resolve, reject) => {
@@ -108,11 +109,14 @@ export async function prepareImage(file, maxBytes = MAX_BYTES) {
     }
     drawThumbnail()
     let thumbBlob = await canvasBlob(thumbCanvas, 'image/webp', 0.74)
-    while (thumbBlob.size > 120 * 1024 && Math.max(thumbWidth, thumbHeight) > 320) {
+    while (thumbBlob.size > THUMBNAIL_MAX_BYTES && Math.max(thumbWidth, thumbHeight) > 96) {
       thumbWidth = Math.max(1, Math.round(thumbWidth * 0.84))
       thumbHeight = Math.max(1, Math.round(thumbHeight * 0.84))
       drawThumbnail()
       thumbBlob = await canvasBlob(thumbCanvas, 'image/webp', 0.7)
+    }
+    if (thumbBlob.size > THUMBNAIL_MAX_BYTES) {
+      throw new Error('This image is too detailed to prepare a preview. Try a simpler image.')
     }
     const thumbnail_b64 = await blobBase64(thumbBlob)
     return {

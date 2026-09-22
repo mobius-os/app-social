@@ -84,12 +84,9 @@ test('public board startup is not gated by identity and avoids oversized empty-s
   assert.doesNotMatch(board, /landingImage/)
 })
 
-test('board keeps empty reply chrome out of the feed and warms real threads', () => {
+test('board warms real threads without fetching known empty threads', () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
-  assert.match(board, /\{replyCount > 0 && \(/)
-  assert.match(board, /className=\{`cn-react cn-reply-summary/)
-  assert.doesNotMatch(board, /<Chat aria-hidden="true" \/>\s*\{Array\.isArray\(post\.reply_authors\)/)
   assert.match(board, /REPLY_PREFETCH_LIMIT = 8/)
   assert.match(board, /REPLY_CACHE_LIMIT = 64/)
   assert.match(board, /Number\(post\.reply_count \|\| 0\) === 0/)
@@ -114,7 +111,7 @@ test('publishing swaps one optimistic row into the confirmed feed without a seco
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   const publish = board.slice(board.indexOf('async function publish()'), board.indexOf('async function submitPost()'))
-  assert.ok(publish.indexOf('setPending({') < publish.indexOf('await collectImagePayloads(images)'))
+  assert.ok(publish.indexOf('setPending({') < publish.indexOf('await collectImagePayloads(images, text)'))
   assert.match(publish, /const receipt = await publishPost/)
   assert.match(publish, /onPostConfirmed\?\.\(\{/)
   assert.doesNotMatch(publish, /await onRefresh\(true\)/)

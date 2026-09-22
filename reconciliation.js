@@ -15,6 +15,12 @@ export function reconcileReplies(authoritative, current) {
   return [...landed, ...pending].sort(chronological)
 }
 
+export function replyActionLabel(count) {
+  const replies = Math.max(0, Number(count) || 0)
+  if (replies === 0) return 'Reply'
+  return `${replies} ${replies === 1 ? 'reply' : 'replies'}`
+}
+
 function uniquePosts(posts) {
   const seen = new Set()
   return (Array.isArray(posts) ? posts : []).filter((post) => {
