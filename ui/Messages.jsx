@@ -60,10 +60,21 @@ export default function Messages({
           Chats
         </button>
         <button type="button" role="tab" aria-selected={showingRequests}
-                className={showingRequests ? 'is-active' : ''} onClick={() => setView('requests')}>
+                className={`${showingRequests ? 'is-active' : ''}${requests.length ? ' has-requests' : ''}`}
+                onClick={() => setView('requests')}>
           Requests{requests.length ? <span className="cn-request-count">{requests.length}</span> : null}
         </button>
       </div>
+      {!showingRequests && requests.length > 0 && (
+        <button className="cn-request-banner" type="button" onClick={() => setView('requests')}>
+          <span className="cn-request-banner-mark" aria-hidden="true"><Mail /></span>
+          <span className="cn-request-banner-copy">
+            <strong>{requests.length} new {requests.length === 1 ? 'request' : 'requests'}</strong>
+            <span>Review safely before anything is accepted</span>
+          </span>
+          <span className="cn-request-banner-action">Review</span>
+        </button>
+      )}
       {loadState === 'error' && <div className="cn-directory-error" role="alert">
         <p>Conversations couldn’t be loaded. Your saved messages haven’t been removed.</p>
         <button className="cn-btn cn-btn-secondary" onClick={onRetry}>Try again</button>
@@ -86,7 +97,8 @@ export default function Messages({
               <button className="cn-row" key={`dm-${key}`} onClick={() => showingRequests
                 ? onOpenMessageRequest(item.peer, item.peer_handle)
                 : onOpenThread(item.peer)}>
-                <Avatar name={item.peer_handle} host={showingRequests ? undefined : item.peer} />
+                <Avatar name={item.peer_handle} host={showingRequests ? undefined : item.peer}
+                        remote={!showingRequests} />
                 <span className="cn-row-copy">
                   <span className="cn-row-top">
                     <strong>{item.peer_handle ? `@${item.peer_handle}` : 'Direct message'}</strong>
@@ -213,7 +225,7 @@ function NewGroupSheet({ me, onClose, onCreated, showToast }) {
               {visiblePeople.map(user => <label className="cn-member-row" key={user.host}>
                 <input type="checkbox" checked={!!selected[user.host]} disabled={busy || !!created}
                        onChange={event => setSelected(prior => ({ ...prior, [user.host]: event.target.checked }))} />
-                <Avatar name={user.handle} host={user.host} size="small" />
+                <Avatar name={user.handle} host={user.host} size="small" remote lazy />
                 <span className="cn-row-copy"><strong>{user.handle ? `@${user.handle}` : 'Social member'}</strong><span className="cn-meta">{user.host}</span></span>
               </label>)}
               {visiblePeople.length === 0 && <p className="cn-group-status">No matching people in this directory.</p>}

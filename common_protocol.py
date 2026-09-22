@@ -99,6 +99,21 @@ def canonical(payload: dict) -> bytes:
   return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 
 
+def wire_json_size(payload: dict) -> int:
+  """Return the exact UTF-8 size produced by the shared HTTP JSON transport."""
+  return len(json.dumps(
+    payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+  ).encode("utf-8"))
+
+
+def validate_attachment_envelope_size(payload: dict) -> None:
+  if wire_json_size(payload) > MAX_ATTACHMENT_ENVELOPE_BYTES:
+    raise HTTPException(
+      status_code=413,
+      detail="Attachments are too large to send together.",
+    )
+
+
 def sign(payload: dict, private_key_b64: str) -> str:
   from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
   key = Ed25519PrivateKey.from_private_bytes(
@@ -382,6 +397,8 @@ __all__ = [
   "canonical", "peer_base_url", "peer_service_url", "post_signed_envelope",
   "read_envelope", "sign",
   "valid_host", "valid_id",
-  "validate_attachment", "validate_reply_to", "validate_text_or_attachment",
+  "validate_attachment", "validate_attachment_envelope_size",
+  "validate_reply_to", "validate_text_or_attachment",
+  "wire_json_size",
   "verify",
 ]

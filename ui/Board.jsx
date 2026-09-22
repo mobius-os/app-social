@@ -1,46 +1,148 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowUp, Chat, Heart, HeartFilled, ImageSquare, Plus, Trash,
+  ArrowUp, Chat, EmojiAdd, Heart, ImageSquare, Trash, X,
 } from '@openai/apps-sdk-ui/components/Icon'
 import {
-  avatarHue, deletePost, getPeerAvatar, getReplies, initials, likePost,
-  postReply, publishPost, timeAgo,
+  avatarHue, deletePost, getPeer, getPeerAvatar, getReplies, initials,
+  postDateTime, postReply, publishPost, reactToPost, timeAgo,
 } from '../api.js'
 import {
-  boardRefreshDelay, optimisticLikeChange, reconcileReplies, threadRefreshDelay,
+  BOARD_REACTION_EMOJIS, boardRefreshDelay, optimisticReactionChange,
+  reactionState, reconcileReplies, replyActionLabel, threadRefreshDelay,
 } from '../reconciliation.js'
 import { useModalFocus } from './modalFocus.js'
-import { LANDING_DATA_URL } from './landingImage.js'
 import { BoardImage, prepareImage, SelectedImagesStrip } from './Media.jsx'
+import RichText from './RichText.jsx'
+import {
+  avatarCacheIsFresh, avatarFailureState, membershipDuration,
+} from '../profile.js'
+import { EMOJI_ART } from '../emoji_art.js'
+import { boardPostFitsWireLimit } from '../board_payload.js'
 
 const MAX_POST_IMAGES = 4
-const GALLERY_BUDGET_BYTES = 1.35 * 1024 * 1024
+const GALLERY_BUDGET_BYTES = 960 * 1024
 import {
   createParticipationIntent, participationActionLabel, participationStep,
 } from '../participation.js'
 
 const avatarCache = new Map()
+const profileCache = new Map()
+const replyCache = new Map()
+const REPLY_CACHE_TTL_MS = 60_000
+const REPLY_CACHE_LIMIT = 64
+const REPLY_PREFETCH_LIMIT = 8
+
+// One canonical host key for both caches: peer hosts are lowercase on the wire,
+// but a typed "connect directly" host is not, so normalize before caching.
+const hostKey = (h) => String(h || '').trim().toLowerCase()
+
+function rememberReplies(key, result) {
+  replyCache.delete(key)
+  replyCache.set(key, { result, updatedAt: Date.now(), promise: null })
+  while (replyCache.size > REPLY_CACHE_LIMIT) {
+    replyCache.delete(replyCache.keys().next().value)
+  }
+}
+
+function cachedReplies(postId, { force = false } = {}) {
+  const key = String(postId)
+  const existing = replyCache.get(key)
+  const fresh = existing?.result && Date.now() - existing.updatedAt < REPLY_CACHE_TTL_MS
+  if (!force && fresh) return Promise.resolve(existing.result)
+  if (existing?.promise) return existing.promise
+
+  const promise = getReplies(key).then((result) => {
+    rememberReplies(key, result)
+    return result
+  }).catch((error) => {
+    if (existing?.result) replyCache.set(key, { ...existing, promise: null })
+    else replyCache.delete(key)
+    throw error
+  })
+  replyCache.set(key, {
+    result: existing?.result || null,
+    updatedAt: existing?.updatedAt || 0,
+    promise,
+  })
+  return promise
+}
+
+function FlatEmoji({ emoji }) {
+  return <img className="cn-flat-emoji" src={EMOJI_ART[emoji]} alt="" aria-hidden="true" draggable="false" />
+}
+
+const AVATAR_CONCURRENCY = 4
+let avatarActive = 0
+const avatarQueue = []
+function pumpAvatars() {
+  while (avatarActive < AVATAR_CONCURRENCY && avatarQueue.length) {
+    const job = avatarQueue.shift()
+    avatarActive += 1
+    job().finally(() => { avatarActive -= 1; pumpAvatars() })
+  }
+}
 
 function cachedAvatar(host) {
-  const key = String(host)
+  const key = hostKey(host)
+  const now = Date.now()
   let record = avatarCache.get(key)
-  if (record) return record
-
-  record = { url: null, promise: null }
-  record.promise = getPeerAvatar(key)
-    .then((blob) => {
-      if (!blob?.size) return
-      record.url = URL.createObjectURL(blob)
-    })
-    .catch(() => {})
+  if (avatarCacheIsFresh(record, now)) return record
+  record = record || { url: null, promise: null }
+  // One request per unique host, shared across every visible post, and capped:
+  // each peer-avatar call is a cold per-request process, so a screenful of new
+  // hosts must not spawn dozens of federation fetches at once.
+  record.promise = new Promise((resolve) => {
+    avatarQueue.push(() => Promise.resolve(getPeerAvatar(key))
+      .then((blob) => {
+        if (blob?.size) {
+          Object.assign(record, {
+            url: URL.createObjectURL(blob), failedAt: null, notFoundAt: null,
+          })
+        } else {
+          Object.assign(record, avatarFailureState(null))
+        }
+      })
+      .catch((error) => {
+        Object.assign(record, avatarFailureState(error))
+      })
+      .finally(() => { record.promise = null; resolve() }))
+    pumpAvatars()
+  })
   avatarCache.set(key, record)
   return record
 }
 
-function Avatar({ name, host, size }) {
+function Avatar({ name, host, size, remote = false, lazy = false, onOpen = null }) {
+  const elementRef = useRef(null)
+  const key = remote && host ? hostKey(host) : ''
+  // An already-cached avatar paints immediately even when lazy — otherwise every
+  // remount (tab switch) flashes initials before the observer fires.
+  const cachedUrl = key ? (avatarCache.get(key)?.url || null) : null
+  const hasCached = Boolean(cachedUrl)
+  const [nearViewport, setNearViewport] = useState(!lazy || hasCached)
   const hue = avatarHue(host)
-  const cacheKey = host ? String(host) : ''
-  const [avatarUrl, setAvatarUrl] = useState(() => avatarCache.get(cacheKey)?.url || null)
+  const cacheKey = remote && nearViewport && host ? key : ''
+  const [avatarUrl, setAvatarUrl] = useState(cachedUrl)
+
+  useEffect(() => {
+    if (!lazy || hasCached) {
+      setNearViewport(true)
+      return undefined
+    }
+    const element = elementRef.current
+    if (!element || typeof IntersectionObserver === 'undefined') {
+      setNearViewport(true)
+      return undefined
+    }
+    setNearViewport(false)
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      setNearViewport(true)
+      observer.disconnect()
+    }, { rootMargin: '160px' })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [lazy, key, hasCached])
 
   useEffect(() => {
     let active = true
@@ -50,11 +152,11 @@ function Avatar({ name, host, size }) {
     }
     const record = cachedAvatar(cacheKey)
     setAvatarUrl(record.url)
-    record.promise.then(() => { if (active) setAvatarUrl(record.url) })
+    record.promise?.then(() => { if (active) setAvatarUrl(record.url) })
     return () => { active = false }
   }, [cacheKey])
 
-  function useFallback() {
+  function handleImageError() {
     const record = avatarCache.get(cacheKey)
     if (record?.url === avatarUrl) {
       URL.revokeObjectURL(record.url)
@@ -63,26 +165,122 @@ function Avatar({ name, host, size }) {
     setAvatarUrl(null)
   }
 
+  const inner = avatarUrl
+    ? <img className="cn-avatar-image" src={avatarUrl} alt="" draggable="false" onError={handleImageError} />
+    : initials(name, host)
+  const background = `linear-gradient(150deg, hsl(${hue} 62% 58%), hsl(${(hue + 24) % 360} 55% 38%))`
+  const className = `cn-avatar${size ? ` is-${size}` : ''}${avatarUrl ? ' has-image' : ''}`
+
+  if (typeof onOpen === 'function' && host) {
+    return (
+      <button
+        ref={elementRef}
+        type="button"
+        className="cn-avatar-btn"
+        onClick={(event) => { event.stopPropagation(); onOpen() }}
+        aria-label={`View ${name ? `@${name}` : 'member'} profile`}
+        title={name ? `@${name}` : 'View profile'}
+      >
+        <span className={`${className} cn-avatar-visual`} style={{ background }}>
+          {inner}
+        </span>
+      </button>
+    )
+  }
+
   return (
-    <span
-      className={`cn-avatar${size ? ` is-${size}` : ''}${avatarUrl ? ' has-image' : ''}`}
-      style={{ background: `linear-gradient(150deg, hsl(${hue} 62% 58%), hsl(${(hue + 24) % 360} 55% 38%))` }}
-      aria-hidden="true"
-    >
-      {avatarUrl
-        ? <img className="cn-avatar-image" src={avatarUrl} alt="" draggable="false" onError={useFallback} />
-        : initials(name, host)}
+    <span ref={elementRef} className={className} style={{ background }} aria-hidden="true">
+      {inner}
     </span>
   )
 }
 
-export { Avatar }
+export { Avatar, profileCache, useProfile }
+
+// Shared, in-flight-deduped profile fetch. profileCache stores { actor, at }.
+const PROFILE_TTL_MS = 5 * 60_000
+const profileInflight = new Map()
+
+function fetchProfile(host) {
+  const key = hostKey(host)
+  const existing = profileInflight.get(key)
+  if (existing) return existing
+  const promise = getPeer(host).then((actor) => {
+    profileCache.set(key, { actor, at: Date.now() })
+    profileInflight.delete(key)
+    return actor
+  }).catch((error) => { profileInflight.delete(key); throw error })
+  profileInflight.set(key, promise)
+  return promise
+}
+
+// Paints a cached or seed profile at once ({ host, handle, bio } from a post or
+// directory row), revalidates quietly past a short TTL, and shares one request
+// per host across Board and People. On error it keeps the seed rather than
+// blanking to "unavailable".
+function useProfile(host, seed = null, attempt = 0) {
+  const key = host ? hostKey(host) : ''
+  const seedActor = () => (seed && seed.host
+    ? { host: seed.host, handle: seed.handle, bio: seed.bio, _partial: true }
+    : null)
+  const [profile, setProfile] = useState(() => (key && profileCache.get(key)?.actor) || seedActor())
+  const [state, setState] = useState(() => (profile ? 'ready' : host ? 'loading' : 'idle'))
+
+  useEffect(() => {
+    if (!host) { setProfile(null); setState('idle'); return undefined }
+    if (attempt > 0) { profileCache.delete(key); profileInflight.delete(key) }
+    const cached = profileCache.get(key)
+    const shown = cached?.actor || seedActor()
+    if (shown) { setProfile(shown); setState('ready') } else { setProfile(null); setState('loading') }
+    const fresh = cached && !cached.actor._partial && Date.now() - cached.at < PROFILE_TTL_MS
+    if (fresh) return undefined
+    let active = true
+    fetchProfile(host)
+      .then((actor) => { if (active) { setProfile(actor); setState('ready') } })
+      .catch(() => { if (active && !shown) setState('error') })
+    return () => { active = false }
+  }, [key, attempt])
+
+  return { profile, state }
+}
+
+function ProfilePreview({ host, seed, onClose, onViewProfile, onMessage, canMessage }) {
+  const { profile, state } = useProfile(host, seed)
+
+  return (
+    <section className="cn-profile-preview" aria-label="Profile preview">
+      {state === 'loading' && <span className="cn-profile-preview-status">Loading profile…</span>}
+      {state === 'error' && <span className="cn-profile-preview-status">Profile unavailable right now.</span>}
+      {state === 'ready' && profile && (
+        <>
+          <Avatar name={profile.handle} host={profile.host} remote />
+          <div className="cn-profile-preview-copy">
+            <strong>{profile.handle ? `@${profile.handle}` : 'Social member'}</strong>
+            <span>{membershipDuration(profile)}</span>
+            {profile.bio ? <span className="cn-profile-preview-bio">{profile.bio}</span> : null}
+          </div>
+          <div className="cn-profile-preview-actions">
+            {canMessage && (
+              <button className="cn-btn cn-btn-primary" type="button"
+                      onClick={() => onMessage(profile.host, profile.handle)}>Message</button>
+            )}
+            <button className="cn-btn cn-btn-secondary" type="button" onClick={() => onViewProfile(host)}>
+              Profile
+            </button>
+          </div>
+        </>
+      )}
+      <button className="cn-profile-preview-close" type="button" onClick={onClose} aria-label="Close profile preview"><X aria-hidden="true" /></button>
+    </section>
+  )
+}
 
 export default function Board({
-  me, feed, feedState, onRefresh, onOpenPerson, showToast, onOpenImage,
+  me, feed, feedState, onRefresh, onOpenPerson, onMessageUser, showToast, onOpenImage,
+  hasEarlier, onLoadEarlier,
   composing, setComposing, canInteract, participationIntent, intentState,
   participationBusy, onRetryIntent, onRequestParticipation,
-  onCompleteParticipation,
+  onCompleteParticipation, onPostConfirmed, emojiReactions = false, onThreadOpenChange,
 }) {
   const [draft, setDraft] = useState('')
   const [posting, setPosting] = useState(false)
@@ -90,7 +288,9 @@ export default function Board({
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [hiddenIds, setHiddenIds] = useState(() => new Set())
   const [selectedImages, setSelectedImages] = useState([])
-  const [likeOverrides, setLikeOverrides] = useState({})
+  const [reactionOverrides, setReactionOverrides] = useState({})
+  const [reactionPickerFor, setReactionPickerFor] = useState(null)
+  const [previewPost, setPreviewPost] = useState(null)
   const [replyPost, setReplyPost] = useState(null)
   const [replies, setReplies] = useState([])
   const [replyState, setReplyState] = useState('idle')
@@ -98,16 +298,27 @@ export default function Board({
   const [replyDraft, setReplyDraft] = useState('')
   const [replySending, setReplySending] = useState(false)
   const [handoffBusy, setHandoffBusy] = useState(false)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
+  const [earlierError, setEarlierError] = useState('')
   const replyRequest = useRef(0)
   const replySendingRef = useRef(false)
   const lastActivityAt = useRef(Date.now())
+  const restoreDeleteFocus = useRef(true)
   const fileRef = useRef(null)
   const composeRef = useModalFocus(composing, () => {
     if (!posting && !handoffBusy) setComposing(false)
   })
-  const repliesRef = useModalFocus(Boolean(replyPost), () => { if (!replySending) closeReplies() })
-  const deleteRef = useModalFocus(Boolean(deleteTarget), () => setDeleteTarget(null))
+  const deleteRef = useModalFocus(
+    Boolean(deleteTarget),
+    () => setDeleteTarget(null),
+    () => restoreDeleteFocus.current,
+  )
   replySendingRef.current = replySending
+
+  useEffect(() => {
+    onThreadOpenChange?.(Boolean(replyPost))
+    return () => onThreadOpenChange?.(false)
+  }, [Boolean(replyPost), onThreadOpenChange])
 
   function countFor(post) {
     const count = Number(
@@ -118,18 +329,39 @@ export default function Board({
     return Number.isFinite(count) ? count : 0
   }
 
+  async function loadEarlierPosts() {
+    const before = feed.at(-1)?.created_at
+    if (!before || loadingEarlier) return
+    setLoadingEarlier(true)
+    setEarlierError('')
+    try {
+      await onLoadEarlier(before)
+    } catch {
+      setEarlierError('Earlier posts couldn’t be loaded. The posts already here are unchanged.')
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }
+
   function markActivity() {
     lastActivityAt.current = Date.now()
   }
 
-  async function loadReplies(post, { background = false } = {}) {
+  async function loadReplies(post, { background = false, force = false } = {}) {
     const request = ++replyRequest.current
+    if (!force && Number(post.reply_count || 0) === 0) {
+      const result = { replies: [] }
+      rememberReplies(String(post.id), result)
+      setReplies([])
+      setReplyState('ready')
+      return true
+    }
     if (!background) {
       setReplyState('loading')
       setReplyError('')
     }
     try {
-      const result = await getReplies(post.id)
+      const result = await cachedReplies(post.id, { force })
       if (request !== replyRequest.current) return
       const loaded = result.replies || []
       setReplies(prior => reconcileReplies(loaded, prior))
@@ -147,11 +379,19 @@ export default function Board({
   }
 
   function openReplies(post, restoredDraft = '') {
+    if (replyPost?.id === post.id && !restoredDraft) {
+      closeReplies()
+      return
+    }
     markActivity()
+    setReactionPickerFor(null)
+    setPreviewPost(null)
+    const cached = replyCache.get(String(post.id))?.result
     setReplyPost(post)
-    setReplies([])
+    setReplies(cached?.replies || [])
+    setReplyState(cached ? 'ready' : 'idle')
     setReplyDraft(restoredDraft)
-    loadReplies(post)
+    loadReplies(post, { background: Boolean(cached) })
   }
 
   function closeReplies() {
@@ -234,6 +474,30 @@ export default function Board({
     }
   }, [replyPost?.id])
 
+  // A thread click should reveal content, not begin a full network round-trip.
+  // Warm only the small, visible set that is known to contain replies; empty
+  // posts skip the request entirely and open their composer immediately.
+  useEffect(() => {
+    let cancelled = false
+    const posts = feed
+      .filter((post) => Number(post.reply_count || 0) > 0)
+      .slice(0, REPLY_PREFETCH_LIMIT)
+    const warm = async () => {
+      for (const post of posts) {
+        if (cancelled) return
+        try { await cachedReplies(post.id) } catch { /* normal open path shows recovery */ }
+      }
+    }
+    const idleId = window.requestIdleCallback
+      ? window.requestIdleCallback(warm, { timeout: 1200 })
+      : window.setTimeout(warm, 250)
+    return () => {
+      cancelled = true
+      if (window.cancelIdleCallback) window.cancelIdleCallback(idleId)
+      else window.clearTimeout(idleId)
+    }
+  }, [feed])
+
   async function sendReply(event) {
     event.preventDefault()
     const completedIntent = createParticipationIntent('reply', {
@@ -266,9 +530,9 @@ export default function Board({
       setReplies((prior) => prior.map((reply) => (
         reply.id === localId ? { ...reply, pending: false } : reply
       )))
-      await loadReplies(post, { background: true })
+      await loadReplies(post, { background: true, force: true })
       window.mobius?.signal?.('item_created', { type: 'board_reply' })
-      onCompleteParticipation?.('reply', post.id, completedIntent)
+      onCompleteParticipation?.(completedIntent)
       onRefresh(true)
     } catch (error) {
       setReplies((prior) => prior.filter((reply) => reply.id !== localId))
@@ -282,26 +546,39 @@ export default function Board({
     }
   }
 
-  async function toggleLike(post) {
+  async function toggleReaction(post, emoji) {
+    const completedIntent = createParticipationIntent('like', {
+      postId: post.id, emoji,
+    })
     markActivity()
-    const { current, next } = optimisticLikeChange(post, likeOverrides[post.id])
-    setLikeOverrides((prior) => ({ ...prior, [post.id]: next }))
+    const { current, next } = optimisticReactionChange(
+      post, reactionOverrides[post.id], emoji,
+    )
+    setReactionPickerFor(null)
+    setReactionOverrides((prior) => ({ ...prior, [post.id]: next }))
     try {
-      const result = await likePost(post.id)
-      setLikeOverrides((prior) => ({
-        ...prior, [post.id]: { liked: result.liked, count: result.likes },
+      const result = await reactToPost(post.id, emoji)
+      const confirmed = Object.fromEntries(BOARD_REACTION_EMOJIS.map((item) => [item, {
+        count: Number(result.reaction_counts?.[item]
+          ?? (item === '❤️' ? result.likes : 0) ?? 0),
+        reacted: Array.isArray(result.reacted)
+          ? result.reacted.includes(item)
+          : item === '❤️' && Boolean(result.liked),
+      }]))
+      setReactionOverrides((prior) => ({
+        ...prior, [post.id]: confirmed,
       }))
       const refreshed = await onRefresh(true)
       if (refreshed) {
-        setLikeOverrides((prior) => {
+        setReactionOverrides((prior) => {
           const nextOverrides = { ...prior }
           delete nextOverrides[post.id]
           return nextOverrides
         })
       }
-      onCompleteParticipation?.('like', post.id)
+      onCompleteParticipation?.(completedIntent)
     } catch (error) {
-      setLikeOverrides((prior) => ({ ...prior, [post.id]: current }))
+      setReactionOverrides((prior) => ({ ...prior, [post.id]: current }))
       showToast(error.message, 'error')
     }
   }
@@ -332,6 +609,8 @@ export default function Board({
         text: intent.text,
         attachment: intent.attachment,
         attachments: intent.attachments,
+        thumbnails: intent.thumbnails,
+        emoji: intent.emoji,
       })
       return
     }
@@ -343,6 +622,7 @@ export default function Board({
       setSelectedImages(saved.map((attachment, i) => ({
         id: `resumed-${i}`,
         payload: attachment,
+        thumbnailPayload: intent.thumbnails?.[i],
         previewUrl: `data:${attachment.mime};base64,${attachment.data_b64}`,
       })))
       setComposing(true)
@@ -357,7 +637,8 @@ export default function Board({
       openReplies(post, intent.text || '')
       return
     }
-    const button = document.getElementById(`cn-like-${post.id}`)
+    setReactionPickerFor(post.id)
+    const button = document.getElementById(`cn-react-${post.id}`)
     button?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
     button?.focus?.()
   }
@@ -365,9 +646,13 @@ export default function Board({
   async function doDelete() {
     const post = deleteTarget
     if (!post) return
-    setDeleteTarget(null)
-    // Remove it from view immediately; restore it if the server rejects.
+    // The trigger is about to disappear. Do not restore focus to it: browsers
+    // may scroll the feed to a focused node just before React removes it.
+    restoreDeleteFocus.current = false
+    // Remove it from view in the same commit as the dialog; restore it only if
+    // the server rejects the deletion.
     setHiddenIds((prior) => new Set(prior).add(post.id))
+    setDeleteTarget(null)
     try {
       await deletePost(post.id)
     } catch (error) {
@@ -421,18 +706,36 @@ export default function Board({
   // Compress each selected image now, sharing a byte budget so the whole
   // gallery (plus the first image kept for old hosts) fits one federation
   // envelope. Items resumed from a saved draft already carry a payload.
-  async function collectImagePayloads(images) {
-    if (!images.length) return { attachment: undefined, attachments: undefined }
+  async function collectImagePayloads(images, text = '') {
+    if (!images.length) return {
+      attachment: undefined, attachments: undefined, thumbnails: undefined, previews: [],
+    }
     const budget = images.length <= 1
       ? undefined
       : Math.floor(GALLERY_BUDGET_BYTES / (images.length + 1))
     const payloads = []
+    const thumbnails = []
+    const previews = []
     for (const image of images) {
-      payloads.push(image.payload || (await prepareImage(image.file, budget)).payload)
+      const prepared = image.payload
+        ? { payload: image.payload, thumbnailPayload: image.thumbnailPayload, previewUrl: image.previewUrl }
+        : await prepareImage(image.file, budget)
+      payloads.push(prepared.payload)
+      if (prepared.thumbnailPayload) thumbnails.push(prepared.thumbnailPayload)
+      previews.push({
+        mime: prepared.payload.mime,
+        w: prepared.payload.w,
+        h: prepared.payload.h,
+        preview_url: prepared.previewUrl,
+      })
     }
-    return payloads.length === 1
-      ? { attachment: payloads[0], attachments: undefined }
-      : { attachment: undefined, attachments: payloads }
+    const result = payloads.length === 1
+      ? { attachment: payloads[0], attachments: undefined, thumbnails, previews }
+      : { attachment: undefined, attachments: payloads, thumbnails, previews }
+    if (!boardPostFitsWireLimit({ text, ...result })) {
+      throw new Error('These photos are too large to send together. Remove one or choose smaller images.')
+    }
+    return result
   }
 
   async function publish() {
@@ -441,36 +744,57 @@ export default function Board({
     if (!text && !images.length) return
     markActivity()
     setPosting(true)
-    let attachment
-    let attachments
-    try {
-      ({ attachment, attachments } = await collectImagePayloads(images))
-    } catch (error) {
-      setPosting(false)
-      showToast(error.message || 'An image couldn’t be prepared.', 'error')
-      return
-    }
-    const completedIntent = createParticipationIntent('post', {
-      text, attachment, attachments,
-    })
-    // Show the post at the top of the board immediately and hand the composer
-    // back; the federation round-trip reconciles in the background. On failure
-    // we drop the placeholder and restore the draft and its images.
+    const startedAt = Date.now() / 1000
     setPending({
       id: `pending-${Date.now()}`,
       host: me?.host,
       handle: me?.handle || '',
       text,
-      hasImage: images.length > 0,
-      created_at: Date.now() / 1000,
+      images: images.map((image) => ({ url: image.previewUrl })),
+      phase: images.length ? 'preparing' : 'sending',
+      created_at: startedAt,
     })
     setDraft('')
     setSelectedImages([])
     setComposing(false)
+    let attachment
+    let attachments
+    let thumbnails
+    let previews
     try {
-      await publishPost(text, attachment, attachments)
+      ({ attachment, attachments, thumbnails, previews } = await collectImagePayloads(images, text))
+      setPending((current) => current ? { ...current, phase: 'sending' } : current)
+    } catch (error) {
+      setPending(null)
+      setDraft(text)
+      setSelectedImages(images)
+      setComposing(true)
+      setPosting(false)
+      showToast(error.message || 'An image couldn’t be prepared.', 'error')
+      return
+    }
+    const completedIntent = createParticipationIntent('post', {
+      text, attachment, attachments, thumbnails,
+    })
+    try {
+      const receipt = await publishPost(text, attachment, attachments, thumbnails)
+      onPostConfirmed?.({
+        id: receipt.id,
+        host: me?.host,
+        handle: me?.handle || '',
+        text,
+        created_at: startedAt,
+        ...(previews.length === 1 ? { attachment: previews[0] } : {}),
+        ...(previews.length > 1 ? { attachments: previews } : {}),
+        like_count: 0,
+        liked: false,
+        reactions: [],
+        reply_count: 0,
+        reply_authors: [],
+      })
+      setPending(null)
       window.mobius?.signal?.('item_created', { type: 'board_post' })
-      onCompleteParticipation?.('post', null, completedIntent)
+      onCompleteParticipation?.(completedIntent)
       // Release the local previews now that the post succeeded (on failure we
       // restore them for a retry, so only revoke on the happy path).
       for (const image of images) {
@@ -478,8 +802,6 @@ export default function Board({
           URL.revokeObjectURL(image.previewUrl)
         }
       }
-      await onRefresh(true)
-      setPending(null)
       showToast('Posted to the board', 'success')
     } catch (error) {
       setPending(null)
@@ -504,7 +826,7 @@ export default function Board({
     setPosting(true)
     let payloads
     try {
-      payloads = await collectImagePayloads(selectedImages)
+      payloads = await collectImagePayloads(selectedImages, draft.trim())
     } catch (error) {
       setPosting(false)
       showToast(error.message || 'An image couldn’t be prepared.', 'error')
@@ -515,11 +837,12 @@ export default function Board({
       text: draft,
       attachment: payloads.attachment,
       attachments: payloads.attachments,
+      thumbnails: payloads.thumbnails,
     })
   }
 
   return (
-    <div className={`cn-content cn-screen${composing || replyPost ? ' has-dialog' : ''}`}>
+    <div className={`cn-content cn-screen${composing ? ' has-dialog' : ''}`}>
       {intentState === 'loading' && (
         <p className="cn-intent-status" role="status">Checking for a saved draft…</p>
       )}
@@ -553,8 +876,13 @@ export default function Board({
         </section>
       )}
       {feedState === 'loading' && (
-        <div className="cn-center" role="status" aria-label="Loading the board">
-          <div className="cn-spinner" aria-hidden="true" />
+        <div className="cn-feed-skeleton" role="status" aria-label="Loading the board">
+          {[0, 1, 2].map((row) => (
+            <div className="cn-post-skeleton" key={row} aria-hidden="true">
+              <span className="cn-skeleton-avatar" />
+              <span className="cn-skeleton-copy"><i /><i /><i /></span>
+            </div>
+          ))}
         </div>
       )}
       {feedState === 'error' && (
@@ -566,9 +894,7 @@ export default function Board({
       )}
       {feedState === 'ready' && feed.length === 0 && !pending && (
         <div className="cn-empty">
-          {LANDING_DATA_URL
-            ? <img className="cn-landing" style={{ maxWidth: 180, opacity: 0.9 }} src={LANDING_DATA_URL} alt="" />
-            : <div className="cn-empty-mark" aria-hidden="true"><Chat /></div>}
+          <div className="cn-empty-mark" aria-hidden="true"><Chat /></div>
           <div className="cn-empty-title">Your board is quiet</div>
           <p className="cn-empty-text">
             Posts from everyone on your community appear here. Share Social
@@ -580,78 +906,59 @@ export default function Board({
         {pending && (
           <article className="cn-post is-pending" aria-label="Posting">
             <div className="cn-post-head">
-              <Avatar name={pending.handle} host={pending.host} size="small" />
+              <Avatar name={pending.handle} host={pending.host} remote />
               <span className="cn-person">
-                <span>
-                  <span className="cn-person-name">
-                    {pending.handle ? `@${pending.handle}` : 'You'}
-                  </span>
-                  <span className="cn-meta" style={{ display: 'block' }}>Posting…</span>
+                <span className="cn-person-name">
+                  {pending.handle ? `@${pending.handle}` : 'You'}
+                </span>
+                <span className="cn-post-dot" aria-hidden="true">·</span>
+                <span className="cn-meta cn-pending-status">
+                  {pending.phase === 'preparing' ? 'Preparing photo…' : 'Sending…'}
                 </span>
               </span>
             </div>
-            {pending.text && <p className="cn-post-copy">{pending.text}</p>}
-            {pending.hasImage && !pending.text && (
-              <p className="cn-post-copy">Sharing your photo…</p>
-            )}
+            <div className="cn-post-body">
+              {pending.text && <RichText text={pending.text} className="cn-post-copy" preview />}
+              {!!pending.images?.length && (
+                <div className={pending.images.length === 1
+                  ? 'cn-pending-image'
+                  : `cn-gallery cn-gallery-${pending.images.length} cn-pending-gallery`}>
+                  {pending.images.map((image, index) => (
+                    <div className={pending.images.length === 1 ? undefined : 'cn-gallery-item'} key={index}>
+                      <img src={image.url} alt={`Post photo ${index + 1}`} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </article>
         )}
         {feed.filter((post) => !hiddenIds.has(post.id)).map((post) => {
-          const like = likeOverrides[post.id] || {
-            liked: !!post.liked, count: post.like_count || 0,
-          }
+          const reactions = reactionState(post, reactionOverrides[post.id])
+          const visibleReactions = BOARD_REACTION_EMOJIS.filter((emoji) => (
+            reactions[emoji].count > 0 || reactions[emoji].reacted
+          ))
           const replyCount = countFor(post)
+          const threadOpen = replyPost?.id === post.id
+          const togglePreview = () => setPreviewPost(
+            previewPost?.id === post.id ? null : { id: post.id, host: post.host },
+          )
           return (
-            <article className="cn-post" key={post.id}>
+            <article className={`cn-post${threadOpen ? ' has-thread' : ''}${me?.host && post.host === me.host ? ' is-mine' : ''}`} key={post.id}
+                     onClick={(event) => {
+                       if (!event.target.closest('button, input, textarea, a')) openReplies(post)
+                     }}>
               <div className="cn-post-head">
-                <Avatar name={post.handle} host={post.host} />
-                <button className="cn-person" onClick={() => onOpenPerson(post.host)}>
-                  <span>
-                    <span className="cn-person-name">{post.handle ? `@${post.handle}` : 'Social member'}</span>
-                    <span className="cn-meta" style={{ display: 'block' }}>
-                      {timeAgo(post.created_at)}
-                    </span>
-                  </span>
-                </button>
-              </div>
-              {post.text && <p className="cn-post-copy">{post.text}</p>}
-              <BoardImage
-                post={post}
-                onOpen={onOpenImage}
-                onUnavailable={(error) => showToast(
-                  error?.status === 404
-                    ? 'Board photos aren’t available on this server yet.'
-                    : 'This photo couldn’t be loaded.',
-                  'error',
-                )}
-              />
-              <div className="cn-post-actions">
-                <button
-                  id={`cn-like-${post.id}`}
-                  className={`cn-react${like.liked ? ' is-liked' : ''}`}
-                  onClick={() => canInteract
-                    ? toggleLike(post)
-                    : continueParticipation('like', { postId: post.id })}
-                  disabled={handoffBusy || participationBusy}
-                  aria-label={canInteract
-                    ? (like.liked ? 'Unlike' : 'Like')
-                    : participationActionLabel(participationStep(me), 'like')}
-                >
-                  {like.liked ? <HeartFilled aria-hidden="true" /> : <Heart aria-hidden="true" />}
-                  {like.count > 0 && <span>{like.count}</span>}
-                </button>
-                <button
-                  className="cn-react"
-                  onClick={() => openReplies(post)}
-                  aria-label={`View ${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}`}
-                >
-                  <Chat aria-hidden="true" />
-                  <span>{replyCount}</span>
+                <Avatar name={post.handle} host={post.host} remote lazy onOpen={togglePreview} />
+                <button className="cn-person" onClick={togglePreview}>
+                  <span className="cn-person-name">{post.handle ? `@${post.handle}` : 'Social member'}</span>
+                  <span className="cn-post-dot" aria-hidden="true">·</span>
+                  <span className="cn-meta">{postDateTime(post.created_at)}</span>
                 </button>
                 {me?.host && post.host === me.host && (
                   <button
-                    className="cn-react is-delete"
-                    onClick={() => setDeleteTarget(post)}
+                    className="cn-post-delete"
+                    onClick={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }}
                     aria-label="Delete post"
                     title="Delete post"
                   >
@@ -659,10 +966,141 @@ export default function Board({
                   </button>
                 )}
               </div>
+              <div className="cn-post-body">
+                {previewPost?.id === post.id && (
+                  <ProfilePreview host={post.host} seed={{ host: post.host, handle: post.handle }}
+                                  onClose={() => setPreviewPost(null)}
+                                  onViewProfile={onOpenPerson} onMessage={onMessageUser}
+                                  canMessage={canInteract && post.host !== me?.host} />
+                )}
+                {post.text && <RichText text={post.text} className="cn-post-copy" preview />}
+                <BoardImage
+                  post={post}
+                  onOpen={onOpenImage}
+                  onUnavailable={(error) => showToast(
+                    error?.status === 404
+                      ? 'Board photos aren’t available on this server yet.'
+                      : 'This photo couldn’t be loaded.',
+                    'error',
+                  )}
+                />
+                <div className="cn-post-actions">
+                <button
+                  className={`cn-react cn-reply-summary${threadOpen ? ' is-active' : ''}`}
+                  onClick={() => openReplies(post)}
+                  aria-expanded={threadOpen}
+                  aria-controls={`cn-thread-${post.id}`}
+                  aria-label={replyCount === 0
+                    ? 'Reply to post'
+                    : `${threadOpen ? 'Hide' : 'Show'} ${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}`}
+                >
+                  {Array.isArray(post.reply_authors) && post.reply_authors.length > 0 && (
+                    <span className="cn-reply-avatars" aria-hidden="true">
+                      {post.reply_authors.map((author) => (
+                        <Avatar key={author.host} name={author.handle} host={author.host} size="micro" remote lazy />
+                      ))}
+                    </span>
+                  )}
+                  <span>{replyActionLabel(replyCount)}</span>
+                </button>
+                <div className="cn-reactions" aria-label="Post reactions">
+                  {visibleReactions.map((emoji) => (
+                    <button key={emoji} id={!emojiReactions && emoji === '❤️' ? `cn-react-${post.id}` : undefined}
+                            className={`cn-reaction-chip${reactions[emoji].reacted ? ' is-reacted' : ''}`}
+                            onClick={() => canInteract
+                              ? toggleReaction(post, emoji)
+                              : continueParticipation('like', { postId: post.id, emoji })}
+                            disabled={handoffBusy || participationBusy}
+                            aria-label={`${reactions[emoji].reacted ? 'Remove' : 'Add'} ${emoji} reaction`}>
+                      <FlatEmoji emoji={emoji} />
+                      {reactions[emoji].count > 0 && <b>{reactions[emoji].count}</b>}
+                    </button>
+                  ))}
+                  {(emojiReactions || visibleReactions.length === 0) && (
+                  <button id={`cn-react-${post.id}`} className="cn-react cn-add-reaction"
+                          onClick={() => emojiReactions
+                            ? setReactionPickerFor(reactionPickerFor === post.id ? null : post.id)
+                            : (canInteract
+                              ? toggleReaction(post, '❤️')
+                              : continueParticipation('like', { postId: post.id, emoji: '❤️' }))}
+                          disabled={handoffBusy || participationBusy}
+                          aria-expanded={emojiReactions ? reactionPickerFor === post.id : undefined}
+                          aria-label={emojiReactions ? 'Add reaction' : 'Like'}>
+                    {emojiReactions ? <EmojiAdd aria-hidden="true" /> : <Heart aria-hidden="true" />}
+                  </button>
+                  )}
+                  {emojiReactions && reactionPickerFor === post.id && (
+                    <div className="cn-reaction-picker" role="group" aria-label="Choose a reaction">
+                      <span className="cn-reaction-picker-title">Choose a reaction</span>
+                      <div className="cn-reaction-grid">
+                        {BOARD_REACTION_EMOJIS.map((emoji) => (
+                          <button key={emoji} type="button"
+                                  className={reactions[emoji].reacted ? 'is-reacted' : ''}
+                                  onClick={() => canInteract
+                                    ? toggleReaction(post, emoji)
+                                    : continueParticipation('like', { postId: post.id, emoji })}
+                                  aria-label={`React ${emoji}`}><FlatEmoji emoji={emoji} /></button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                </div>
+                {threadOpen && (
+                  <section className="cn-inline-thread" id={`cn-thread-${post.id}`}
+                           aria-label="Replies" onClick={(event) => event.stopPropagation()}>
+                    <div className="cn-inline-thread-head">
+                      <strong>{replyCount === 0 ? 'Start the conversation' : `${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}`}</strong>
+                      <button type="button" onClick={closeReplies}>Hide</button>
+                    </div>
+                    <div className="cn-inline-replies" aria-live="polite">
+                      {replyState === 'loading' && <div className="cn-thread-loading" role="status">Loading replies…</div>}
+                      {replyState === 'error' && (
+                        <div className="cn-thread-loading">
+                          <span>{replyError}</span>
+                          <button className="cn-btn cn-btn-secondary" onClick={() => loadReplies(post)}>Try again</button>
+                        </div>
+                      )}
+                      {replyState === 'ready' && replies.length === 0 && (
+                        <p className="cn-reply-empty">No replies yet.</p>
+                      )}
+                      {replies.map((reply) => (
+                        <article className={`cn-reply-row${reply.pending ? ' is-pending' : ''}`} key={reply.id}>
+                          <Avatar name={reply.handle} host={reply.host} size="small" remote />
+                          <div className="cn-reply-copy">
+                            <div className="cn-reply-meta">
+                              <strong>{reply.handle ? `@${reply.handle}` : 'Social member'}</strong>
+                              <span className="cn-time">{reply.pending ? 'Sending…' : timeAgo(reply.created_at)}</span>
+                            </div>
+                            <RichText text={reply.text} />
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                    <form className={`cn-reply-composer${canInteract ? '' : ' is-gated'}`} onSubmit={sendReply}>
+                      <input value={replyDraft} onChange={(event) => setReplyDraft(event.target.value)}
+                             placeholder="Post your reply" aria-label="Post your reply" autoComplete="off"
+                             maxLength={1000} disabled={replySending || handoffBusy || participationBusy} />
+                      <button className={canInteract ? 'cn-reply-send' : 'cn-btn cn-btn-primary cn-reply-account'}
+                              type="submit" disabled={replySending || handoffBusy || participationBusy || !replyDraft.trim()}
+                              aria-label={canInteract ? 'Send reply' : undefined}>
+                        {canInteract ? <ArrowUp aria-hidden="true" /> : participationActionLabel(participationStep(me), 'reply')}
+                      </button>
+                    </form>
+                  </section>
+                )}
+              </div>
             </article>
           )
         })}
       </div>
+      {feedState === 'ready' && hasEarlier && (
+        <button className="cn-history-more" type="button" disabled={loadingEarlier}
+                onClick={loadEarlierPosts}>
+          {loadingEarlier ? 'Loading earlier posts…' : 'Load earlier posts'}
+        </button>
+      )}
+      {earlierError && <p className="cn-inline-error" role="status">{earlierError}</p>}
 
 
       {composing && (
@@ -677,7 +1115,7 @@ export default function Board({
                 ? 'Joining shares your handle and profile picture. You’ll still review this post before sharing it.'
                 : 'Write now, then continue in Möbius · You. Nothing will be posted automatically.'}</p>
             <div className="cn-post-compose">
-              <Avatar name={me?.handle} host={me?.host} size="small" />
+              <Avatar name={me?.handle} host={me?.host} size="small" remote />
               <textarea
                 className="cn-textarea"
                 value={draft}
@@ -734,107 +1172,6 @@ export default function Board({
         </div>
       )}
 
-      {replyPost && (
-        <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="Conversation on post"
-             onClick={replySending ? null : closeReplies}>
-          <div ref={repliesRef} tabIndex={-1} className="cn-sheet cn-reply-sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="cn-grabber" aria-hidden="true" />
-            <div className="cn-reply-sheet-head">
-              <div>
-                <h3 className="cn-sheet-title">Conversation</h3>
-                <p className="cn-sheet-body">
-                  {countFor(replyPost)} {countFor(replyPost) === 1 ? 'reply' : 'replies'} to this post
-                </p>
-              </div>
-              <button className="cn-btn cn-btn-ghost" onClick={closeReplies} disabled={replySending}>
-                Close
-              </button>
-            </div>
-
-            <article className="cn-reply-parent" aria-label="Original post">
-              <div className="cn-post-head">
-                <Avatar name={replyPost.handle} host={replyPost.host} size="small" />
-                <button className="cn-person" onClick={() => onOpenPerson(replyPost.host)}>
-                  <span>
-                    <span className="cn-person-name">
-                      {replyPost.handle ? `@${replyPost.handle}` : 'Social member'}
-                    </span>
-                    <span className="cn-meta" style={{ display: 'block' }}>
-                      {timeAgo(replyPost.created_at)}
-                    </span>
-                  </span>
-                </button>
-              </div>
-              {replyPost.text && <p className="cn-post-copy">{replyPost.text}</p>}
-              <BoardImage
-                post={replyPost}
-                onOpen={onOpenImage}
-                onUnavailable={() => {}}
-              />
-            </article>
-
-            <div className="cn-reply-list" aria-live="polite">
-              {replyState === 'loading' && (
-                <div className="cn-center" role="status" aria-label="Loading replies">
-                  <div className="cn-spinner" aria-hidden="true" />
-                </div>
-              )}
-              {replyState === 'error' && (
-                <div className="cn-reply-empty">
-                  <p>{replyError}</p>
-                  <button className="cn-btn cn-btn-secondary" onClick={() => loadReplies(replyPost)}>
-                    Try again
-                  </button>
-                </div>
-              )}
-              {replyState === 'ready' && replies.length === 0 && (
-                <p className="cn-reply-empty">No replies yet — start the conversation.</p>
-              )}
-              {replies.map((reply) => (
-                <article className={`cn-reply-row${reply.pending ? ' is-pending' : ''}`} key={reply.id}>
-                  <Avatar name={reply.handle} host={reply.host} size="small" />
-                  <div className="cn-reply-copy">
-                    <div className="cn-reply-meta">
-                      <strong>{reply.handle ? `@${reply.handle}` : 'Social member'}</strong>
-                      <span className="cn-time">{reply.pending ? 'Sending…' : timeAgo(reply.created_at)}</span>
-                    </div>
-                    <p>{reply.text}</p>
-                  </div>
-                </article>
-              ))}
-            </div>
-
-            <form className={`cn-reply-composer${canInteract ? '' : ' is-gated'}`} onSubmit={sendReply}>
-              <input
-                value={replyDraft}
-                onChange={(e) => setReplyDraft(e.target.value)}
-                placeholder="Write a reply"
-                aria-label="Write a reply"
-                autoComplete="off"
-                maxLength={1000}
-                disabled={replySending || handoffBusy || participationBusy}
-              />
-              {canInteract ? (
-                <button className="cn-reply-send" type="submit"
-                        disabled={replySending || !replyDraft.trim()}
-                        aria-label="Send reply">
-                  <ArrowUp aria-hidden="true" />
-                </button>
-              ) : (
-                <button className="cn-btn cn-btn-primary cn-reply-account" type="submit"
-                        disabled={handoffBusy || participationBusy || !replyDraft.trim()}>
-                  {handoffBusy || participationBusy
-                    ? 'Please wait…'
-                    : participationActionLabel(participationStep(me), 'reply')}
-                </button>
-              )}
-              {!canInteract && (
-                <span className="cn-reply-gate">Your draft stays here. Nothing is sent automatically.</span>
-              )}
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

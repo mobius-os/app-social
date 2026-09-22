@@ -89,22 +89,32 @@ def _open_board_image(data: bytes) -> Image.Image:
     raise BoardImageTooLarge("Board image dimensions are too large.") from exc
 
 
-def _validate_image_header(image: Image.Image) -> None:
+def _validate_image_header(
+  image: Image.Image, max_pixels: int = BOARD_THUMBNAIL_MAX_PIXELS,
+) -> None:
   if image.format not in IMAGE_FORMAT_MIME:
     raise ValueError("Board image format is unsupported.")
-  if image.width * image.height > BOARD_THUMBNAIL_MAX_PIXELS:
+  if image.width * image.height > max_pixels:
     raise BoardImageTooLarge("Board image dimensions are too large.")
 
 
-def image_thumbnail_bytes(data: bytes) -> tuple[str, bytes]:
-  """Create the small, display-ready rendition used by board timelines."""
+def image_thumbnail_bytes(
+  data: bytes, max_side: int = BOARD_THUMBNAIL_MAX_SIDE,
+  max_pixels: int = BOARD_THUMBNAIL_MAX_PIXELS,
+) -> tuple[str, bytes]:
+  """Create a small, display-ready, header-validated rendition.
+
+  `max_side` bounds the long edge (board timelines use the default; avatars pass
+  a smaller cap). The same header/decompression-bomb guards run either way, so
+  every caller re-encodes untrusted image bytes through one validated path.
+  """
   with _open_board_image(data) as opened:
     # Reject oversized inputs from their header before EXIF transposition or
     # decoding can allocate the full raster.
-    _validate_image_header(opened)
+    _validate_image_header(opened, max_pixels)
     image = ImageOps.exif_transpose(opened)
     image.thumbnail(
-      (BOARD_THUMBNAIL_MAX_SIDE, BOARD_THUMBNAIL_MAX_SIDE),
+      (max_side, max_side),
       Image.Resampling.LANCZOS,
     )
     has_alpha = image.mode in ("RGBA", "LA") or (

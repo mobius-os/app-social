@@ -122,8 +122,18 @@ test('the UI keeps a final explicit control for publish, reply and react', () =>
   assert.match(board, /if \(canInteract\) return publish\(\)/)
   assert.match(board, /onClick=\{submitPost\}/)
   assert.match(board, /<form className=.*onSubmit=\{sendReply\}>/)
-  assert.match(board, /onClick=\{\(\) => canInteract\s*\? toggleLike\(post\)/)
+  assert.match(board, /toggleReaction\(post, emoji\)/)
+  assert.match(board, /cn-inline-thread/)
   assert.match(board, /Nothing was shared automatically/)
+})
+
+test('saved reactions preserve the chosen standard emoji for explicit review', () => {
+  assert.deepEqual(createParticipationIntent('like', {
+    postId: '12345678', emoji: '🎉',
+  }), { version: 1, kind: 'like', post_id: '12345678', emoji: '🎉' })
+  assert.equal(createParticipationIntent('like', {
+    postId: '12345678', emoji: 'not-standard',
+  }).emoji, '❤️')
 })
 
 
@@ -155,6 +165,17 @@ test('stale completion cannot erase a different saved intent', async () => {
   await saveParticipationIntent(storage, next)
   assert.equal(await clearParticipationIntent(storage, old), false)
   assert.deepEqual(await loadParticipationIntent(storage), next)
+})
+
+test('completing a different emoji cannot erase a saved reaction', async () => {
+  const storage = memoryStorage()
+  const saved = createParticipationIntent('like', { postId: 'same-post', emoji: '🎉' })
+  const completed = createParticipationIntent('like', { postId: 'same-post', emoji: '❤️' })
+  await saveParticipationIntent(storage, saved)
+
+  assert.equal(await clearParticipationIntent(storage, completed), false)
+  assert.deepEqual(await loadParticipationIntent(storage), saved)
+  assert.equal(await clearParticipationIntent(storage, saved), true)
 })
 
 test('repeating the same saved draft is idempotent', async () => {

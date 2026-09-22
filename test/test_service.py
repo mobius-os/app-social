@@ -11,7 +11,13 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from common_protocol import PUBLIC_SERVICE_PATH, canonical, peer_service_url
+import httpx
+from fastapi import HTTPException
+
+from common_protocol import (
+  MAX_ATTACHMENT_ENVELOPE_BYTES, PUBLIC_SERVICE_PATH, canonical,
+  peer_service_url, validate_attachment_envelope_size, wire_json_size,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -40,6 +46,24 @@ def signed(key, body):
 
 
 class SocialServiceTests(unittest.TestCase):
+  def test_wire_json_size_matches_the_http_transport(self):
+    envelope = {
+      "type": "board_post", "text": "Four photos 📸",
+      "attachment": {"mime": "image/jpeg", "data_b64": "AAAA", "w": 2, "h": 1},
+    }
+    request = httpx.Request("POST", "https://peer.example", json=envelope)
+    self.assertEqual(wire_json_size(envelope), len(request.content))
+
+  def test_outbound_attachment_envelope_enforces_the_receiver_boundary(self):
+    exact = {"data": "A" * (MAX_ATTACHMENT_ENVELOPE_BYTES - 11)}
+    oversized = {"data": "A" * (MAX_ATTACHMENT_ENVELOPE_BYTES - 10)}
+
+    self.assertEqual(wire_json_size(exact), MAX_ATTACHMENT_ENVELOPE_BYTES)
+    validate_attachment_envelope_size(exact)
+    with self.assertRaises(HTTPException) as raised:
+      validate_attachment_envelope_size(oversized)
+    self.assertEqual(raised.exception.status_code, 413)
+
   def test_manifest_packaged_service_imports_every_runtime_dependency(self):
     manifest = json.loads((ROOT / "mobius.json").read_text())
     python_sources = [
@@ -716,6 +740,59 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
         self.assertEqual(actor["member_since"], identity_payload["member_since"])
         self.assertEqual(actor["apps"], [{"name": "Shared", "description": "public app"}])
         self.assertEqual(set(seen_paths), {"/api/identity", "/api/apps/"})
+    finally:
+      server.shutdown()
+      thread.join()
+      server.server_close()
+
+  def test_bootstrap_returns_board_identity_and_registration_in_one_request(self):
+    class Handler(BaseHTTPRequestHandler):
+      def do_GET(self):
+        if self.headers.get("Authorization") != "Bearer test-app-token":
+          self.send_error(401)
+          return
+        if self.path == "/api/identity":
+          payload = {"profile": {"handle": "owner", "display_name": "Owner"}}
+        elif self.path == "/api/apps/":
+          payload = []
+        else:
+          self.send_error(404)
+          return
+        encoded = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+      def log_message(self, _format, *_args):
+        pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        common = root / "apps/7/server/common"
+        common.mkdir(parents=True)
+        (common / "identity.json").write_text(json.dumps({
+          "name": "Owner", "handle": "owner", "joined_at": 1,
+          "community_host": "self.example",
+        }))
+        result = self.call(
+          root, "bootstrap", actor={"scope": "owner", "delegated": False},
+          query={"community_host": ["self.example"]},
+          api_base_url=f"http://127.0.0.1:{server.server_port}",
+        )
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["body"]["feed"], {
+          "host": "self.example",
+          "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
+          "posts": [],
+        })
+        self.assertEqual(result["body"]["me"]["handle"], "owner")
+        self.assertEqual(result["body"]["me"]["registration"], "missing")
     finally:
       server.shutdown()
       thread.join()
