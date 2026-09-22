@@ -94,6 +94,24 @@ function ParticipationNotice({ me, state, busy, onJoin, onAccount, onCheck }) {
   )
 }
 
+function MainNavigation({ className = '', tab, unread, boardActivity, onSelect }) {
+  return (
+    <nav className={`cn-nav ${className}`.trim()} aria-label="Main navigation">
+      <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-current={tab === 'board' ? 'page' : undefined} onClick={() => onSelect('board')}>
+        {boardActivity && <span className="cn-nav-dot" aria-label="New board activity" />}
+        <Globe aria-hidden="true" /><span>Board</span>
+      </button>
+      <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} aria-current={tab === 'messages' ? 'page' : undefined} onClick={() => onSelect('messages')}>
+        {unread > 0 && <span className="cn-badge">{unread}</span>}
+        <Chat aria-hidden="true" /><span>Messages</span>
+      </button>
+      <button className={`cn-nav-item${tab === 'people' ? ' is-active' : ''}`} aria-current={tab === 'people' ? 'page' : undefined} onClick={() => onSelect('people')}>
+        <Users aria-hidden="true" /><span>People</span>
+      </button>
+    </nav>
+  )
+}
+
 export default function App({ appId, token }) {
   api.setToken(token)
 
@@ -508,27 +526,18 @@ export default function App({ appId, token }) {
           {appIconUrl
             ? <img className="cn-app-icon" src={appIconUrl} alt="" draggable="false" />
             : <span className="cn-mark" aria-hidden="true"><span className="cn-mark-orbit" /></span>}
-          <h1 className="cn-title">{tab === 'board' ? 'Home' : tab === 'messages' ? 'Messages' : 'People'}</h1>
+          <h1 className="cn-title">Social</h1>
         </div>
+        <MainNavigation className="cn-nav-wide" tab={tab} unread={unread}
+                        boardActivity={boardActivity} onSelect={setTab} />
         <div className="cn-header-chip">
           <Avatar name={me?.handle || '?'} host={me?.host} size="small" remote />
           <span>{me?.handle ? `@${me.handle}` : 'Browsing'}</span>
         </div>
       </header>
 
-      <nav className="cn-nav" aria-label="Main navigation">
-        <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-current={tab === 'board' ? 'page' : undefined} onClick={() => setTab('board')}>
-          {boardActivity && <span className="cn-nav-dot" aria-label="New board activity" />}
-          <Globe aria-hidden="true" /><span>Board</span>
-        </button>
-        <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} aria-current={tab === 'messages' ? 'page' : undefined} onClick={() => setTab('messages')}>
-          {unread > 0 && <span className="cn-badge">{unread}</span>}
-          <Chat aria-hidden="true" /><span>Messages</span>
-        </button>
-        <button className={`cn-nav-item${tab === 'people' ? ' is-active' : ''}`} aria-current={tab === 'people' ? 'page' : undefined} onClick={() => setTab('people')}>
-          <Users aria-hidden="true" /><span>People</span>
-        </button>
-      </nav>
+      <MainNavigation className="cn-nav-mobile" tab={tab} unread={unread}
+                      boardActivity={boardActivity} onSelect={setTab} />
 
       <div className="cn-scroll">
         <div className="cn-content">

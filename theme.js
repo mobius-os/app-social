@@ -18,7 +18,7 @@ export const CSS = `
 }
 /* /mobius-ui:Root */
 .cn-scroll { order: 1; padding: 0 16px 104px; }
-.cn-content { width: 100%; max-width: 680px; margin: 0 auto; }
+.cn-content { width: 100%; max-width: 720px; margin: 0 auto; }
 .cn-screen { animation: cn-screen-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .cn-screen.has-dialog { animation: none; transform: none; }
 @keyframes cn-screen-in {
@@ -30,13 +30,13 @@ export const CSS = `
 .cn-header {
   flex: 0 0 auto; position: relative; z-index: 20;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  min-height: 68px; padding: 12px 16px;
-  width: min(100%, 712px); margin-inline: auto;
+  min-height: 64px; padding: 9px 16px;
+  width: min(100%, 752px); margin-inline: auto;
   background: var(--bg);
 }
 .cn-header::after {
   content: ""; position: absolute; left: 16px; right: 16px; bottom: 0;
-  height: 1px; background: var(--border); opacity: 0.7;
+  height: 1px; background: var(--border);
 }
 .cn-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .cn-app-icon {
@@ -65,7 +65,7 @@ export const CSS = `
 .cn-mark-orbit::before { top: -3px; left: 2px; }
 .cn-mark-orbit::after { right: -3px; bottom: 1px; }
 .cn-title {
-  margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.03em;
+  margin: 0; font-size: 20px; font-weight: 680; letter-spacing: -0.035em;
 }
 .cn-header-chip {
   display: inline-flex; align-items: center; gap: 8px;
@@ -84,7 +84,7 @@ export const CSS = `
 
 /* ── Avatars: dimensional gradient discs ────────────────────────────────── */
 .cn-avatar {
-  width: 42px; height: 42px; border-radius: 50%; flex: 0 0 auto;
+  width: 40px; height: 40px; border-radius: 50%; flex: 0 0 auto;
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 760; color: #fff; letter-spacing: -0.02em;
   position: relative; overflow: hidden;
@@ -122,19 +122,23 @@ export const CSS = `
 }
 
 /* ── Board: tighter, timeline-style rows ────────────────────────────────── */
-.cn-feed { border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent); }
+.cn-feed { border-top: 1px solid var(--border); }
 .cn-post {
-  padding: 14px 0 5px; position: relative; cursor: pointer;
+  display: grid; grid-template-columns: 44px minmax(0, 1fr); column-gap: 10px;
+  padding: 12px 6px 8px; margin-inline: -6px; border-radius: 10px;
+  position: relative; cursor: pointer;
   transition: background .14s ease;
 }
-.cn-post:hover { background: color-mix(in srgb, var(--surface) 34%, transparent); }
-.cn-post.has-thread { background: color-mix(in srgb, var(--surface) 26%, transparent); }
+.cn-post:hover { background: color-mix(in srgb, var(--surface) 58%, transparent); }
+.cn-post.has-thread { background: color-mix(in srgb, var(--surface) 44%, transparent); }
 .cn-post + .cn-post::before {
-  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-  background: var(--border); opacity: 0.65;
+  content: ""; position: absolute; top: 0; left: 6px; right: 6px; height: 1px;
+  background: var(--border); opacity: 0.85;
 }
 .cn-post.is-pending { cursor: default; }
-.cn-post-head { display: flex; align-items: flex-start; gap: 11px; }
+.cn-post > .cn-avatar, .cn-post > .cn-avatar-btn { grid-column: 1; grid-row: 1; align-self: start; }
+.cn-post-main { grid-column: 2; min-width: 0; }
+.cn-post-head { min-height: 24px; display: flex; align-items: flex-start; }
 .cn-post.is-mine .cn-post-head { padding-right: 44px; }
 .cn-post-delete {
   position: absolute; top: 7px; right: 0;
@@ -151,13 +155,13 @@ export const CSS = `
   font-family: var(--font); cursor: pointer; min-height: 24px; min-width: 0;
   display: flex; align-items: baseline; gap: 4px;
 }
-.cn-person-name { font-size: 14.5px; font-weight: 720; line-height: 1.25; letter-spacing: -0.01em; }
+.cn-person-name { font-size: 14px; font-weight: 700; line-height: 1.25; letter-spacing: -0.018em; }
 .cn-meta { font-size: 13px; color: var(--muted); }
 .cn-post-dot { color: var(--muted); font-size: 13px; }
-.cn-post-body { margin: -15px 0 0 53px; min-width: 0; }
+.cn-post-body { min-width: 0; }
 .cn-post-copy {
   font-size: 15px; line-height: 1.45; margin: 0;
-  letter-spacing: -0.004em; white-space: pre-wrap;
+  letter-spacing: -0.01em; white-space: pre-wrap;
 }
 .cn-pending-status { font-variant-numeric: tabular-nums; }
 .cn-pending-image {
@@ -169,12 +173,12 @@ export const CSS = `
 .cn-pending-gallery img { width: 100%; height: 100%; display: block; object-fit: cover; }
 
 /* Reactions + compose */
-.cn-post-actions { display: flex; align-items: center; gap: 6px; margin: 6px 0 0 -10px; max-width: 460px; }
+.cn-post-actions { display: flex; align-items: center; gap: 4px; margin: 4px 0 0 -8px; max-width: 460px; }
 .cn-react {
   display: inline-flex; align-items: center; gap: 6px;
-  min-height: 44px; min-width: 44px; padding: 0 12px; border-radius: 12px;
+  min-height: 44px; min-width: 44px; padding: 0 12px; border-radius: 8px;
   border: 0; background: transparent; color: var(--muted);
-  font-family: var(--font); font-size: 12.5px; font-weight: 680; cursor: pointer;
+  font-family: var(--font); font-size: 12.5px; font-weight: 650; cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
 .cn-react:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
@@ -188,15 +192,21 @@ export const CSS = `
 .cn-reply-summary { padding-inline: 5px 10px; }
 .cn-reactions { position: relative; display: flex; align-items: center; gap: 5px; min-width: 0; }
 .cn-reaction-chip {
-  min-width: 38px; min-height: 34px; padding: 3px 9px; border-radius: 9px;
+  width: 44px; min-width: 44px; height: 44px; padding: 0; border-radius: 10px;
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
-  background: transparent; color: var(--muted); font: 650 12px var(--font); cursor: pointer;
-  transition: background .14s ease, border-color .14s ease, transform .1s ease;
+  border: 0; background: transparent; color: var(--muted); font: 650 12px var(--font); cursor: pointer;
+  transition: transform .1s ease;
 }
-.cn-reaction-chip:hover { background: var(--surface); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.cn-reaction-visual {
+  min-width: 30px; height: 30px; padding: 3px 7px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  background: transparent;
+  transition: background .14s ease, border-color .14s ease;
+}
+.cn-reaction-chip:hover .cn-reaction-visual { background: var(--surface); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .cn-reaction-chip:active { transform: scale(.94); }
-.cn-reaction-chip.is-reacted {
+.cn-reaction-chip.is-reacted .cn-reaction-visual {
   border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
   background: color-mix(in srgb, var(--accent) 11%, transparent); color: var(--accent);
 }
@@ -217,7 +227,7 @@ export const CSS = `
 }
 .cn-reaction-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
 .cn-reaction-grid button {
-  width: 40px; height: 38px; padding: 0; border: 0; border-radius: 8px;
+  width: 44px; height: 44px; padding: 0; border: 0; border-radius: 9px;
   background: transparent; font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
   font-size: 20px; cursor: pointer; transition: background .12s ease, transform .12s ease;
 }
@@ -271,9 +281,9 @@ export const CSS = `
 .cn-confirm-sheet { max-width: 420px; }
 .cn-compose-fab {
   position: absolute; z-index: 45;
-  right: max(18px, calc((100% - 680px) / 2 + 18px));
+  right: max(20px, calc((100% - 720px) / 2 + 20px));
   bottom: calc(82px + env(safe-area-inset-bottom));
-  width: 58px; height: 58px; padding: 0; border: 0; border-radius: 50%;
+  width: 52px; height: 52px; padding: 0; border: 0; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   background: var(--accent); color: var(--accent-fg); cursor: pointer;
   box-shadow: none;
@@ -730,6 +740,7 @@ export const CSS = `
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
   border-top: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
 }
+.cn-nav-wide { display: none; }
 .cn-nav-item {
   flex: 1; min-height: 56px; border: 0; background: transparent; border-radius: 10px;
   color: var(--muted); display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -949,8 +960,8 @@ export const CSS = `
 .cn-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--accent-fg); }
 .cn-btn-icon { width: 44px; padding: 0; border-radius: 8px; font-size: 18px; }
 /* /mobius-ui:Button */
-.cn-btn { border-radius: 13px; }
-.cn-btn-block { width: 100%; min-height: 50px; border-radius: 16px; font-size: 15px; }
+.cn-btn { border-radius: 8px; font-weight: 650; }
+.cn-btn-block { width: 100%; min-height: 50px; border-radius: 10px; font-size: 15px; }
 
 /* mobius-ui:Input v1 — keep in sync; library candidate. Diverge below the marker only. */
 .cn-input, .cn-textarea {
@@ -1028,10 +1039,30 @@ export const CSS = `
 }
 /* /mobius-ui:ReducedMotion */
 
-/* Wide panes keep the same bottom navigation as narrow panes. The stable
-   placement preserves muscle memory when a workspace pane is resized. */
 @media (min-width: 720px) {
-  .cn-header { min-height: 80px; }
+  .cn-header {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    min-height: 64px;
+  }
+  .cn-brand { grid-column: 1; grid-row: 1; }
+  .cn-header-chip { grid-column: 3; grid-row: 1; justify-self: end; max-width: 100%; }
+  .cn-nav-mobile { display: none; }
+  .cn-nav-wide {
+    grid-column: 2; grid-row: 1; display: flex; align-self: center;
+    width: auto; margin: 0; padding: 3px; gap: 2px;
+    background: color-mix(in srgb, var(--surface) 70%, transparent);
+    border: 1px solid var(--border); border-radius: 11px;
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  .cn-nav-wide .cn-nav-item {
+    flex: 0 0 auto; min-width: 92px; min-height: 44px; padding: 0 11px;
+    flex-direction: row; gap: 7px; border-radius: 8px; font-size: 12.5px;
+  }
+  .cn-nav-wide .cn-nav-item svg { width: 18px; height: 18px; }
+  .cn-nav-wide .cn-badge { top: -3px; right: 2px; }
+  .cn-nav-wide .cn-nav-dot { top: 3px; right: 5px; }
+  .cn-scroll { padding-bottom: 32px; }
+  .cn-compose-fab { bottom: 20px; }
   .cn-scrim { align-items: center; padding: 24px; }
   .cn-sheet { border-radius: 16px; max-width: 540px; max-height: min(85vh, 760px); box-shadow: none; }
   .cn-grabber { display: none; }
@@ -1057,7 +1088,7 @@ export const CSS = `
   .cn-reaction-picker { width: 242px; }
   .cn-reaction-grid { grid-template-columns: repeat(5, 1fr); }
   .cn-reaction-picker { left: -44px; }
-  .cn-inline-thread { height: min(340px, 46vh); margin-left: -53px; }
+  .cn-inline-thread { height: min(340px, 46vh); }
 }
 
 /* Member picker rows */
@@ -1096,37 +1127,12 @@ export const CSS = `
 .cn-danger-text { color: var(--danger); }
 .cn-group-closed { padding: 18px 24px max(18px, env(safe-area-inset-bottom)); text-align: center; font-size: 14px; line-height: 1.5; color: var(--muted); border-top: 1px solid var(--border); }
 .cn-directory-error li { overflow-wrap: anywhere; }
-.cn-content { max-width: 720px; }
-.cn-header { min-height: 74px; padding-block: 14px; width: min(100%, 752px); }
-.cn-header::after { left: 16px; right: 16px; opacity: 1; }
-.cn-title { font-size: 22px; font-weight: 680; letter-spacing: -0.04em; }
 .cn-list-top { padding: 30px 0 17px; }
 .cn-list-title { font-size: 29px; font-weight: 680; letter-spacing: -0.045em; }
-.cn-feed { border-top-color: var(--border); }
-.cn-post { padding: 18px 10px 12px; margin-inline: -10px; border-radius: 12px; }
-.cn-post:hover { background: color-mix(in srgb, var(--surface) 58%, transparent); }
-.cn-post.has-thread { background: color-mix(in srgb, var(--surface) 44%, transparent); }
-.cn-post + .cn-post::before { left: 10px; right: 10px; opacity: .85; }
-.cn-avatar { width: 40px; height: 40px; }
-.cn-post-head { gap: 12px; }
-.cn-post-body { margin-left: 52px; }
-.cn-person-name { font-size: 14px; font-weight: 700; letter-spacing: -0.018em; }
-.cn-post-copy { font-size: 15px; line-height: 1.52; letter-spacing: -0.01em; }
-.cn-post-actions { margin-top: 8px; }
-.cn-react { border-radius: 8px; font-weight: 650; }
-.cn-reaction-chip { border-radius: 8px; }
-.cn-btn { border-radius: 8px; font-weight: 650; }
-.cn-btn-block { border-radius: 10px; }
-.cn-compose-fab { width: 54px; height: 54px; right: max(20px, calc((100% - 720px) / 2 + 20px)); box-shadow: none; }
 @media (max-width: 640px) {
   .cn-scroll { padding-inline: 16px; }
-  .cn-header { min-height: 66px; }
-  .cn-title { font-size: 20px; }
   .cn-list-top { padding-top: 23px; }
   .cn-list-title { font-size: 26px; }
-  .cn-post { padding-inline: 6px; margin-inline: -6px; border-radius: 10px; }
-  .cn-post + .cn-post::before { left: 6px; right: 6px; }
-  .cn-post-body { margin-left: 52px; }
   .cn-compose-fab { right: 18px; }
 }
 `

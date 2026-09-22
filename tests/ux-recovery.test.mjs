@@ -128,13 +128,28 @@ test('confirmed deletion never restores focus to the disappearing trigger', () =
   assert.match(focus, /if \(restore && opener/)
 })
 
-test('main navigation stays in the bottom-tab position at every width', () => {
+test('navigation uses one component in a stable desktop toolbar and mobile tab bar', () => {
+  const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
   const wide = theme.slice(theme.indexOf('@media (min-width: 720px)'), theme.indexOf('@media (max-width: 480px)'))
-  assert.match(theme, /\.cn-nav \{\s*order: 2;/)
-  assert.match(theme, /width: min\(100%, 712px\); margin-inline: auto;/)
-  assert.doesNotMatch(wide, /\.cn-nav\s*\{/)
-  assert.doesNotMatch(wide, /\.cn-compose-fab\s*\{/)
+  assert.match(app, /function MainNavigation\(/)
+  assert.match(app, /className="cn-nav-wide"/)
+  assert.match(app, /className="cn-nav-mobile"/)
+  assert.match(app, /<h1 className="cn-title">Social<\/h1>/)
+  assert.match(theme, /\.cn-nav-wide \{ display: none; \}/)
+  assert.match(wide, /\.cn-nav-mobile \{ display: none; \}/)
+  assert.match(wide, /\.cn-nav-wide \{[\s\S]*grid-column: 2; grid-row: 1; display: flex;/)
+  assert.match(wide, /\.cn-nav-wide \.cn-nav-item \{[\s\S]*min-height: 44px;/)
+  assert.match(wide, /\.cn-compose-fab \{ bottom: 20px; \}/)
+})
+
+test('compact reaction visuals keep real 44 pixel controls', () => {
+  const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
+  const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
+  assert.match(board, /className="cn-reaction-visual"/)
+  assert.match(theme, /\.cn-reaction-chip \{[\s\S]*width: 44px;[\s\S]*height: 44px;/)
+  assert.match(theme, /\.cn-reaction-visual \{[\s\S]*height: 30px;/)
+  assert.match(theme, /\.cn-reaction-grid button \{\s*width: 44px; height: 44px;/)
 })
 test('handle search accepts the displayed @handle form and surrounding spaces', async () => {
   const original = globalThis.fetch
