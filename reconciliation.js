@@ -15,20 +15,6 @@ export function reconcileReplies(authoritative, current) {
   return [...landed, ...pending].sort(chronological)
 }
 
-export function optimisticLikeChange(post, override) {
-  const current = override || {
-    liked: Boolean(post?.liked),
-    count: Number(post?.like_count || 0),
-  }
-  return {
-    current,
-    next: {
-      liked: !current.liked,
-      count: Math.max(0, current.count + (current.liked ? -1 : 1)),
-    },
-  }
-}
-
 export const BOARD_REACTION_EMOJIS = [
   '❤️', '👍', '👎', '😂', '😮', '😢', '😡', '🎉', '🚀', '👀', '🙌', '🔥',
   '✅', '💯', '🤔', '👏', '🙏', '💪', '🤝', '✨', '😍', '🤯', '🫡', '🫶',

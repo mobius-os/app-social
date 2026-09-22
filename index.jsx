@@ -202,7 +202,9 @@ export default function App({ appId, token }) {
       acceptFeed(result.feed?.posts || [], false, result.feed?.capabilities)
       setMe(result.me || null)
       setMeState('ready')
-      if (!result.me?.connected) loadMe({ background: true })
+      // Bootstrap paints saved identity immediately; the account owner still
+      // reconciles every launch so a connected profile cannot remain stale.
+      loadMe({ background: true })
       return true
     } catch {
       // A partially updated installation still gets the established separate

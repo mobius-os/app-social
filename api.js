@@ -75,8 +75,6 @@ export const getBoardMedia = (postId, index, { thumbnail = false } = {}) =>
       : `board-media/${encodeURIComponent(postId)}/${index}?${browseQuery}&thumbnail=${thumbnail ? 'true' : 'false'}`,
     {}, 'blob',
   )
-export const likePost = (postId) =>
-  call('like', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
 export const reactToPost = (postId, emoji) =>
   call('reaction', { method: 'POST', body: JSON.stringify({ post_id: postId, emoji }) })
 export const deletePost = (postId) =>

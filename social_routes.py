@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import base64
 import asyncio
+import fcntl
 import hashlib
 import json
 import logging
@@ -59,6 +60,7 @@ import re
 import time
 import uuid
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -101,11 +103,10 @@ _log = logging.getLogger(__name__)
 
 APP_SLUG = "social"
 PEER_AVATAR_CACHE_TTL_S = 24 * 3600
-# An unreachable peer or one with no avatar should not cost a federation
-# timeout on every request (the service runs one process per request, so an
-# in-memory negative cache would not survive); a short-lived on-disk miss marker
-# does.
+# A confirmed absence can cool down longer than a transient failure. Both need
+# on-disk markers because each service request runs in a fresh process.
 PEER_AVATAR_MISS_TTL_S = 15 * 60
+PEER_AVATAR_FAILURE_TTL_S = 45
 # Peer avatars are re-encoded to a small validated raster before caching, so a
 # malicious raster never reaches the browser and cached blobs stay tiny.
 AVATAR_MAX_SIDE = 128
@@ -130,7 +131,6 @@ _find_image = _public_store.find_image
 _serve_image = _public_store.serve_image
 _read_board = _public_store.read_board
 _store_board_post = _public_store.store_post
-_toggle_board_like = _public_store.toggle_like
 _toggle_board_reaction = _public_store.toggle_reaction
 _add_board_reply = _public_store.add_reply
 _fetch_actor = _actor_verifier.fetch_actor
@@ -164,6 +164,11 @@ def _peer_avatar_miss_path(host: str) -> Path:
   return _peers_dir() / "avatars" / f"{safe}.miss"
 
 
+def _peer_avatar_failure_path(host: str) -> Path:
+  safe = re.sub(r"[^a-z0-9.-]", "_", host)
+  return _peers_dir() / "avatars" / f"{safe}.fail"
+
+
 def _mark_avatar_miss(host: str) -> None:
   try:
     atomic_write(_peer_avatar_miss_path(host), b"")
@@ -171,11 +176,40 @@ def _mark_avatar_miss(host: str) -> None:
     pass
 
 
-def _clear_avatar_miss(host: str) -> None:
+def _mark_avatar_failure(host: str) -> None:
   try:
-    _peer_avatar_miss_path(host).unlink()
+    atomic_write(_peer_avatar_failure_path(host), b"")
   except OSError:
     pass
+
+
+def _clear_avatar_markers(host: str) -> None:
+  for path in (_peer_avatar_miss_path(host), _peer_avatar_failure_path(host)):
+    try:
+      path.unlink()
+    except OSError:
+      pass
+
+
+def _recent_marker(path: Path, ttl: float, now: float) -> bool:
+  try:
+    return path.is_file() and now - path.stat().st_mtime < ttl
+  except OSError:
+    return False
+
+
+@contextmanager
+def _peer_avatar_decode_lock():
+  """Bound raster decode memory across the service's per-request processes."""
+  path = _peers_dir() / "avatars" / ".decode.lock"
+  path.parent.mkdir(parents=True, exist_ok=True)
+  # Keep this inode permanent: unlinking a lock can create two lock owners.
+  with path.open("a+b") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+      yield
+    finally:
+      fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _peer_board_media_dir() -> Path:
@@ -923,6 +957,17 @@ def _serve_avatar(path: Path, media_type: str = "image/png") -> FileResponse:
       "X-Content-Type-Options": "nosniff",
     },
   )
+
+
+def _temporarily_unavailable_avatar(
+  host: str, cache: Path, cause: Exception,
+) -> FileResponse:
+  _mark_avatar_failure(host)
+  if cache.is_file():
+    return _serve_avatar(cache, "image/webp")
+  raise HTTPException(
+    status_code=502, detail="Peer avatar is temporarily unavailable.",
+  ) from cause
 
 
 @router.get("/avatar")
@@ -1968,39 +2013,45 @@ async def get_peer_avatar(
   # Serve a fresh cached avatar without any federation hop (the common path).
   if cache.is_file() and now - cache.stat().st_mtime < PEER_AVATAR_CACHE_TTL_S:
     return _serve_avatar(cache, "image/webp")
-  # A recent miss (offline peer or no avatar) short-circuits before we spend
-  # another federation timeout, unless a stale cache is still available.
+  # A recently confirmed absence short-circuits without another federation hop.
   miss = _peer_avatar_miss_path(host)
-  if (
-    not cache.is_file()
-    and miss.is_file()
-    and now - miss.stat().st_mtime < PEER_AVATAR_MISS_TTL_S
-  ):
+  if _recent_marker(miss, PEER_AVATAR_MISS_TTL_S, now):
     raise HTTPException(status_code=404, detail="Peer avatar not found.")
-  try:
-    actor = await _fetch_actor(host)
-  except Exception:
+  failure = _peer_avatar_failure_path(host)
+  if _recent_marker(failure, PEER_AVATAR_FAILURE_TTL_S, now):
     if cache.is_file():
       return _serve_avatar(cache, "image/webp")
-    _mark_avatar_miss(host)
-    raise HTTPException(status_code=404, detail="Peer avatar not found.")
+    raise HTTPException(
+      status_code=502, detail="Peer avatar is temporarily unavailable.",
+    )
+  try:
+    actor = await _fetch_actor(host)
+  except Exception as exc:
+    return _temporarily_unavailable_avatar(host, cache, exc)
   if actor.get("avatar") is not True:
-    # The peer removed their avatar: honor it promptly instead of serving stale.
+    # Once the positive cache expires, a confirmed removal supersedes stale data.
     if cache.is_file():
       cache.unlink(missing_ok=True)
+    _clear_avatar_markers(host)
     _mark_avatar_miss(host)
     raise HTTPException(status_code=404, detail="Peer avatar not found.")
   try:
     raw = await _download_avatar(_peer_service_url(host, "avatar"))
-    # Untrusted peer bytes: validate and re-encode through the same #21 guards
-    # (rejects SVG, oversized dimensions and decompression bombs) and shrink to
-    # an avatar-sized WebP before it is ever cached or served.
-    _mime, encoded = image_thumbnail_bytes(raw, AVATAR_MAX_SIDE)
+    # Keep network fetches concurrent but serialize memory-heavy raster decode
+    # across the short-lived workers. This preserves the established #21 input
+    # contract while preventing four worst-case images from expanding at once.
+    with _peer_avatar_decode_lock():
+      _mime, encoded = image_thumbnail_bytes(raw, AVATAR_MAX_SIDE)
     atomic_write(cache, encoded)
-    _clear_avatar_miss(host)
-  except Exception:
-    if cache.is_file():
-      return _serve_avatar(cache, "image/webp")
-    _mark_avatar_miss(host)
-    raise HTTPException(status_code=404, detail="Peer avatar not found.")
+    _clear_avatar_markers(host)
+  except httpx.HTTPStatusError as exc:
+    if exc.response.status_code == 404:
+      if cache.is_file():
+        cache.unlink(missing_ok=True)
+      _clear_avatar_markers(host)
+      _mark_avatar_miss(host)
+      raise HTTPException(status_code=404, detail="Peer avatar not found.") from exc
+    return _temporarily_unavailable_avatar(host, cache, exc)
+  except Exception as exc:
+    return _temporarily_unavailable_avatar(host, cache, exc)
   return _serve_avatar(cache, "image/webp")

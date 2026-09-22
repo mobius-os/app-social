@@ -3,7 +3,6 @@ import test from 'node:test'
 
 import {
   boardRefreshDelay,
-  optimisticLikeChange,
   optimisticReactionChange,
   reactionState,
   reconcileReplies,
@@ -33,15 +32,7 @@ test('a canonical id never appears twice during reconciliation', () => {
   ])
 })
 
-test('a failed follow-up like can restore the last confirmed local state', () => {
-  const confirmed = { liked: true, count: 3 }
-  const change = optimisticLikeChange({ liked: false, like_count: 2 }, confirmed)
-
-  assert.deepEqual(change.next, { liked: false, count: 2 })
-  assert.strictEqual(change.current, confirmed)
-})
-
-test('emoji reactions optimistically change only the selected reaction', () => {
+test('emoji reactions isolate the selected reaction and preserve rollback state', () => {
   const post = { reactions: [
     { emoji: '❤️', count: 2, reacted: false },
     { emoji: '🎉', count: 1, reacted: true },
@@ -51,6 +42,10 @@ test('emoji reactions optimistically change only the selected reaction', () => {
   assert.deepEqual(next['❤️'], current['❤️'])
   assert.deepEqual(next['🎉'], { count: 0, reacted: false })
   assert.deepEqual(reactionState(post, next), next)
+
+  const followUp = optimisticReactionChange(post, next, '🎉')
+  assert.strictEqual(followUp.current, next)
+  assert.deepEqual(followUp.next['🎉'], { count: 1, reacted: true })
 })
 
 test('visible Social surfaces refresh quickly after activity and relax when idle', () => {
