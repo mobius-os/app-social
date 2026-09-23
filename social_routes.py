@@ -219,6 +219,56 @@ def _peer_avatar_decode_lock():
       fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+_avatar_decode_gate = None
+_avatar_decode_gate_loop = None
+
+
+def _current_avatar_decode_gate() -> asyncio.Lock:
+  """Return one in-process gate so timed-out requests do not queue workers."""
+  global _avatar_decode_gate, _avatar_decode_gate_loop
+  loop = asyncio.get_running_loop()
+  if _avatar_decode_gate is None or _avatar_decode_gate_loop is not loop:
+    _avatar_decode_gate = asyncio.Lock()
+    _avatar_decode_gate_loop = loop
+  return _avatar_decode_gate
+
+
+def _decode_avatar_sync(raw: bytes) -> tuple[str, bytes]:
+  """Own the file lock for the entire raster decode, even after cancellation."""
+  with _peer_avatar_decode_lock():
+    return image_thumbnail_bytes(raw, AVATAR_MAX_SIDE, AVATAR_MAX_PIXELS)
+
+
+def _consume_cancelled_decode(task: asyncio.Task) -> None:
+  try:
+    task.result()
+  except (asyncio.CancelledError, Exception):
+    pass
+
+
+async def _decode_avatar(raw: bytes) -> tuple[str, bytes]:
+  """Decode off-loop with one active worker and cancellation-safe lock ownership."""
+  started = False
+
+  async def run() -> tuple[str, bytes]:
+    nonlocal started
+    async with _current_avatar_decode_gate():
+      started = True
+      return await asyncio.to_thread(_decode_avatar_sync, raw)
+
+  task = asyncio.create_task(run())
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    if not started:
+      task.cancel()
+    else:
+      # The worker owns the lock until PIL returns; consume its eventual result
+      # without keeping the timed-out request alive or leaking task exceptions.
+      task.add_done_callback(_consume_cancelled_decode)
+    raise
+
+
 def _peer_board_media_dir() -> Path:
   path = _peers_dir() / "board-media"
   path.mkdir(parents=True, exist_ok=True)
@@ -2075,10 +2125,7 @@ async def _resolve_peer_avatar(host: str) -> tuple[Path, str]:
     # Keep network fetches concurrent but serialize memory-heavy raster decode
     # across short-lived workers. This preserves the established #21 input
     # contract without expanding multiple untrusted rasters at once.
-    with _peer_avatar_decode_lock():
-      _mime, encoded = image_thumbnail_bytes(
-        raw, AVATAR_MAX_SIDE, AVATAR_MAX_PIXELS,
-      )
+    _mime, encoded = await _decode_avatar(raw)
     atomic_write(cache, encoded)
     _clear_avatar_markers(host)
   except httpx.HTTPStatusError as exc:

@@ -6,9 +6,9 @@ import {
 } from '../avatarCache.js'
 
 const wire = (byte) => ({ mime: 'image/webp', data_b64: Buffer.from([byte]).toString('base64') })
-const response = (avatars = {}) => ({
+const response = (avatars = {}, missing = []) => ({
   ok: true,
-  json: async () => ({ avatars, missing: [], unavailable: [] }),
+  json: async () => ({ avatars, missing, unavailable: [] }),
 })
 
 test('avatar cache batches peers, serializes batches, and tracks authoritative profile changes', async () => {
@@ -97,6 +97,50 @@ test('avatar cache batches peers, serializes batches, and tracks authoritative p
     }
     assert.ok(revoked.length > revokedBeforePrune)
   } finally {
+    globalThis.fetch = originalFetch
+    URL.createObjectURL = originalCreate
+    URL.revokeObjectURL = originalRevoke
+  }
+})
+
+test('expired mounted avatar refreshes stale-while-refresh and clears confirmed removal', async () => {
+  const originalFetch = globalThis.fetch
+  const originalCreate = URL.createObjectURL
+  const originalRevoke = URL.revokeObjectURL
+  const originalNow = Date.now
+  const revoked = []
+  let now = 1_000_000
+  let first = true
+  Date.now = () => now
+  URL.createObjectURL = () => 'blob:expiry-avatar'
+  URL.revokeObjectURL = url => revoked.push(url)
+  try {
+    globalThis.fetch = async (_url, options) => {
+      const hosts = JSON.parse(options.body).hosts
+      if (first) {
+        first = false
+        return response({ 'expiry.example': wire(7) })
+      }
+      return response({}, hosts.includes('expiry.example') ? hosts : [])
+    }
+    const record = cachedAvatar('expiry.example')
+    await record.promise
+    const oldUrl = cachedAvatarUrl('expiry.example')
+    const revokedBeforeRefresh = revoked.length
+    const updates = []
+    const unsubscribe = subscribeAvatar(record, url => updates.push(url))
+
+    now += 24 * 60 * 60_000
+    const refreshing = cachedAvatar('expiry.example')
+    assert.equal(cachedAvatarUrl('expiry.example'), oldUrl)
+    await refreshing.promise
+
+    assert.equal(cachedAvatarUrl('expiry.example'), null)
+    assert.deepEqual(updates, [null])
+    assert.deepEqual(revoked.slice(revokedBeforeRefresh), [oldUrl])
+    unsubscribe()
+  } finally {
+    Date.now = originalNow
     globalThis.fetch = originalFetch
     URL.createObjectURL = originalCreate
     URL.revokeObjectURL = originalRevoke

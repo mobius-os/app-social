@@ -10,10 +10,16 @@ const monthYear = new Intl.DateTimeFormat(undefined, {
 
 export const AVATAR_FAILURE_RETRY_MS = 45_000
 export const AVATAR_NOT_FOUND_RETRY_MS = 15 * 60_000
+// The service's positive cache is authoritative for one day. Refreshing the
+// browser blob on that same boundary avoids permanent mounted-session staleness
+// without making requests that cannot yet discover a newer peer avatar.
+export const AVATAR_SUCCESS_RETRY_MS = 24 * 60 * 60_000
 
 export function avatarCacheIsFresh(record, now = Date.now()) {
   if (!record) return false
-  if (record.url || record.promise) return true
+  if (record.promise) return true
+  if (record.url && record.fetchedAt !== null
+      && now - record.fetchedAt < AVATAR_SUCCESS_RETRY_MS) return true
   if (record.notFoundAt) return now - record.notFoundAt < AVATAR_NOT_FOUND_RETRY_MS
   if (record.failedAt) return now - record.failedAt < AVATAR_FAILURE_RETRY_MS
   return false

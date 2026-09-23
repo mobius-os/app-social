@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   AVATAR_FAILURE_RETRY_MS, AVATAR_NOT_FOUND_RETRY_MS,
+  AVATAR_SUCCESS_RETRY_MS,
   avatarBlob, avatarCacheIsFresh, avatarFailureState, focusProfileReturnTarget,
   membershipDuration,
 } from '../profile.js'
@@ -29,6 +30,13 @@ test('avatar cache distinguishes retryable failures from confirmed absence', () 
   assert.equal(avatarCacheIsFresh(missing, now + AVATAR_NOT_FOUND_RETRY_MS), false)
   assert.equal(avatarCacheIsFresh(unavailable, now + AVATAR_FAILURE_RETRY_MS - 1), true)
   assert.equal(avatarCacheIsFresh(unavailable, now + AVATAR_FAILURE_RETRY_MS), false)
+})
+
+test('avatar cache refreshes a successful URL after its finite freshness window', () => {
+  const now = 1_000_000
+  const cached = { url: 'blob:avatar', fetchedAt: now }
+  assert.equal(avatarCacheIsFresh(cached, now + AVATAR_SUCCESS_RETRY_MS - 1), true)
+  assert.equal(avatarCacheIsFresh(cached, now + AVATAR_SUCCESS_RETRY_MS), false)
 })
 
 test('profile dismissal focuses the connected opener or the visible fallback', () => {
