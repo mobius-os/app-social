@@ -46,13 +46,7 @@ export default function Messages({
   return (
     <div className={`cn-content cn-screen${creating ? ' has-dialog' : ''}`}>
       <div className="cn-view-heading">
-        <div><h2>{showingRequests ? 'Message requests' : 'Messages'}</h2><p>{showingRequests
-          ? 'Quiet until you choose. Previewing never accepts a request.'
-          : 'Your accepted conversations, together.'}</p></div>
-        {!showingRequests && <div className="cn-view-actions">
-          <button className="cn-btn cn-btn-primary" onClick={onFindPeople}>New message</button>
-          <button className="cn-btn cn-btn-secondary" disabled={!canCreate} onClick={() => setCreating(true)}><Plus aria-hidden="true" /> New group</button>
-        </div>}
+        <div><h2>Messages</h2><p>Your accepted conversations and requests.</p></div>
       </div>
       <div className="cn-message-tabs" role="tablist" aria-label="Message inbox">
         <button type="button" role="tab" aria-selected={!showingRequests}
@@ -65,6 +59,10 @@ export default function Messages({
           Requests{requests.length ? <span className="cn-request-count">{requests.length}</span> : null}
         </button>
       </div>
+      {!showingRequests && <div className="cn-view-actions">
+        <button className="cn-btn cn-btn-primary" onClick={onFindPeople}>New message</button>
+        <button className="cn-btn cn-btn-secondary" disabled={!canCreate} onClick={() => setCreating(true)}><Plus aria-hidden="true" /> New group</button>
+      </div>}
       {!showingRequests && requests.length > 0 && (
         <button className="cn-request-banner" type="button" onClick={() => setView('requests')}>
           <span className="cn-request-banner-mark" aria-hidden="true"><Mail /></span>

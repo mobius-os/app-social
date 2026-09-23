@@ -74,6 +74,14 @@ export const CSS = `
   border: 1px solid var(--border); font-size: 12.5px; font-weight: 650;
   color: var(--muted);
 }
+.cn-header-chip.is-loading { width: 104px; }
+.cn-header-chip-avatar-skeleton, .cn-header-chip-line-skeleton {
+  display: block; flex: 0 0 auto;
+  background: color-mix(in srgb, var(--surface2, var(--surface)) 84%, transparent);
+  animation: cn-skeleton-pulse 1.4s ease-in-out infinite alternate;
+}
+.cn-header-chip-avatar-skeleton { width: 30px; height: 30px; border-radius: 50%; }
+.cn-header-chip-line-skeleton { width: 46px; height: 10px; border-radius: 5px; }
 
 /* Compact list header (messenger-style) */
 .cn-list-top {
@@ -362,7 +370,7 @@ export const CSS = `
 .cn-view-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 24px 0 18px; }
 .cn-view-heading h2 { margin: 0; font-size: 25px; line-height: 1.2; font-weight: 700; letter-spacing: -0.025em; }
 .cn-view-heading p { margin: 6px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
-.cn-view-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cn-view-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
 .cn-view-actions svg { width: 18px; height: 18px; }
 .cn-message-tabs {
   display: inline-flex; min-height: 44px; margin: 0 0 10px; padding: 3px; gap: 2px;
