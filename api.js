@@ -123,25 +123,83 @@ async function listStoredMessages(prefix) {
   return loaded.filter(Boolean).sort((a, b) => (a.sent_at || 0) - (b.sent_at || 0))
 }
 
-async function listHistory(path, fallbackPrefix, before) {
-  const query = new URLSearchParams({ limit: '50' })
-  if (before) query.set('before', before)
+const HISTORY_TIMEOUT_MS = 10_000
+
+function validHistoryPage(value) {
+  return value && Array.isArray(value.messages)
+    && (value.next_cursor === null || typeof value.next_cursor === 'string')
+}
+
+async function readCachedHistory(path) {
+  const store = window.mobius?.storage
+  if (!store) return null
   try {
-    return await call(`${path}?${query}`)
-  } catch (error) {
-    // Keep already-cached history readable offline. Online service failures
-    // remain visible rather than being mistaken for an empty conversation.
-    if (before || error.status) throw error
-    return {
-      messages: await listStoredMessages(fallbackPrefix),
-      next_cursor: null,
-    }
+    const value = await store.get(path)
+    return validHistoryPage(value) ? value : null
+  } catch {
+    return null
   }
 }
+
+async function writeCachedHistory(path, page) {
+  const store = window.mobius?.storage
+  if (!store || typeof store.set !== 'function') return
+  try { await store.set(path, page) } catch { /* history remains canonical */ }
+}
+
+// Serialize advisory writes per conversation so a late response cannot replace
+// the newest page that the current view accepted.
+const historyCacheState = new Map()
+
+function beginHistoryRefresh(path) {
+  const state = historyCacheState.get(path) || {
+    generation: 0,
+    write: Promise.resolve(),
+  }
+  state.generation += 1
+  historyCacheState.set(path, state)
+  return { state, generation: state.generation }
+}
+
+function persistLatestHistory(path, page, refresh) {
+  refresh.state.write = refresh.state.write.then(async () => {
+    if (refresh.state.generation !== refresh.generation) return
+    await writeCachedHistory(path, page)
+  })
+}
+
+async function listHistory(path, fallbackPrefix, cachePath, before) {
+  const query = new URLSearchParams({ limit: '50' })
+  if (before) query.set('before', before)
+  const refresh = before ? null : beginHistoryRefresh(cachePath)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), HISTORY_TIMEOUT_MS)
+  try {
+    const page = await call(`${path}?${query}`, { signal: controller.signal })
+    if (!before) persistLatestHistory(cachePath, page, refresh)
+    return page
+  } catch (error) {
+    // A snapshot only speeds first paint. Canonical per-message records own
+    // offline recovery, so an older snapshot cannot hide a newer saved message.
+    if (before || error.status) throw error
+    const messages = (await listStoredMessages(fallbackPrefix)).slice(-50)
+    if (messages.length) return { messages, next_cursor: null }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+const directHistoryCachePath = peer => `cache/message-history/dm/${encodeURIComponent(peer)}.json`
+const groupHistoryCachePath = gid => `cache/message-history/group/${encodeURIComponent(gid)}.json`
+
+export const getCachedMessages = peer => readCachedHistory(directHistoryCachePath(peer))
+export const getCachedGroupMessages = gid => readCachedHistory(groupHistoryCachePath(gid))
 
 export const listMessages = (peer, before = null) => listHistory(
   `conversations/${encodeURIComponent(peer)}/messages`,
   `conversations/${peer}/msgs/`,
+  directHistoryCachePath(peer),
   before,
 )
 
@@ -193,6 +251,7 @@ export async function getGroup(gid) {
 export const listGroupMessages = (gid, before = null) => listHistory(
   `groups/${encodeURIComponent(gid)}/messages`,
   `groups/${gid}/msgs/`,
+  groupHistoryCachePath(gid),
   before,
 )
 

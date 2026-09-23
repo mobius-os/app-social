@@ -537,7 +537,10 @@ export const CSS = `
 .cn-message-avatar .cn-avatar { margin-bottom: 2px; }
 .cn-message-line > .cn-bubble { align-self: auto; max-width: calc(100% - 50px); }
 .cn-message-line.is-theirs > .cn-bubble { max-width: calc(100% - 86px); }
-.cn-bubble-copy { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cn-bubble-copy {
+  display: block; white-space: pre-wrap; overflow-wrap: anywhere;
+  user-select: text; -webkit-user-select: text; cursor: text;
+}
 .cn-bubble.has-attachment {
   width: min(68vw, 340px); padding: 4px; overflow: hidden;
 }
@@ -558,6 +561,7 @@ export const CSS = `
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 8%, var(--surface));
   color: var(--text); white-space: normal;
+  user-select: text; -webkit-user-select: text; cursor: text;
 }
 .cn-bubble.is-mine .cn-quote {
   border-color: color-mix(in srgb, var(--accent-fg) 32%, transparent);
@@ -686,9 +690,7 @@ export const CSS = `
 .cn-selected-thumb button svg { width: 13px; height: 13px; }
 
 @media (hover: none) {
-  .cn-bubble-reply { display: none; }
-  .cn-message-line.is-mine > .cn-bubble { max-width: 88%; }
-  .cn-message-line.is-theirs > .cn-bubble { max-width: calc(100% - 38px); }
+  .cn-bubble-reply { opacity: 1; pointer-events: auto; }
 }
 
 /* ── People / profile ───────────────────────────────────────────────────── */
@@ -994,6 +996,7 @@ export const CSS = `
 @media (prefers-reduced-motion: reduce) { .cn-spinner { animation: none; } }
 /* /mobius-ui:Spinner */
 .cn-center { display: flex; align-items: center; justify-content: center; padding: 48px 0; }
+.cn-history-loading { flex-direction: column; gap: 10px; color: var(--muted); font-size: 13px; }
 
 /* mobius-ui:Focus v1 — keep in sync; library candidate. Required once per app. */
 :where(button, a, input, textarea, select, summary, [role="button"],

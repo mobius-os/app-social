@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  getGroup, listConversations, listGroupMessages, listGroups, listMessages,
+  getCachedGroupMessages, getCachedMessages, getGroup, listConversations,
+  listGroupMessages, listGroups, listMessages,
   requestStatus,
 } from '../api.js'
 
@@ -104,4 +105,151 @@ test('cached direct history remains readable when the local service is offline',
     ],
     next_cursor: null,
   })
+})
+
+test('an offline history miss remains visible instead of becoming a false empty conversation', async () => {
+  globalThis.fetch = async () => { throw new TypeError('offline') }
+  globalThis.window = { mobius: { storage: {
+    async get() { return null },
+    async list() { return [] },
+  } } }
+  await assert.rejects(() => listMessages('peer.example'), /offline/)
+})
+
+test('the newest direct history page is cached for an immediate reopen', async () => {
+  const writes = []
+  const page = { messages: [{ id: 'one', sent_at: 1 }], next_cursor: 'next' }
+  globalThis.window = { mobius: { storage: {
+    async set(path, value) { writes.push([path, value]) },
+    async get(path) {
+      assert.equal(path, 'cache/message-history/dm/peer.example.json')
+      return page
+    },
+  } } }
+  globalThis.fetch = async () => ({ ok: true, async json() { return page } })
+
+  assert.deepEqual(await listMessages('peer.example'), page)
+  await new Promise(setImmediate)
+  assert.deepEqual(writes, [['cache/message-history/dm/peer.example.json', page]])
+  assert.deepEqual(await getCachedMessages('peer.example'), page)
+})
+
+test('newer canonical direct history wins over an older first-paint snapshot offline', async () => {
+  const cached = { messages: [{ id: 'earlier', sent_at: 1 }], next_cursor: null }
+  globalThis.fetch = async () => { throw new TypeError('offline') }
+  globalThis.window = { mobius: { storage: {
+    async get(path) {
+      assert.equal(path, 'cache/message-history/dm/newer.example.json')
+      return cached
+    },
+    async list(path, options) {
+      assert.equal(path, 'conversations/newer.example/msgs/')
+      assert.deepEqual(options, { includeContent: true })
+      return [
+        { content: { id: 'earlier', sent_at: 1 } },
+        { content: { id: 'newer', sent_at: 2 } },
+      ]
+    },
+  } } }
+
+  assert.deepEqual(await getCachedMessages('newer.example'), cached)
+  assert.deepEqual(await listMessages('newer.example'), {
+    messages: [
+      { id: 'earlier', sent_at: 1 },
+      { id: 'newer', sent_at: 2 },
+    ],
+    next_cursor: null,
+  })
+})
+
+test('a stalled cache write cannot delay a successful direct history read', async () => {
+  const page = { messages: [{ id: 'current', sent_at: 1 }], next_cursor: null }
+  globalThis.fetch = async () => ({ ok: true, async json() { return page } })
+  globalThis.window = { mobius: { storage: {
+    async set() { return new Promise(() => {}) },
+  } } }
+
+  const result = await Promise.race([
+    listMessages('stalled-write.example'),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('cache write blocked history')), 50)),
+  ])
+  assert.deepEqual(result, page)
+})
+
+test('reversed direct responses cannot regress the persisted latest page', async () => {
+  const responses = []
+  const writes = []
+  const older = { messages: [{ id: 'older', sent_at: 1 }], next_cursor: null }
+  const newer = { messages: [{ id: 'newer', sent_at: 2 }], next_cursor: null }
+  globalThis.fetch = async () => new Promise((resolve) => responses.push(resolve))
+  globalThis.window = { mobius: { storage: {
+    async set(path, page) { writes.push([path, page]) },
+  } } }
+
+  const first = listMessages('reversed.example')
+  const second = listMessages('reversed.example')
+  responses[1]({ ok: true, async json() { return newer } })
+  assert.deepEqual(await second, newer)
+  responses[0]({ ok: true, async json() { return older } })
+  assert.deepEqual(await first, older)
+  await new Promise(setImmediate)
+
+  assert.deepEqual(writes, [[
+    'cache/message-history/dm/reversed.example.json', newer,
+  ]])
+})
+
+test('group snapshots are first-paint hints while canonical history owns offline recovery', async () => {
+  const cached = { messages: [{ id: 'earlier', sent_at: 1 }], next_cursor: 'older' }
+  globalThis.fetch = async () => { throw new TypeError('offline') }
+  globalThis.window = { mobius: { storage: {
+    async get(path) {
+      assert.equal(path, 'cache/message-history/group/group-1.json')
+      return cached
+    },
+    async list(path, options) {
+      assert.equal(path, 'groups/group-1/msgs/')
+      assert.deepEqual(options, { includeContent: true })
+      return [
+        { content: { id: 'earlier', sent_at: 1 } },
+        { content: { id: 'newer', sent_at: 2 } },
+      ]
+    },
+  } } }
+
+  assert.deepEqual(await getCachedGroupMessages('group-1'), cached)
+  assert.deepEqual(await listGroupMessages('group-1'), {
+    messages: [
+      { id: 'earlier', sent_at: 1 },
+      { id: 'newer', sent_at: 2 },
+    ],
+    next_cursor: null,
+  })
+})
+
+test('a stalled history request ends at its deadline and uses canonical saved messages', async () => {
+  const originalSetTimeout = globalThis.setTimeout
+  const originalClearTimeout = globalThis.clearTimeout
+  const saved = { id: 'saved', sent_at: 1 }
+  globalThis.window = { mobius: { storage: {
+    async list(path, options) {
+      assert.equal(path, 'conversations/timeout.example/msgs/')
+      assert.deepEqual(options, { includeContent: true })
+      return [{ content: saved }]
+    },
+  } } }
+  globalThis.setTimeout = (callback) => { queueMicrotask(callback); return 1 }
+  globalThis.clearTimeout = () => {}
+  globalThis.fetch = (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+  })
+
+  try {
+    assert.deepEqual(await listMessages('timeout.example'), {
+      messages: [saved], next_cursor: null,
+    })
+  } finally {
+    globalThis.setTimeout = originalSetTimeout
+    globalThis.clearTimeout = originalClearTimeout
+  }
 })
