@@ -95,6 +95,24 @@ function ParticipationNotice({ me, state, busy, onJoin, onAccount, onCheck }) {
   )
 }
 
+function MainNavigation({ className = '', tab, unread, boardActivity, onSelect }) {
+  return (
+    <nav className={`cn-nav ${className}`.trim()} aria-label="Main navigation">
+      <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-current={tab === 'board' ? 'page' : undefined} onClick={() => onSelect('board')}>
+        {boardActivity && <span className="cn-nav-dot" aria-label="New board activity" />}
+        <Globe aria-hidden="true" /><span>Board</span>
+      </button>
+      <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} aria-current={tab === 'messages' ? 'page' : undefined} onClick={() => onSelect('messages')}>
+        {unread > 0 && <span className="cn-badge">{unread}</span>}
+        <Chat aria-hidden="true" /><span>Messages</span>
+      </button>
+      <button className={`cn-nav-item${tab === 'people' ? ' is-active' : ''}`} aria-current={tab === 'people' ? 'page' : undefined} onClick={() => onSelect('people')}>
+        <Users aria-hidden="true" /><span>People</span>
+      </button>
+    </nav>
+  )
+}
+
 export default function App({ appId, token }) {
   api.setToken(token)
 
@@ -104,6 +122,10 @@ export default function App({ appId, token }) {
   const [feed, setFeed] = useState([])
   const [feedState, setFeedState] = useState('loading')
   const [feedHasEarlier, setFeedHasEarlier] = useState(false)
+  const [feedNextCursor, setFeedNextCursor] = useState(null)
+  // Keep the cursor tri-state: undefined means a legacy response with no
+  // stable boundary, while null explicitly means the first page is complete.
+  const feedNextCursorRef = useRef(undefined)
   const [feedCapabilities, setFeedCapabilities] = useState({})
   const [conversations, setConversations] = useState([])
   const [groups, setGroups] = useState([])
@@ -166,19 +188,25 @@ export default function App({ appId, token }) {
     }
   }
 
-  const acceptFeed = useCallback((posts, background = false, capabilities = null) => {
+  const acceptFeed = useCallback((
+    posts, background = false, capabilities = null, nextCursor = undefined,
+  ) => {
     freshFeedLoaded.current = true
     setFeed((current) => {
       if (!background) return posts
       return reconcileFeedPage(posts, current, api.BOARD_PAGE_SIZE)
     })
     if (!background || posts.length < api.BOARD_PAGE_SIZE) {
-      setFeedHasEarlier(posts.length === api.BOARD_PAGE_SIZE)
+      const stableCursor = nextCursor !== undefined
+      setFeedHasEarlier(stableCursor ? Boolean(nextCursor) : posts.length === api.BOARD_PAGE_SIZE)
+      setFeedNextCursor(stableCursor ? nextCursor : null)
+      feedNextCursorRef.current = nextCursor
     }
     setFeedState('ready')
     if (capabilities) setFeedCapabilities(capabilities)
     window.mobius?.storage?.set('cache/board.json', {
       posts: posts.slice(0, api.BOARD_PAGE_SIZE),
+      next_cursor: nextCursor === undefined ? feedNextCursorRef.current : nextCursor,
       cached_at: Date.now(),
     }).catch(() => null)
     if (!readySignalled.current) {
@@ -191,7 +219,7 @@ export default function App({ appId, token }) {
     try {
       const result = await api.getFeed()
       const posts = result.posts || []
-      acceptFeed(posts, background, result.capabilities)
+      acceptFeed(posts, background, result.capabilities, result.next_cursor)
       return true
     } catch {
       if (!background) setFeedState('error')
@@ -203,7 +231,10 @@ export default function App({ appId, token }) {
     try {
       const result = await api.getBootstrap()
       primeAvatar(result.me?.host, result.me?.avatar)
-      acceptFeed(result.feed?.posts || [], false, result.feed?.capabilities)
+      acceptFeed(
+        result.feed?.posts || [], false, result.feed?.capabilities,
+        result.feed?.next_cursor,
+      )
       setMe(result.me || null)
       setMeState('ready')
       // Bootstrap paints saved identity immediately; the account owner still
@@ -220,15 +251,18 @@ export default function App({ appId, token }) {
   }
 
   const loadEarlierFeed = useCallback(async (before) => {
-    const result = await api.getFeed(before)
+    const result = await api.getFeed(feedNextCursor || before)
     const older = result.posts || []
     setFeed((current) => {
       const seen = new Set(current.map((post) => post.id))
       return [...current, ...older.filter((post) => !seen.has(post.id))]
     })
-    setFeedHasEarlier(older.length === api.BOARD_PAGE_SIZE)
+    const stableCursor = result.next_cursor !== undefined
+    setFeedHasEarlier(stableCursor ? Boolean(result.next_cursor) : older.length === api.BOARD_PAGE_SIZE)
+    setFeedNextCursor(stableCursor ? result.next_cursor : null)
+    feedNextCursorRef.current = result.next_cursor
     return older.length
-  }, [])
+  }, [feedNextCursor])
 
   const acceptPublishedPost = useCallback((post) => {
     setFeed((current) => [post, ...current.filter((item) => item.id !== post.id)])
@@ -258,7 +292,15 @@ export default function App({ appId, token }) {
       .then((cached) => {
         if (freshFeedLoaded.current || !Array.isArray(cached?.posts)) return
         setFeed(cached.posts)
-        setFeedHasEarlier(cached.posts.length === api.BOARD_PAGE_SIZE)
+        const cachedCursor = cached.next_cursor === null || typeof cached.next_cursor === 'string'
+          ? cached.next_cursor : undefined
+        feedNextCursorRef.current = cachedCursor
+        setFeedNextCursor(cachedCursor ?? null)
+        setFeedHasEarlier(
+          cachedCursor !== undefined
+            ? Boolean(cachedCursor)
+            : cached.posts.length === api.BOARD_PAGE_SIZE,
+        )
         setFeedState('ready')
       })
       .catch(() => null)
@@ -511,27 +553,18 @@ export default function App({ appId, token }) {
           {appIconUrl
             ? <img className="cn-app-icon" src={appIconUrl} alt="" draggable="false" />
             : <span className="cn-mark" aria-hidden="true"><span className="cn-mark-orbit" /></span>}
-          <h1 className="cn-title">{tab === 'board' ? 'Home' : tab === 'messages' ? 'Messages' : 'People'}</h1>
+          <h1 className="cn-title">Social</h1>
         </div>
+        <MainNavigation className="cn-nav-wide" tab={tab} unread={unread}
+                        boardActivity={boardActivity} onSelect={setTab} />
         <div className="cn-header-chip">
           <Avatar name={me?.handle || '?'} host={me?.host} size="small" remote />
           <span>{me?.handle ? `@${me.handle}` : 'Browsing'}</span>
         </div>
       </header>
 
-      <nav className="cn-nav" aria-label="Main navigation">
-        <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-current={tab === 'board' ? 'page' : undefined} onClick={() => setTab('board')}>
-          {boardActivity && <span className="cn-nav-dot" aria-label="New board activity" />}
-          <Globe aria-hidden="true" /><span>Board</span>
-        </button>
-        <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} aria-current={tab === 'messages' ? 'page' : undefined} onClick={() => setTab('messages')}>
-          {unread > 0 && <span className="cn-badge">{unread}</span>}
-          <Chat aria-hidden="true" /><span>Messages</span>
-        </button>
-        <button className={`cn-nav-item${tab === 'people' ? ' is-active' : ''}`} aria-current={tab === 'people' ? 'page' : undefined} onClick={() => setTab('people')}>
-          <Users aria-hidden="true" /><span>People</span>
-        </button>
-      </nav>
+      <MainNavigation className="cn-nav-mobile" tab={tab} unread={unread}
+                      boardActivity={boardActivity} onSelect={setTab} />
 
       <div className="cn-scroll">
         <div className="cn-content">

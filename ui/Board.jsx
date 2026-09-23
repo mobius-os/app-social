@@ -861,31 +861,33 @@ export default function Board({
       <div className="cn-feed">
         {pending && (
           <article className="cn-post is-pending" aria-label="Posting">
-            <div className="cn-post-head">
-              <Avatar name={pending.handle} host={pending.host} remote />
-              <span className="cn-person">
-                <span className="cn-person-name">
-                  {pending.handle ? `@${pending.handle}` : 'You'}
+            <Avatar name={pending.handle} host={pending.host} remote />
+            <div className="cn-post-main">
+              <div className="cn-post-head">
+                <span className="cn-person">
+                  <span className="cn-person-name">
+                    {pending.handle ? `@${pending.handle}` : 'You'}
+                  </span>
+                  <span className="cn-post-dot" aria-hidden="true">·</span>
+                  <span className="cn-meta cn-pending-status">
+                    {pending.phase === 'preparing' ? 'Preparing photo…' : 'Sending…'}
+                  </span>
                 </span>
-                <span className="cn-post-dot" aria-hidden="true">·</span>
-                <span className="cn-meta cn-pending-status">
-                  {pending.phase === 'preparing' ? 'Preparing photo…' : 'Sending…'}
-                </span>
-              </span>
-            </div>
-            <div className="cn-post-body">
-              {pending.text && <RichText text={pending.text} className="cn-post-copy" preview />}
-              {!!pending.images?.length && (
-                <div className={pending.images.length === 1
-                  ? 'cn-pending-image'
-                  : `cn-gallery cn-gallery-${pending.images.length} cn-pending-gallery`}>
-                  {pending.images.map((image, index) => (
-                    <div className={pending.images.length === 1 ? undefined : 'cn-gallery-item'} key={index}>
-                      <img src={image.url} alt={`Post photo ${index + 1}`} />
-                    </div>
-                  ))}
-                </div>
-              )}
+              </div>
+              <div className="cn-post-body">
+                {pending.text && <RichText text={pending.text} className="cn-post-copy" preview />}
+                {!!pending.images?.length && (
+                  <div className={pending.images.length === 1
+                    ? 'cn-pending-image'
+                    : `cn-gallery cn-gallery-${pending.images.length} cn-pending-gallery`}>
+                    {pending.images.map((image, index) => (
+                      <div className={pending.images.length === 1 ? undefined : 'cn-gallery-item'} key={index}>
+                        <img src={image.url} alt={`Post photo ${index + 1}`} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </article>
         )}
@@ -904,25 +906,26 @@ export default function Board({
                      onClick={(event) => {
                        if (!event.target.closest('button, input, textarea, a')) openReplies(post)
                      }}>
-              <div className="cn-post-head">
-                <Avatar name={post.handle} host={post.host} remote lazy onOpen={togglePreview} />
-                <button className="cn-person" onClick={togglePreview}>
-                  <span className="cn-person-name">{post.handle ? `@${post.handle}` : 'Social member'}</span>
-                  <span className="cn-post-dot" aria-hidden="true">·</span>
-                  <span className="cn-meta">{postDateTime(post.created_at)}</span>
-                </button>
-                {me?.host && post.host === me.host && (
-                  <button
-                    className="cn-post-delete"
-                    onClick={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }}
-                    aria-label="Delete post"
-                    title="Delete post"
-                  >
-                    <Trash aria-hidden="true" />
+              <Avatar name={post.handle} host={post.host} remote lazy onOpen={togglePreview} />
+              <div className="cn-post-main">
+                <div className="cn-post-head">
+                  <button className="cn-person" onClick={togglePreview}>
+                    <span className="cn-person-name">{post.handle ? `@${post.handle}` : 'Social member'}</span>
+                    <span className="cn-post-dot" aria-hidden="true">·</span>
+                    <span className="cn-meta">{postDateTime(post.created_at)}</span>
                   </button>
-                )}
-              </div>
-              <div className="cn-post-body">
+                  {me?.host && post.host === me.host && (
+                    <button
+                      className="cn-post-delete"
+                      onClick={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }}
+                      aria-label="Delete post"
+                      title="Delete post"
+                    >
+                      <Trash aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+                <div className="cn-post-body">
                 {previewPost?.id === post.id && (
                   <ProfilePreview host={post.host} seed={{ host: post.host, handle: post.handle }}
                                   onClose={() => setPreviewPost(null)}
@@ -968,8 +971,10 @@ export default function Board({
                               : continueParticipation('like', { postId: post.id, emoji })}
                             disabled={handoffBusy || participationBusy}
                             aria-label={`${reactions[emoji].reacted ? 'Remove' : 'Add'} ${emoji} reaction`}>
-                      <FlatEmoji emoji={emoji} />
-                      {reactions[emoji].count > 0 && <b>{reactions[emoji].count}</b>}
+                      <span className="cn-reaction-visual">
+                        <FlatEmoji emoji={emoji} />
+                        {reactions[emoji].count > 0 && <b>{reactions[emoji].count}</b>}
+                      </span>
                     </button>
                   ))}
                   {(emojiReactions || visibleReactions.length === 0) && (
@@ -1045,6 +1050,7 @@ export default function Board({
                     </form>
                   </section>
                 )}
+                </div>
               </div>
             </article>
           )

@@ -16,10 +16,13 @@ cross-process file locks, and every installed file is written atomically.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import io
 import json
 import fcntl
+import math
 import sqlite3
 import threading
 import time
@@ -79,6 +82,21 @@ IMAGE_FORMAT_MIME = {
 
 class BoardImageTooLarge(ValueError):
   """A raster must be rejected before decoding or storing its media."""
+
+
+def _board_record_position(record: dict) -> tuple[float, str] | None:
+  """Return the one stable feed position for a readable Board record."""
+  post_id = record.get("id")
+  if not isinstance(post_id, str) or not post_id:
+    return None
+  created_at = record.get("created_at", 0)
+  if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+    return 0.0, post_id
+  try:
+    created_at = float(created_at)
+  except OverflowError:
+    return 0.0, post_id
+  return (created_at if math.isfinite(created_at) else 0.0), post_id
 
 
 def _open_board_image(data: bytes) -> Image.Image:
@@ -208,30 +226,31 @@ class CommonPublicStore:
       pass
 
   @contextmanager
-  def _board_index(self):
+  def _board_index(self, *, initialize: bool = False):
     connection = sqlite3.connect(self.board_index_path(), timeout=5.0)
     try:
       connection.row_factory = sqlite3.Row
-      connection.execute("PRAGMA journal_mode=WAL")
       connection.execute("PRAGMA synchronous=NORMAL")
       connection.execute("PRAGMA busy_timeout=5000")
-      connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS board_posts (
-          id TEXT PRIMARY KEY,
-          created_at REAL NOT NULL,
-          record_json TEXT NOT NULL,
-          source_mtime_ns INTEGER NOT NULL,
-          source_size INTEGER NOT NULL
-        ) WITHOUT ROWID
-        """
-      )
-      connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS board_posts_feed
-        ON board_posts(created_at DESC, id DESC)
-        """
-      )
+      if initialize:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+          """
+          CREATE TABLE IF NOT EXISTS board_posts (
+            id TEXT PRIMARY KEY,
+            created_at REAL NOT NULL,
+            record_json TEXT NOT NULL,
+            source_mtime_ns INTEGER NOT NULL,
+            source_size INTEGER NOT NULL
+          ) WITHOUT ROWID
+          """
+        )
+        connection.execute(
+          """
+          CREATE INDEX IF NOT EXISTS board_posts_feed
+          ON board_posts(created_at DESC, id DESC)
+          """
+        )
       yield connection
       connection.commit()
     except Exception:
@@ -241,12 +260,13 @@ class CommonPublicStore:
       connection.close()
 
   @staticmethod
-  def _board_record_values(record: dict, stat) -> tuple:
-    created_at = record.get("created_at", 0)
-    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
-      created_at = 0
+  def _board_record_values(record: dict, stat) -> tuple | None:
+    position = _board_record_position(record)
+    if position is None:
+      return None
+    created_at, post_id = position
     return (
-      str(record.get("id") or ""), float(created_at),
+      post_id, created_at,
       json.dumps(record, separators=(",", ":")),
       int(stat.st_mtime_ns), int(stat.st_size),
     )
@@ -283,7 +303,7 @@ class CommonPublicStore:
       # Reconciliation and file mutations share the cross-process board lock,
       # so a late startup scan can never overwrite a newer mirrored mutation.
       with self._mutation_lock(self._board_lock, "board"):
-        with self._board_index() as connection:
+        with self._board_index(initialize=True) as connection:
           existing = {
             row["id"]: (row["source_mtime_ns"], row["source_size"])
             for row in connection.execute(
@@ -309,9 +329,11 @@ class CommonPublicStore:
             if record.get("id") != post_id:
               invalid.add(post_id)
               continue
-            self._upsert_board_record(
-              connection, self._board_record_values(record, stat),
-            )
+            values = self._board_record_values(record, stat)
+            if values is None:
+              invalid.add(post_id)
+              continue
+            self._upsert_board_record(connection, values)
           stale = (set(existing) - seen) | invalid
           connection.executemany(
             "DELETE FROM board_posts WHERE id = ?",
@@ -327,9 +349,10 @@ class CommonPublicStore:
     try:
       stat = path.stat()
       with self._board_index() as connection:
-        self._upsert_board_record(
-          connection, self._board_record_values(record, stat),
-        )
+        values = self._board_record_values(record, stat)
+        if values is None:
+          return False
+        self._upsert_board_record(connection, values)
       return True
     except (OSError, sqlite3.Error):
       self._board_index_ready = False
@@ -348,7 +371,13 @@ class CommonPublicStore:
 
   @staticmethod
   def _present_board_record(raw: dict, viewer: str | None) -> dict:
+    position = _board_record_position(raw)
+    if position is None:
+      raise ValueError("Board record has no stable position.")
+    created_at, post_id = position
     post = dict(raw)
+    post["id"] = post_id
+    post["created_at"] = created_at
     reactions = CommonPublicStore._reaction_hosts(post)
     post.pop("likes", None)
     post.pop("reactions", None)
@@ -389,7 +418,7 @@ class CommonPublicStore:
     return post
 
   def _read_board_files(
-    self, limit: int, before: float | None, viewer: str | None,
+    self, limit: int, before: tuple[float, str] | None, viewer: str | None,
   ) -> list[dict]:
     """Availability fallback used only when the disposable index is broken."""
     posts = []
@@ -398,11 +427,16 @@ class CommonPublicStore:
         raw = self._load_object(file)
       except HTTPException:
         continue
-      if before is not None and raw.get("created_at", 0) >= before:
+      if raw.get("id") != file.stem:
         continue
-      posts.append(self._present_board_record(raw, viewer))
-    posts.sort(key=lambda post: post.get("created_at", 0), reverse=True)
-    return posts[:limit]
+      position = _board_record_position(raw)
+      if position is None:
+        continue
+      if before is not None and position >= before:
+        continue
+      posts.append((position, self._present_board_record(raw, viewer)))
+    posts.sort(key=lambda item: item[0], reverse=True)
+    return [post for _position, post in posts[:limit]]
 
   def _board_count(self) -> int:
     if not self._board_index_ready:
@@ -493,12 +527,13 @@ class CommonPublicStore:
     return {"status": "registered"}
 
   def read_board(
-    self, limit: int, before: float | None, viewer: str | None = None,
+    self, limit: int, before: tuple[float, str] | None,
+    viewer: str | None = None,
   ) -> list[dict]:
     try:
       self._ensure_board_index()
-      where = "WHERE created_at < ?" if before is not None else ""
-      parameters = (before, limit) if before is not None else (limit,)
+      where = "WHERE (created_at, id) < (?, ?)" if before is not None else ""
+      parameters = (*before, limit) if before is not None else (limit,)
       with self._board_index() as connection:
         rows = connection.execute(
           f"""
@@ -513,7 +548,7 @@ class CommonPublicStore:
         self._present_board_record(json.loads(row["record_json"]), viewer)
         for row in rows
       ]
-    except (json.JSONDecodeError, sqlite3.Error):
+    except (ValueError, json.JSONDecodeError, sqlite3.Error):
       self._board_index_ready = False
       return self._read_board_files(limit, before, viewer)
 
@@ -832,6 +867,67 @@ class CommonPublicStore:
       return {"status": "deleted"}
 
 
+def _decode_board_cursor(cursor: str | None) -> tuple[float, str] | None:
+  """Decode a stable Board position, while accepting legacy timestamps."""
+  if not cursor:
+    return None
+  try:
+    legacy_timestamp = float(cursor)
+    if math.isfinite(legacy_timestamp):
+      # An empty id preserves the old strict `created_at < timestamp` boundary.
+      return legacy_timestamp, ""
+  except (TypeError, ValueError):
+    pass
+  try:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    created_at, post_id = json.loads(base64.urlsafe_b64decode(padded).decode())
+    if (
+      not isinstance(created_at, (int, float))
+      or isinstance(created_at, bool)
+      or not math.isfinite(created_at)
+      or not isinstance(post_id, str)
+      or not post_id
+    ):
+      raise ValueError
+    return float(created_at), post_id
+  except (
+    ValueError, TypeError, OverflowError, UnicodeDecodeError, json.JSONDecodeError,
+    binascii.Error,
+  ) as exc:
+    raise ValueError("Board cursor is invalid.") from exc
+
+
+def _encode_board_cursor(created_at: float, post_id: str) -> str:
+  payload = json.dumps([created_at, post_id], separators=(",", ":")).encode()
+  return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def read_board_page(
+  store: CommonPublicStore, limit: int, before: str | None,
+  viewer: str | None = None,
+) -> dict:
+  """Return one stable page shared by public and owner-facing Board routes."""
+  try:
+    cursor = _decode_board_cursor(before)
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+  page_size = min(max(limit, 1), BOARD_PAGE_LIMIT)
+  posts = store.read_board(page_size + 1, cursor, viewer)
+  has_more = len(posts) > page_size
+  posts = posts[:page_size]
+  next_cursor = None
+  if has_more and posts:
+    last = posts[-1]
+    position = _board_record_position(last)
+    if position is not None:
+      next_cursor = _encode_board_cursor(*position)
+  return {
+    "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
+    "posts": posts,
+    "next_cursor": next_cursor,
+  }
+
+
 def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
   on_activity=None,
@@ -866,16 +962,11 @@ def create_public_router(
 
   @router.get("/board")
   def get_board(
-    limit: int = 30, before: float | None = None, viewer: str | None = None,
+    limit: int = 30, before: str | None = None, viewer: str | None = None,
   ):
     if viewer is not None and not valid_host(viewer):
       viewer = None
-    return {
-      "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
-      "posts": store.read_board(
-        min(max(limit, 1), BOARD_PAGE_LIMIT), before, viewer,
-      )
-    }
+    return read_board_page(store, limit, before, viewer)
 
   @router.get("/board/media/{post_id}")
   def get_board_media(post_id: str):
@@ -1010,5 +1101,5 @@ def create_public_router(
 __all__ = [
   "BOARD_LIKE_LIMIT", "BOARD_PAGE_LIMIT", "BOARD_POST_LIMIT", "BOARD_REPLY_LIMIT",
   "CommonPublicStore", "DIRECTORY_LIMIT", "REACTION_REPLAY_LIMIT",
-  "REACTION_REPLAY_TTL_S", "create_public_router",
+  "REACTION_REPLAY_TTL_S", "create_public_router", "read_board_page",
 ]
