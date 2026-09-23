@@ -45,8 +45,6 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
     with patch.object(
       social_routes, "_require_owner_or_common_app", return_value=None,
     ), patch.object(
-      social_routes, "_own_host", return_value="self.example",
-    ), patch.object(
       social_routes, "_peers_dir", return_value=self.root,
     ), patch.object(social_routes, "_own_host", return_value="self.example"):
       yield
