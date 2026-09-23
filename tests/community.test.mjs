@@ -43,6 +43,20 @@ test('board paging forwards an opaque stable cursor unchanged', async () => {
   } finally { globalThis.fetch = previous }
 })
 
+test('board paging preserves a zero legacy boundary in the network query', async () => {
+  const api = await import('../api.js')
+  const previous = globalThis.fetch
+  let request
+  globalThis.fetch = async (url) => {
+    request = new URL(url, 'https://local.example')
+    return { ok: true, json: async () => ({ posts: [] }) }
+  }
+  try {
+    await api.getFeed(0)
+    assert.equal(request.searchParams.get('before'), '0')
+  } finally { globalThis.fetch = previous }
+})
+
 test('joining automatically sets the canonical community destination', async () => {
   const calls = []
   await joinGlobalCommunity(fresh, async value => {

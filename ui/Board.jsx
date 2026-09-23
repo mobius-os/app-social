@@ -331,7 +331,7 @@ export default function Board({
 
   async function loadEarlierPosts() {
     const before = feed.at(-1)?.created_at
-    if (!before || loadingEarlier) return
+    if (before === null || before === undefined || loadingEarlier) return
     setLoadingEarlier(true)
     setEarlierError('')
     try {

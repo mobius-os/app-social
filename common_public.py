@@ -60,6 +60,9 @@ DIRECTORY_LIMIT = 2000
 # bound durable abuse instead: an operator can raise them after provisioning
 # more storage, while existing imported records remain readable at any size.
 BOARD_POST_LIMIT = 10_000
+# The SQLite index is disposable, but unchanged file metadata can otherwise
+# preserve rows written with obsolete canonical-position semantics.
+BOARD_INDEX_NORMALIZATION_VERSION = 1
 # Verification accepts timestamps up to one skew window in the future and
 # one in the past. Retain a token for both windows from first receipt, so it
 # cannot expire while that same signed envelope is still admissible.
@@ -251,6 +254,12 @@ class CommonPublicStore:
           ON board_posts(created_at DESC, id DESC)
           """
         )
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version != BOARD_INDEX_NORMALIZATION_VERSION:
+          connection.execute("DELETE FROM board_posts")
+          connection.execute(
+            f"PRAGMA user_version = {BOARD_INDEX_NORMALIZATION_VERSION}"
+          )
       yield connection
       connection.commit()
     except Exception:
@@ -287,6 +296,49 @@ class CommonPublicStore:
       values,
     )
 
+  def _reconcile_board_index_locked(self) -> None:
+    with self._board_index(initialize=True) as connection:
+      existing = {
+        row["id"]: (row["source_mtime_ns"], row["source_size"])
+        for row in connection.execute(
+          "SELECT id, source_mtime_ns, source_size FROM board_posts"
+        )
+      }
+      seen = set()
+      invalid = set()
+      for path in self.board_dir().glob("*.json"):
+        post_id = path.stem
+        seen.add(post_id)
+        try:
+          stat = path.stat()
+        except OSError:
+          continue
+        if existing.get(post_id) == (stat.st_mtime_ns, stat.st_size):
+          continue
+        try:
+          record = self._load_object(path)
+        except HTTPException:
+          invalid.add(post_id)
+          continue
+        if record.get("id") != post_id:
+          invalid.add(post_id)
+          continue
+        values = self._board_record_values(record, stat)
+        if values is None:
+          invalid.add(post_id)
+          continue
+        self._upsert_board_record(connection, values)
+      stale = (set(existing) - seen) | invalid
+      connection.executemany(
+        "DELETE FROM board_posts WHERE id = ?",
+        ((post_id,) for post_id in stale),
+      )
+
+  def _discard_board_index_locked(self) -> None:
+    path = self.board_index_path()
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+      candidate.unlink(missing_ok=True)
+
   def _ensure_board_index(self) -> None:
     """Reconcile the fast read model with the rollback-safe JSON records.
 
@@ -303,42 +355,13 @@ class CommonPublicStore:
       # Reconciliation and file mutations share the cross-process board lock,
       # so a late startup scan can never overwrite a newer mirrored mutation.
       with self._mutation_lock(self._board_lock, "board"):
-        with self._board_index(initialize=True) as connection:
-          existing = {
-            row["id"]: (row["source_mtime_ns"], row["source_size"])
-            for row in connection.execute(
-              "SELECT id, source_mtime_ns, source_size FROM board_posts"
-            )
-          }
-          seen = set()
-          invalid = set()
-          for path in self.board_dir().glob("*.json"):
-            post_id = path.stem
-            seen.add(post_id)
-            try:
-              stat = path.stat()
-            except OSError:
-              continue
-            if existing.get(post_id) == (stat.st_mtime_ns, stat.st_size):
-              continue
-            try:
-              record = self._load_object(path)
-            except HTTPException:
-              invalid.add(post_id)
-              continue
-            if record.get("id") != post_id:
-              invalid.add(post_id)
-              continue
-            values = self._board_record_values(record, stat)
-            if values is None:
-              invalid.add(post_id)
-              continue
-            self._upsert_board_record(connection, values)
-          stale = (set(existing) - seen) | invalid
-          connection.executemany(
-            "DELETE FROM board_posts WHERE id = ?",
-            ((post_id,) for post_id in stale),
-          )
+        try:
+          self._reconcile_board_index_locked()
+        except sqlite3.DatabaseError:
+          # The index is disposable. Rebuild it once under the same
+          # cross-process lock instead of scanning every JSON file forever.
+          self._discard_board_index_locked()
+          self._reconcile_board_index_locked()
         self._clear_board_index_dirty()
       self._board_index_ready = True
 
@@ -439,7 +462,7 @@ class CommonPublicStore:
     return [post for _position, post in posts[:limit]]
 
   def _board_count(self) -> int:
-    if not self._board_index_ready:
+    if not self._board_index_ready or self.board_index_dirty_path().is_file():
       return sum(1 for _ in self.board_dir().glob("*.json"))
     try:
       with self._board_index() as connection:

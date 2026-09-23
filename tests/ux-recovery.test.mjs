@@ -78,7 +78,7 @@ test('public board startup is not gated by identity and avoids oversized empty-s
   assert.doesNotMatch(bootstrap, /if \(!result\.me\?\.connected\)/)
   assert.match(app, /reconcileFeedPage\(posts, current, api\.BOARD_PAGE_SIZE\)/)
   assert.match(app, /loadEarlierFeed/)
-  assert.match(app, /feedNextCursor \|\| before/)
+  assert.match(app, /feedNextCursor \?\? before/)
   assert.match(app, /next_cursor !== undefined/)
   assert.match(app, /next_cursor: nextCursor === undefined \? feedNextCursorRef\.current : nextCursor/)
   assert.match(app, /const cachedCursor = cached\.next_cursor === null \|\| typeof cached\.next_cursor === 'string'/)
@@ -88,6 +88,7 @@ test('public board startup is not gated by identity and avoids oversized empty-s
   assert.match(app, /cn-compose-fab/)
   assert.match(board, /Load earlier posts/)
   assert.doesNotMatch(board, /landingImage/)
+  assert.match(board, /before === null \|\| before === undefined \|\| loadingEarlier/)
 })
 
 test('board warms real threads without fetching known empty threads', () => {
