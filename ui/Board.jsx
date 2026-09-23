@@ -8,7 +8,8 @@ import {
 } from '../api.js'
 import {
   BOARD_REACTION_EMOJIS, boardRefreshDelay, optimisticReactionChange,
-  reactionState, reconcileReplies, replyActionLabel, threadRefreshDelay,
+  reactionActionLabel, reactionState, reconcileReplies, replyActionLabel,
+  threadRefreshDelay,
 } from '../reconciliation.js'
 import { useModalFocus } from './modalFocus.js'
 import { BoardImage, prepareImage, SelectedImagesStrip } from './Media.jsx'
@@ -302,6 +303,7 @@ export default function Board({
   const [earlierError, setEarlierError] = useState('')
   const replyRequest = useRef(0)
   const replySendingRef = useRef(false)
+  const reactionPickerRef = useRef(null)
   const lastActivityAt = useRef(Date.now())
   const restoreDeleteFocus = useRef(true)
   const fileRef = useRef(null)
@@ -319,6 +321,19 @@ export default function Board({
     onThreadOpenChange?.(Boolean(replyPost))
     return () => onThreadOpenChange?.(false)
   }, [Boolean(replyPost), onThreadOpenChange])
+
+  useEffect(() => {
+    if (!reactionPickerFor) return undefined
+    const frame = requestAnimationFrame(() => {
+      reactionPickerRef.current?.querySelector('button')?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [reactionPickerFor])
+
+  function dismissReactionPicker(postId) {
+    setReactionPickerFor(null)
+    requestAnimationFrame(() => document.getElementById(`cn-react-${postId}`)?.focus())
+  }
 
   function countFor(post) {
     const count = Number(
@@ -1006,7 +1021,8 @@ export default function Board({
                   )}
                   <span>{replyActionLabel(replyCount)}</span>
                 </button>
-                <div className="cn-reactions" aria-label="Post reactions">
+                <div className={`cn-reactions${reactionPickerFor === post.id ? ' has-picker' : ''}`}
+                     aria-label="Post reactions">
                   {visibleReactions.map((emoji) => (
                     <button key={emoji} id={!emojiReactions && emoji === '❤️' ? `cn-react-${post.id}` : undefined}
                             className={`cn-reaction-chip${reactions[emoji].reacted ? ' is-reacted' : ''}`}
@@ -1014,7 +1030,7 @@ export default function Board({
                               ? toggleReaction(post, emoji)
                               : continueParticipation('like', { postId: post.id, emoji })}
                             disabled={handoffBusy || participationBusy}
-                            aria-label={`${reactions[emoji].reacted ? 'Remove' : 'Add'} ${emoji} reaction`}>
+                            aria-label={reactionActionLabel(reactions[emoji], emoji)}>
                       <span className="cn-reaction-visual">
                         <FlatEmoji emoji={emoji} />
                         {reactions[emoji].count > 0 && <b>{reactions[emoji].count}</b>}
@@ -1022,29 +1038,41 @@ export default function Board({
                     </button>
                   ))}
                   {(emojiReactions || visibleReactions.length === 0) && (
-                  <button id={`cn-react-${post.id}`} className="cn-react cn-add-reaction"
-                          onClick={() => emojiReactions
-                            ? setReactionPickerFor(reactionPickerFor === post.id ? null : post.id)
-                            : (canInteract
-                              ? toggleReaction(post, '❤️')
-                              : continueParticipation('like', { postId: post.id, emoji: '❤️' }))}
-                          disabled={handoffBusy || participationBusy}
-                          aria-expanded={emojiReactions ? reactionPickerFor === post.id : undefined}
-                          aria-label={emojiReactions ? 'Add reaction' : 'Like'}>
-                    {emojiReactions ? <EmojiAdd aria-hidden="true" /> : <Heart aria-hidden="true" />}
-                  </button>
+                    <button id={`cn-react-${post.id}`} className="cn-react cn-add-reaction"
+                            onClick={() => emojiReactions
+                              ? setReactionPickerFor(reactionPickerFor === post.id ? null : post.id)
+                              : (canInteract
+                                ? toggleReaction(post, '❤️')
+                                : continueParticipation('like', { postId: post.id, emoji: '❤️' }))}
+                            disabled={handoffBusy || participationBusy}
+                            aria-expanded={emojiReactions ? reactionPickerFor === post.id : undefined}
+                            aria-label={emojiReactions ? 'Add reaction' : 'Like'}>
+                      {emojiReactions ? <EmojiAdd aria-hidden="true" /> : <Heart aria-hidden="true" />}
+                    </button>
                   )}
                   {emojiReactions && reactionPickerFor === post.id && (
-                    <div className="cn-reaction-picker" role="group" aria-label="Choose a reaction">
+                    <div ref={reactionPickerRef} className="cn-reaction-picker" role="group"
+                         aria-label="Choose a reaction"
+                         onKeyDown={(event) => {
+                           if (event.key === 'Escape') {
+                             event.preventDefault()
+                             dismissReactionPicker(post.id)
+                           }
+                         }}>
                       <span className="cn-reaction-picker-title">Choose a reaction</span>
                       <div className="cn-reaction-grid">
                         {BOARD_REACTION_EMOJIS.map((emoji) => (
                           <button key={emoji} type="button"
                                   className={reactions[emoji].reacted ? 'is-reacted' : ''}
-                                  onClick={() => canInteract
-                                    ? toggleReaction(post, emoji)
-                                    : continueParticipation('like', { postId: post.id, emoji })}
-                                  aria-label={`React ${emoji}`}><FlatEmoji emoji={emoji} /></button>
+                                  onClick={() => {
+                                    if (canInteract) toggleReaction(post, emoji)
+                                    else continueParticipation('like', { postId: post.id, emoji })
+                                    dismissReactionPicker(post.id)
+                                  }}
+                                  aria-pressed={reactions[emoji].reacted}
+                                  aria-label={`${reactions[emoji].reacted ? 'Remove' : 'Add'} ${emoji} reaction`}>
+                            <FlatEmoji emoji={emoji} />
+                          </button>
                         ))}
                       </div>
                     </div>

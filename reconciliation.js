@@ -78,6 +78,12 @@ export function reactionState(post, override) {
   return state
 }
 
+export function reactionActionLabel(reaction, emoji) {
+  const count = Math.max(0, Number(reaction?.count) || 0)
+  const action = reaction?.reacted ? 'Remove' : 'Add'
+  return `${action} ${emoji} reaction. ${count} ${count === 1 ? 'reaction' : 'reactions'}`
+}
+
 export function optimisticReactionChange(post, override, emoji) {
   const current = reactionState(post, override)
   const item = current[emoji] || { count: 0, reacted: false }

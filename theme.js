@@ -158,7 +158,6 @@ export const CSS = `
 .cn-person-name { font-size: 14px; font-weight: 700; line-height: 1.25; letter-spacing: -0.018em; }
 .cn-meta { font-size: 13px; color: var(--muted); }
 .cn-post-dot { color: var(--muted); font-size: 13px; }
-.cn-post-body { min-width: 0; }
 .cn-post-copy {
   font-size: 15px; line-height: 1.45; margin: 0;
   letter-spacing: -0.01em; white-space: pre-wrap;
@@ -173,7 +172,7 @@ export const CSS = `
 .cn-pending-gallery img { width: 100%; height: 100%; display: block; object-fit: cover; }
 
 /* Reactions + compose */
-.cn-post-actions { display: flex; align-items: center; gap: 4px; margin: 4px 0 0 -8px; max-width: 460px; }
+.cn-post-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0 0 -8px; max-width: 460px; }
 .cn-react {
   display: inline-flex; align-items: center; gap: 6px;
   min-height: 44px; min-width: 44px; padding: 0 12px; border-radius: 8px;
@@ -184,15 +183,15 @@ export const CSS = `
 .cn-react:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .cn-react:active { transform: scale(0.94); }
 .cn-react.is-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.cn-react.is-liked {
-  color: #e0426d;
-  background: color-mix(in srgb, #e0426d 12%, transparent);
-}
 .cn-react:disabled { opacity: 0.46; cursor: default; transform: none; }
 .cn-reply-summary { padding-inline: 5px 10px; }
-.cn-reactions { position: relative; display: flex; align-items: center; gap: 5px; min-width: 0; }
+.cn-reactions {
+  display: flex; flex: 1 1 180px; flex-wrap: wrap;
+  align-items: center; gap: 5px; min-width: 0;
+}
+.cn-reactions.has-picker { flex-basis: 100%; }
 .cn-reaction-chip {
-  width: 44px; min-width: 44px; height: 44px; padding: 0; border-radius: 10px;
+  box-sizing: border-box; width: auto; min-width: 44px; height: 44px; padding: 0; border-radius: 10px;
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   border: 0; background: transparent; color: var(--muted); font: 650 12px var(--font); cursor: pointer;
   transition: transform .1s ease;
@@ -215,8 +214,7 @@ export const CSS = `
 .cn-reaction-chip b { font: inherit; }
 .cn-add-reaction svg { width: 18px; height: 18px; }
 .cn-reaction-picker {
-  position: absolute; z-index: 30; left: 0; bottom: calc(100% + 8px);
-  width: max-content; padding: 10px;
+  flex: 0 0 auto; width: max-content; max-width: 100%; padding: 10px; margin-top: 4px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
   box-shadow: none;
   animation: cn-reaction-in .16s cubic-bezier(.2,.8,.2,1) both;
@@ -264,8 +262,9 @@ export const CSS = `
 .cn-profile-preview-close svg { width: 16px; height: 16px; }
 
 .cn-inline-thread {
-  height: min(360px, 48vh); min-height: 190px; margin: 8px 0 10px; overflow: hidden;
-  display: grid; grid-template-rows: auto minmax(0,1fr) auto;
+  width: 100%; min-width: 0; height: min(360px, 48vh); min-height: 190px;
+  margin: 8px 0 10px; overflow: hidden;
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0,1fr) auto;
   border: 1px solid var(--border); border-radius: 16px; background: var(--bg); cursor: default;
 }
 .cn-inline-thread-head {
@@ -871,26 +870,6 @@ export const CSS = `
 @keyframes cn-lightbox-image-in { from { transform: scale(0.985); } to { transform: none; } }
 
 /* Board conversations */
-.cn-reply-sheet { height: min(720px, 85vh); overflow: hidden; display: flex; flex-direction: column; }
-.cn-reply-sheet-head {
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
-  flex: 0 0 auto;
-}
-.cn-reply-sheet-head .cn-sheet-title { margin-bottom: 4px; font-size: 19px; }
-.cn-reply-sheet-head .cn-sheet-body { margin-bottom: 12px; }
-.cn-reply-parent {
-  flex: 0 0 auto; max-height: 210px; overflow-y: auto; margin-bottom: 10px; padding: 13px 14px;
-  background: color-mix(in srgb, var(--surface2, var(--surface)) 78%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent); border-radius: 16px;
-  overscroll-behavior: contain;
-}
-.cn-reply-parent .cn-post-copy { margin-top: 9px; font-size: 14.5px; line-height: 1.46; }
-.cn-reply-parent .cn-board-image { max-height: 150px; margin-top: 10px; border-radius: 11px; }
-.cn-reply-list {
-  flex: 1; min-height: 0; overflow-y: auto; margin: 0 -8px; padding: 6px 8px 8px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
-  overscroll-behavior: contain;
-}
 .cn-reply-row {
   display: flex; align-items: flex-start; gap: 11px; padding: 13px 2px;
   animation: cn-reply-in 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both;
@@ -920,10 +899,6 @@ export const CSS = `
 .cn-reply-composer input::placeholder { color: var(--muted); }
 .cn-reply-composer input:focus { border-color: var(--accent); box-shadow: none; }
 .cn-reply-composer input:disabled { opacity: 0.58; }
-.cn-reply-gate {
-  flex: 1 0 100%; margin: 0; color: var(--muted);
-  font-size: 12px; line-height: 1.45; text-align: start;
-}
 .cn-reply-composer.is-gated { flex-wrap: wrap; }
 .cn-reply-account { flex: 0 0 auto; }
 .cn-reply-send {
@@ -1066,7 +1041,6 @@ export const CSS = `
   .cn-scrim { align-items: center; padding: 24px; }
   .cn-sheet { border-radius: 16px; max-width: 540px; max-height: min(85vh, 760px); box-shadow: none; }
   .cn-grabber { display: none; }
-  .cn-reply-sheet { height: min(680px, 85vh); }
   .cn-thread-bar { padding-inline: max(16px, calc((100% - 680px) / 2)); background: var(--bg); }
   .cn-thread-bar::after { left: max(16px, calc((100% - 680px) / 2)); right: max(16px, calc((100% - 680px) / 2)); }
   .cn-thread-msgs { padding-inline: max(16px, calc((100% - 680px) / 2)); }
@@ -1086,8 +1060,10 @@ export const CSS = `
   .cn-profile-preview-actions { padding-right: 0; }
   .cn-profile-preview-actions .cn-btn { flex: 1 1 auto; }
   .cn-reaction-grid { grid-template-columns: repeat(5, 44px); }
-  .cn-reaction-picker { left: -44px; }
   .cn-inline-thread { height: min(340px, 46vh); }
+}
+@media (max-width: 360px) {
+  .cn-reaction-grid { grid-template-columns: repeat(4, 44px); }
 }
 
 /* Member picker rows */

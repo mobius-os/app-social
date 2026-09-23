@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   boardRefreshDelay,
   optimisticReactionChange,
+  reactionActionLabel,
   reactionState,
   reconcileFeedPage,
   reconcileReplies,
@@ -112,6 +113,19 @@ test('emoji reactions isolate the selected reaction and preserve rollback state'
   const followUp = optimisticReactionChange(post, next, '🎉')
   assert.strictEqual(followUp.current, next)
   assert.deepEqual(followUp.next['🎉'], { count: 1, reacted: true })
+})
+
+test('reaction controls announce every supported count magnitude exactly', () => {
+  for (const count of [9, 10, 999, 2000]) {
+    assert.equal(
+      reactionActionLabel({ count, reacted: false }, '🎉'),
+      `Add 🎉 reaction. ${count} reactions`,
+    )
+  }
+  assert.equal(
+    reactionActionLabel({ count: 1, reacted: true }, '❤️'),
+    'Remove ❤️ reaction. 1 reaction',
+  )
 })
 
 test('visible Social surfaces refresh quickly after activity and relax when idle', () => {
