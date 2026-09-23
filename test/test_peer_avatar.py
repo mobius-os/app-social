@@ -314,7 +314,6 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
         process.join()
 
   async def test_decode_timeout_worker_keeps_lock_until_pil_finishes(self):
-    context = multiprocessing.get_context("spawn")
     decode_started = threading.Event()
     release_decode = threading.Event()
 
@@ -339,22 +338,21 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       response = await task
       self.assertEqual(response["unavailable"], ["slow-decode.example"])
 
-      acquired = context.Event()
-      process = context.Process(
+      acquired = threading.Event()
+      waiter = threading.Thread(
         target=take_decode_lock_at, args=(self.root, acquired),
+        daemon=True,
       )
-      process.start()
+      waiter.start()
       try:
         self.assertFalse(acquired.wait(0.15))
         release_decode.set()
         self.assertTrue(acquired.wait(2))
-        process.join(2)
-        self.assertEqual(process.exitcode, 0)
+        waiter.join(2)
+        self.assertFalse(waiter.is_alive())
       finally:
         release_decode.set()
-        if process.is_alive():
-          process.kill()
-          process.join()
+        waiter.join(2)
 
   async def test_timed_out_refresh_keeps_a_stale_cached_avatar(self):
     async def resolve(_host):
