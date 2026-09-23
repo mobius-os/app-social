@@ -11,7 +11,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -241,12 +241,16 @@ class PublicBoardIndexTests(unittest.TestCase):
         return load_object(path)
 
       store._load_object = counted
-      first = store.read_board(10, None, "viewer.example")
-      loaded_during_migration = loads
-      second = store.read_board(10, None, "viewer.example")
+      with patch.object(store, "_board_index", wraps=store._board_index) as index:
+        first = store.read_board(10, None, "viewer.example")
+        loaded_during_migration = loads
+        second = store.read_board(10, None, "viewer.example")
 
       self.assertEqual(loaded_during_migration, 120)
       self.assertEqual(loads, loaded_during_migration)
+      self.assertEqual(index.call_args_list, [
+        call(initialize=True), call(), call(),
+      ])
       self.assertEqual([post["id"] for post in first], [
         f"post-{index:03d}" for index in range(119, 109, -1)
       ])
@@ -259,6 +263,36 @@ class PublicBoardIndexTests(unittest.TestCase):
       self.assertNotIn("_reaction_replays", first[0])
       with sqlite3.connect(store.board_index_path()) as connection:
         self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+
+  def test_cursor_pagination_does_not_skip_posts_with_equal_timestamps(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      for post_id in ("same-a", "same-b", "same-c"):
+        store.store_post({
+          "id": post_id, "host": "author.example", "text": post_id,
+          "created_at": 10.0, "replies": [],
+        })
+      app = FastAPI()
+      router, _ = create_public_router(store, None)
+      app.include_router(router)
+
+      with TestClient(app) as client:
+        first = client.get("/board", params={"limit": 2}).json()
+        second = client.get("/board", params={
+          "limit": 2, "before": first["next_cursor"],
+        }).json()
+        legacy = client.get("/board", params={"before": "10"}).json()
+        invalid = client.get("/board", params={"before": "not-a-cursor"})
+
+      self.assertEqual([post["id"] for post in first["posts"]], [
+        "same-c", "same-b",
+      ])
+      self.assertIsNotNone(first["next_cursor"])
+      self.assertEqual([post["id"] for post in second["posts"]], ["same-a"])
+      self.assertIsNone(second["next_cursor"])
+      self.assertEqual(legacy["posts"], [])
+      self.assertEqual(invalid.status_code, 400)
+      self.assertEqual(invalid.json()["detail"], "Board cursor is invalid.")
 
   def test_mutations_update_the_index_and_json_remains_rollback_readable(self):
     with tempfile.TemporaryDirectory() as directory:

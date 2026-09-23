@@ -789,6 +789,7 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
         self.assertEqual(result["body"]["feed"], {
           "host": "self.example",
           "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
+          "next_cursor": None,
           "posts": [],
         })
         self.assertEqual(result["body"]["me"]["handle"], "owner")

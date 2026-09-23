@@ -85,8 +85,8 @@ from common_protocol import (
   validate_text_or_attachment as _validate_text_or_attachment,
 )
 from common_public import (
-  BOARD_PAGE_LIMIT, BOARD_REACTION_EMOJIS, CommonPublicStore,
-  create_public_router, image_thumbnail_bytes,
+  BOARD_REACTION_EMOJIS, CommonPublicStore,
+  create_public_router, image_thumbnail_bytes, read_board_page,
 )
 from common_transport import FederationTransportError, federation_request
 from service_io import atomic_write
@@ -131,7 +131,6 @@ _common_dir = _public_store.common_dir
 _board_media_dir = _public_store.board_media_dir
 _find_image = _public_store.find_image
 _serve_image = _public_store.serve_image
-_read_board = _public_store.read_board
 _store_board_post = _public_store.store_post
 _toggle_board_reaction = _public_store.toggle_reaction
 _add_board_reply = _public_store.add_reply
@@ -1685,7 +1684,7 @@ async def get_board_media_index_for_owner(
 
 async def _feed_payload(
   limit: int = 30,
-  before: float | None = None,
+  before: str | None = None,
   community_host: str | None = None,
   db: object = None,
   principal: Principal = None,
@@ -1693,12 +1692,9 @@ async def _feed_payload(
   _require_owner_or_common_app(db, principal)
   host = _browse_community_host(community_host)
   if host == _own_host():
-    posts = _read_board(min(max(limit, 1), BOARD_PAGE_LIMIT), before, _own_host())
-    return {
-      "host": host,
-      "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
-      "posts": posts,
-    }
+    return {"host": host, **read_board_page(
+      _public_store, limit, before, _own_host(),
+    )}
   try:
     response = await federation_request(
       "GET", _peer_service_url(host, "board"),
@@ -1721,7 +1717,7 @@ async def _feed_payload(
 @router.get("/feed")
 async def get_feed(
   limit: int = 30,
-  before: float | None = None,
+  before: str | None = None,
   community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),

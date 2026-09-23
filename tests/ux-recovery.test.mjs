@@ -78,6 +78,8 @@ test('public board startup is not gated by identity and avoids oversized empty-s
   assert.doesNotMatch(bootstrap, /if \(!result\.me\?\.connected\)/)
   assert.match(app, /reconcileFeedPage\(posts, current, api\.BOARD_PAGE_SIZE\)/)
   assert.match(app, /loadEarlierFeed/)
+  assert.match(app, /feedNextCursor \|\| before/)
+  assert.match(app, /next_cursor !== undefined/)
   assert.doesNotMatch(board, /cn-board-composer/)
   assert.match(app, /cn-compose-fab/)
   assert.match(board, /Load earlier posts/)

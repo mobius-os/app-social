@@ -103,6 +103,7 @@ export default function App({ appId, token }) {
   const [feed, setFeed] = useState([])
   const [feedState, setFeedState] = useState('loading')
   const [feedHasEarlier, setFeedHasEarlier] = useState(false)
+  const [feedNextCursor, setFeedNextCursor] = useState(null)
   const [feedCapabilities, setFeedCapabilities] = useState({})
   const [conversations, setConversations] = useState([])
   const [groups, setGroups] = useState([])
@@ -164,14 +165,18 @@ export default function App({ appId, token }) {
     }
   }
 
-  const acceptFeed = useCallback((posts, background = false, capabilities = null) => {
+  const acceptFeed = useCallback((
+    posts, background = false, capabilities = null, nextCursor = undefined,
+  ) => {
     freshFeedLoaded.current = true
     setFeed((current) => {
       if (!background) return posts
       return reconcileFeedPage(posts, current, api.BOARD_PAGE_SIZE)
     })
     if (!background || posts.length < api.BOARD_PAGE_SIZE) {
-      setFeedHasEarlier(posts.length === api.BOARD_PAGE_SIZE)
+      const stableCursor = nextCursor !== undefined
+      setFeedHasEarlier(stableCursor ? Boolean(nextCursor) : posts.length === api.BOARD_PAGE_SIZE)
+      setFeedNextCursor(stableCursor ? nextCursor : null)
     }
     setFeedState('ready')
     if (capabilities) setFeedCapabilities(capabilities)
@@ -189,7 +194,7 @@ export default function App({ appId, token }) {
     try {
       const result = await api.getFeed()
       const posts = result.posts || []
-      acceptFeed(posts, background, result.capabilities)
+      acceptFeed(posts, background, result.capabilities, result.next_cursor)
       return true
     } catch {
       if (!background) setFeedState('error')
@@ -200,7 +205,10 @@ export default function App({ appId, token }) {
   async function loadBootstrap() {
     try {
       const result = await api.getBootstrap()
-      acceptFeed(result.feed?.posts || [], false, result.feed?.capabilities)
+      acceptFeed(
+        result.feed?.posts || [], false, result.feed?.capabilities,
+        result.feed?.next_cursor,
+      )
       setMe(result.me || null)
       setMeState('ready')
       // Bootstrap paints saved identity immediately; the account owner still
@@ -217,15 +225,17 @@ export default function App({ appId, token }) {
   }
 
   const loadEarlierFeed = useCallback(async (before) => {
-    const result = await api.getFeed(before)
+    const result = await api.getFeed(feedNextCursor || before)
     const older = result.posts || []
     setFeed((current) => {
       const seen = new Set(current.map((post) => post.id))
       return [...current, ...older.filter((post) => !seen.has(post.id))]
     })
-    setFeedHasEarlier(older.length === api.BOARD_PAGE_SIZE)
+    const stableCursor = result.next_cursor !== undefined
+    setFeedHasEarlier(stableCursor ? Boolean(result.next_cursor) : older.length === api.BOARD_PAGE_SIZE)
+    setFeedNextCursor(stableCursor ? result.next_cursor : null)
     return older.length
-  }, [])
+  }, [feedNextCursor])
 
   const acceptPublishedPost = useCallback((post) => {
     setFeed((current) => [post, ...current.filter((item) => item.id !== post.id)])
