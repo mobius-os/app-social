@@ -216,7 +216,7 @@ export const CSS = `
 .cn-add-reaction svg { width: 18px; height: 18px; }
 .cn-reaction-picker {
   position: absolute; z-index: 30; left: 0; bottom: calc(100% + 8px);
-  width: 282px; padding: 10px;
+  width: max-content; padding: 10px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
   box-shadow: none;
   animation: cn-reaction-in .16s cubic-bezier(.2,.8,.2,1) both;
@@ -225,9 +225,9 @@ export const CSS = `
   display: block; padding: 2px 4px 8px; color: var(--muted);
   font-size: 11px; font-weight: 700; letter-spacing: .02em;
 }
-.cn-reaction-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
+.cn-reaction-grid { display: grid; grid-template-columns: repeat(6, 44px); gap: 3px; }
 .cn-reaction-grid button {
-  width: 44px; height: 44px; padding: 0; border: 0; border-radius: 9px;
+  box-sizing: border-box; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 9px;
   background: transparent; font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
   font-size: 20px; cursor: pointer; transition: background .12s ease, transform .12s ease;
 }
@@ -1085,8 +1085,7 @@ export const CSS = `
   .cn-profile-preview { grid-template-columns: 1fr; }
   .cn-profile-preview-actions { padding-right: 0; }
   .cn-profile-preview-actions .cn-btn { flex: 1 1 auto; }
-  .cn-reaction-picker { width: 242px; }
-  .cn-reaction-grid { grid-template-columns: repeat(5, 1fr); }
+  .cn-reaction-grid { grid-template-columns: repeat(5, 44px); }
   .cn-reaction-picker { left: -44px; }
   .cn-inline-thread { height: min(340px, 46vh); }
 }

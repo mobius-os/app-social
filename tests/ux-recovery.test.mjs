@@ -149,7 +149,14 @@ test('compact reaction visuals keep real 44 pixel controls', () => {
   assert.match(board, /className="cn-reaction-visual"/)
   assert.match(theme, /\.cn-reaction-chip \{[\s\S]*width: 44px;[\s\S]*height: 44px;/)
   assert.match(theme, /\.cn-reaction-visual \{[\s\S]*height: 30px;/)
-  assert.match(theme, /\.cn-reaction-grid button \{\s*width: 44px; height: 44px;/)
+  assert.match(theme, /\.cn-reaction-grid button \{[\s\S]*width: 44px; height: 44px;/)
+})
+
+test('reaction picker width fits every 44 pixel choice without horizontal spill', () => {
+  const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
+  assert.match(theme, /\.cn-reaction-picker \{[\s\S]*width: max-content;/)
+  assert.match(theme, /\.cn-reaction-grid \{ display: grid; grid-template-columns: repeat\(6, 44px\); gap: 3px; \}/)
+  assert.match(theme, /\.cn-reaction-grid \{ grid-template-columns: repeat\(5, 44px\); \}/)
 })
 test('handle search accepts the displayed @handle form and surrounding spaces', async () => {
   const original = globalThis.fetch
