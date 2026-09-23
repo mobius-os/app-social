@@ -104,6 +104,9 @@ export default function App({ appId, token }) {
   const [feedState, setFeedState] = useState('loading')
   const [feedHasEarlier, setFeedHasEarlier] = useState(false)
   const [feedNextCursor, setFeedNextCursor] = useState(null)
+  // Keep the cursor tri-state: undefined means a legacy response with no
+  // stable boundary, while null explicitly means the first page is complete.
+  const feedNextCursorRef = useRef(undefined)
   const [feedCapabilities, setFeedCapabilities] = useState({})
   const [conversations, setConversations] = useState([])
   const [groups, setGroups] = useState([])
@@ -177,11 +180,13 @@ export default function App({ appId, token }) {
       const stableCursor = nextCursor !== undefined
       setFeedHasEarlier(stableCursor ? Boolean(nextCursor) : posts.length === api.BOARD_PAGE_SIZE)
       setFeedNextCursor(stableCursor ? nextCursor : null)
+      feedNextCursorRef.current = nextCursor
     }
     setFeedState('ready')
     if (capabilities) setFeedCapabilities(capabilities)
     window.mobius?.storage?.set('cache/board.json', {
       posts: posts.slice(0, api.BOARD_PAGE_SIZE),
+      next_cursor: nextCursor === undefined ? feedNextCursorRef.current : nextCursor,
       cached_at: Date.now(),
     }).catch(() => null)
     if (!readySignalled.current) {
@@ -234,6 +239,7 @@ export default function App({ appId, token }) {
     const stableCursor = result.next_cursor !== undefined
     setFeedHasEarlier(stableCursor ? Boolean(result.next_cursor) : older.length === api.BOARD_PAGE_SIZE)
     setFeedNextCursor(stableCursor ? result.next_cursor : null)
+    feedNextCursorRef.current = result.next_cursor
     return older.length
   }, [feedNextCursor])
 
@@ -265,7 +271,15 @@ export default function App({ appId, token }) {
       .then((cached) => {
         if (freshFeedLoaded.current || !Array.isArray(cached?.posts)) return
         setFeed(cached.posts)
-        setFeedHasEarlier(cached.posts.length === api.BOARD_PAGE_SIZE)
+        const cachedCursor = cached.next_cursor === null || typeof cached.next_cursor === 'string'
+          ? cached.next_cursor : undefined
+        feedNextCursorRef.current = cachedCursor
+        setFeedNextCursor(cachedCursor ?? null)
+        setFeedHasEarlier(
+          cachedCursor !== undefined
+            ? Boolean(cachedCursor)
+            : cached.posts.length === api.BOARD_PAGE_SIZE,
+        )
         setFeedState('ready')
       })
       .catch(() => null)
