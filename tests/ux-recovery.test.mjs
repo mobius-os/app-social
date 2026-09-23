@@ -68,6 +68,16 @@ test('message text stays selectable and reply uses an explicit touch target', ()
   assert.doesNotMatch(theme, /\.cn-bubble-reply \{ display: none; \}/)
 })
 
+test('message tabs keep one position and startup identity never flashes a label', () => {
+  const messages = readFileSync(new URL('../ui/Messages.jsx', import.meta.url), 'utf8')
+  const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.ok(messages.indexOf('className="cn-message-tabs"') < messages.indexOf('className="cn-view-actions"'))
+  assert.match(messages, /<h2>Messages<\/h2><p>Your accepted conversations and requests\.<\/p>/)
+  assert.doesNotMatch(messages, /showingRequests \? 'Message requests'/)
+  assert.doesNotMatch(app, /Browsing/)
+  assert.match(app, /meState === 'loading'[\s\S]*cn-header-chip is-loading/)
+})
+
 test('direct messages keep one client identity and expose interrupted delivery retry', () => {
   const thread = readFileSync(new URL('../ui/Thread.jsx', import.meta.url), 'utf8')
   const api = readFileSync(new URL('../api.js', import.meta.url), 'utf8')

@@ -557,10 +557,17 @@ export default function App({ appId, token }) {
         </div>
         <MainNavigation className="cn-nav-wide" tab={tab} unread={unread}
                         boardActivity={boardActivity} onSelect={setTab} />
-        <div className="cn-header-chip">
-          <Avatar name={me?.handle || '?'} host={me?.host} size="small" remote />
-          <span>{me?.handle ? `@${me.handle}` : 'Browsing'}</span>
-        </div>
+        {meState === 'loading' ? (
+          <div className="cn-header-chip is-loading" aria-hidden="true">
+            <span className="cn-header-chip-avatar-skeleton" />
+            <span className="cn-header-chip-line-skeleton" />
+          </div>
+        ) : me?.handle ? (
+          <div className="cn-header-chip">
+            <Avatar name={me.handle} host={me?.host} size="small" remote />
+            <span>{`@${me.handle}`}</span>
+          </div>
+        ) : null}
       </header>
 
       <MainNavigation className="cn-nav-mobile" tab={tab} unread={unread}
