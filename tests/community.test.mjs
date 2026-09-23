@@ -29,6 +29,20 @@ test('all public browsing uses the canonical community host without membership w
   } finally { globalThis.fetch = previous }
 })
 
+test('board paging forwards an opaque stable cursor unchanged', async () => {
+  const api = await import('../api.js')
+  const previous = globalThis.fetch
+  let request
+  globalThis.fetch = async (url) => {
+    request = new URL(url, 'https://local.example')
+    return { ok: true, json: async () => ({ posts: [] }) }
+  }
+  try {
+    await api.getFeed('opaque-cursor+/=')
+    assert.equal(request.searchParams.get('before'), 'opaque-cursor+/=')
+  } finally { globalThis.fetch = previous }
+})
+
 test('joining automatically sets the canonical community destination', async () => {
   const calls = []
   await joinGlobalCommunity(fresh, async value => {
