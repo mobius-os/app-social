@@ -780,6 +780,7 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
           "name": "Owner", "handle": "owner", "joined_at": 1,
           "community_host": "self.example",
         }))
+        (common / "avatar.png").write_bytes(b"avatar-bytes")
         result = self.call(
           root, "bootstrap", actor={"scope": "owner", "delegated": False},
           query={"community_host": ["self.example"]},
@@ -794,6 +795,10 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
         })
         self.assertEqual(result["body"]["me"]["handle"], "owner")
         self.assertEqual(result["body"]["me"]["registration"], "missing")
+        self.assertEqual(result["body"]["me"]["avatar"], {
+          "mime": "image/png",
+          "data_b64": base64.b64encode(b"avatar-bytes").decode(),
+        })
     finally:
       server.shutdown()
       thread.join()

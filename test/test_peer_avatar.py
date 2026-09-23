@@ -1,6 +1,7 @@
 """Behavioral coverage for the peer-avatar trust and cache boundary."""
 
 import io
+import asyncio
 import multiprocessing
 import os
 import tempfile
@@ -48,18 +49,104 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
     ), patch.object(social_routes, "_own_host", return_value="self.example"):
       yield
 
+  def test_public_avatar_advertises_shared_cache_revalidation(self):
+    identity = self.root / "identity.json"
+    avatar = self.root / "avatar.png"
+    identity.write_text("{}")
+    avatar.write_bytes(png())
+    with patch.object(
+      social_routes, "_identity_path", return_value=identity,
+    ), patch.object(
+      social_routes, "_avatar_path", return_value=avatar,
+    ), patch.object(
+      social_routes, "_load_identity", return_value={"joined_at": 1},
+    ):
+      response = social_routes.get_avatar()
+
+    self.assertEqual(
+      response.headers["cache-control"],
+      "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400",
+    )
+
+  async def test_background_profile_refresh_omits_unchanged_avatar_bytes(self):
+    avatar = self.root / "avatar.png"
+    avatar.write_bytes(b"avatar-bytes")
+    state = {
+      "identity": {"name": "Owner", "handle": "owner"},
+      "profile": {"handle": "owner"},
+      "account_error": None,
+      "avatar_updated": False,
+    }
+    with patch.object(
+      social_routes, "_require_owner_or_common_app", return_value=None,
+    ), patch.object(
+      social_routes, "_own_host", return_value="self.example",
+    ), patch.object(
+      social_routes, "_refresh_profile_cache", AsyncMock(return_value=state),
+    ), patch.object(
+      social_routes, "_avatar_path", return_value=avatar,
+    ), patch.object(
+      social_routes, "identity_app_id", AsyncMock(return_value=1),
+    ):
+      response = await social_routes._me_payload(None, None, include_avatar=False)
+    self.assertNotIn("avatar", response)
+
+  async def test_changed_profile_avatar_overrides_background_omission(self):
+    avatar = self.root / "avatar.png"
+    avatar.write_bytes(b"avatar-bytes")
+    state = {
+      "identity": {"name": "Owner", "handle": "owner"},
+      "profile": {"handle": "owner"},
+      "account_error": None,
+      "avatar_updated": True,
+    }
+    with patch.object(
+      social_routes, "_require_owner_or_common_app", return_value=None,
+    ), patch.object(
+      social_routes, "_own_host", return_value="self.example",
+    ), patch.object(
+      social_routes, "_refresh_profile_cache", AsyncMock(return_value=state),
+    ), patch.object(
+      social_routes, "_avatar_path", return_value=avatar,
+    ), patch.object(
+      social_routes, "identity_app_id", AsyncMock(return_value=1),
+    ):
+      response = await social_routes._me_payload(None, None, include_avatar=False)
+    self.assertEqual(response["avatar"]["mime"], "image/png")
+
+  async def test_authoritative_profile_removal_clears_saved_avatar(self):
+    avatar = self.root / "avatar.png"
+    avatar.write_bytes(b"avatar-bytes")
+    identity = {
+      "name": "Owner", "handle": "owner", "avatar_source_url": "old-url",
+    }
+    with patch.object(
+      social_routes, "_load_identity", return_value=identity,
+    ), patch.object(
+      social_routes, "owner_profile",
+      AsyncMock(return_value={
+        "display_name": "Owner", "handle": "owner", "avatar_url": None,
+      }),
+    ), patch.object(
+      social_routes, "_avatar_path", return_value=avatar,
+    ), patch.object(social_routes, "_save_identity") as save:
+      state = await social_routes._refresh_profile_cache(None, None)
+    self.assertTrue(state["avatar_updated"])
+    self.assertFalse(avatar.exists())
+    self.assertNotIn("avatar_source_url", identity)
+    save.assert_called_once_with(identity)
+
   async def test_untrusted_avatar_is_reencoded_at_the_avatar_size(self):
     with self.route_context(), patch.object(
       social_routes, "_fetch_actor", AsyncMock(return_value={"avatar": True}),
     ), patch.object(
       social_routes, "_download_avatar", AsyncMock(return_value=png(256, 128)),
     ):
-      response = await social_routes.get_peer_avatar("peer.example", None, None)
+      path, media_type = await social_routes._resolve_peer_avatar("peer.example")
 
     cache = self.root / "avatars" / "peer.example.webp"
-    self.assertEqual(response.path, str(cache))
-    self.assertEqual(response.media_type, "image/webp")
-    self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+    self.assertEqual(path, cache)
+    self.assertEqual(media_type, "image/webp")
     with Image.open(cache) as avatar:
       self.assertEqual(avatar.format, "WEBP")
       self.assertEqual(avatar.size, (128, 64))
@@ -71,7 +158,7 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       social_routes, "_download_avatar", AsyncMock(return_value=png(3000, 3000)),
     ):
       with self.assertRaises(HTTPException) as raised:
-        await social_routes.get_peer_avatar("peer.example", None, None)
+        await social_routes._resolve_peer_avatar("peer.example")
 
     self.assertEqual(raised.exception.status_code, 502)
     self.assertFalse((self.root / "avatars" / "peer.example.webp").exists())
@@ -101,11 +188,96 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       with patch.object(social_routes, "_fetch_actor", fetch_actor), patch.object(
         social_routes, "_download_avatar", download,
       ):
-        response = await social_routes.get_peer_avatar("peer.example", None, None)
+        path, media_type = await social_routes._resolve_peer_avatar("peer.example")
 
-    self.assertEqual(response.path, str(cache))
+    self.assertEqual(path, cache)
+    self.assertEqual(media_type, "image/webp")
     fetch_actor.assert_not_awaited()
     download.assert_not_awaited()
+
+  async def test_visible_avatars_are_returned_in_one_bounded_batch(self):
+    with self.route_context():
+      first = social_routes._peer_avatar_path("one.example")
+      second = social_routes._peer_avatar_path("two.example")
+      first.write_bytes(b"one")
+      second.write_bytes(b"two")
+      response = await social_routes.get_peer_avatars(
+        social_routes.AvatarBatch(hosts=[
+          "one.example", "two.example", "one.example",
+        ]), None, None,
+      )
+
+    self.assertEqual(set(response["avatars"]), {"one.example", "two.example"})
+    self.assertEqual(response["avatars"]["one.example"]["mime"], "image/webp")
+    self.assertEqual(response["missing"], [])
+    self.assertEqual(response["unavailable"], [])
+
+  async def test_avatar_batch_preserves_missing_and_transient_states(self):
+    async def resolve(host):
+      if host == "missing.example":
+        raise HTTPException(status_code=404, detail="missing")
+      raise HTTPException(status_code=502, detail="offline")
+
+    with self.route_context(), patch.object(
+      social_routes, "_resolve_peer_avatar", side_effect=resolve,
+    ):
+      response = await social_routes.get_peer_avatars(
+        social_routes.AvatarBatch(hosts=["missing.example", "offline.example"]),
+        None, None,
+      )
+
+    self.assertEqual(response["avatars"], {})
+    self.assertEqual(response["missing"], ["missing.example"])
+    self.assertEqual(response["unavailable"], ["offline.example"])
+
+  async def test_one_slow_peer_does_not_discard_a_fast_avatar(self):
+    fast = self.root / "fast.webp"
+    fast.write_bytes(b"fast")
+
+    async def resolve(host):
+      if host == "fast.example":
+        return fast, "image/webp"
+      await asyncio.sleep(0.1)
+      raise AssertionError("slow resolver was not cancelled")
+
+    with self.route_context(), patch.object(
+      social_routes, "PEER_AVATAR_BATCH_TIMEOUT_S", 0.01,
+    ), patch.object(social_routes, "_resolve_peer_avatar", side_effect=resolve):
+      response = await social_routes.get_peer_avatars(
+        social_routes.AvatarBatch(hosts=["fast.example", "slow.example"]),
+        None, None,
+      )
+
+    self.assertEqual(set(response["avatars"]), {"fast.example"})
+    self.assertEqual(response["unavailable"], ["slow.example"])
+    self.assertTrue((self.root / "avatars" / "slow.example.fail").is_file())
+
+  async def test_timed_out_refresh_keeps_a_stale_cached_avatar(self):
+    async def resolve(_host):
+      await asyncio.sleep(0.1)
+      raise AssertionError("slow resolver was not cancelled")
+
+    with self.route_context():
+      cache = social_routes._peer_avatar_path("slow.example")
+      cache.write_bytes(b"stale")
+      with patch.object(
+        social_routes, "PEER_AVATAR_BATCH_TIMEOUT_S", 0.01,
+      ), patch.object(social_routes, "_resolve_peer_avatar", side_effect=resolve):
+        response = await social_routes.get_peer_avatars(
+          social_routes.AvatarBatch(hosts=["slow.example"]), None, None,
+        )
+
+    self.assertEqual(set(response["avatars"]), {"slow.example"})
+    self.assertEqual(response["unavailable"], [])
+
+  async def test_avatar_batch_rejects_work_beyond_the_process_budget(self):
+    with self.route_context(), self.assertRaises(HTTPException) as raised:
+      await social_routes.get_peer_avatars(
+        social_routes.AvatarBatch(
+          hosts=[f"user-{index}.example" for index in range(9)],
+        ), None, None,
+      )
+    self.assertEqual(raised.exception.status_code, 400)
 
   async def test_transient_actor_failure_stays_retryable_and_is_cooled_down(self):
     fetch_actor = AsyncMock(side_effect=HTTPException(502, "offline"))
@@ -113,13 +285,13 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       social_routes, "_fetch_actor", fetch_actor,
     ):
       with self.assertRaises(HTTPException) as first:
-        await social_routes.get_peer_avatar("peer.example", None, None)
+        await social_routes._resolve_peer_avatar("peer.example")
       self.assertEqual(first.exception.status_code, 502)
       self.assertTrue(social_routes._peer_avatar_failure_path("peer.example").is_file())
 
       fetch_actor.reset_mock()
       with self.assertRaises(HTTPException) as cooled:
-        await social_routes.get_peer_avatar("peer.example", None, None)
+        await social_routes._resolve_peer_avatar("peer.example")
       self.assertEqual(cooled.exception.status_code, 502)
       fetch_actor.assert_not_awaited()
 
@@ -131,12 +303,12 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       os.utime(cache, (old, old))
       fetch_actor = AsyncMock(side_effect=HTTPException(502, "offline"))
       with patch.object(social_routes, "_fetch_actor", fetch_actor):
-        first = await social_routes.get_peer_avatar("peer.example", None, None)
+        first = await social_routes._resolve_peer_avatar("peer.example")
         fetch_actor.reset_mock()
-        second = await social_routes.get_peer_avatar("peer.example", None, None)
+        second = await social_routes._resolve_peer_avatar("peer.example")
 
-    self.assertEqual(first.path, str(cache))
-    self.assertEqual(second.path, str(cache))
+    self.assertEqual(first, (cache, "image/webp"))
+    self.assertEqual(second, (cache, "image/webp"))
     fetch_actor.assert_not_awaited()
 
   async def test_confirmed_absence_removes_stale_avatar_and_negative_caches_404(self):
@@ -148,13 +320,13 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       fetch_actor = AsyncMock(return_value={"avatar": False})
       with patch.object(social_routes, "_fetch_actor", fetch_actor):
         with self.assertRaises(HTTPException) as first:
-          await social_routes.get_peer_avatar("peer.example", None, None)
+          await social_routes._resolve_peer_avatar("peer.example")
         self.assertEqual(first.exception.status_code, 404)
         self.assertFalse(cache.exists())
 
         fetch_actor.reset_mock()
         with self.assertRaises(HTTPException) as cached:
-          await social_routes.get_peer_avatar("peer.example", None, None)
+          await social_routes._resolve_peer_avatar("peer.example")
         self.assertEqual(cached.exception.status_code, 404)
         fetch_actor.assert_not_awaited()
 
@@ -169,7 +341,7 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       social_routes, "_download_avatar", AsyncMock(side_effect=not_found),
     ):
       with self.assertRaises(HTTPException) as raised:
-        await social_routes.get_peer_avatar("peer.example", None, None)
+        await social_routes._resolve_peer_avatar("peer.example")
 
     self.assertEqual(raised.exception.status_code, 404)
     self.assertTrue((self.root / "avatars" / "peer.example.miss").is_file())

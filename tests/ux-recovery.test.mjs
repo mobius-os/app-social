@@ -103,6 +103,7 @@ test('board warms real threads without fetching known empty threads', () => {
 test('people and accepted messages use real avatars without flooding a large directory', () => {
   const people = readFileSync(new URL('../ui/People.jsx', import.meta.url), 'utf8')
   const messages = readFileSync(new URL('../ui/Messages.jsx', import.meta.url), 'utf8')
+  const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   assert.match(people, /<Avatar name=\{user\.handle\} host=\{user\.host\} remote lazy \/>/)
   assert.match(messages, /remote=\{!showingRequests\}/)
@@ -111,6 +112,9 @@ test('people and accepted messages use real avatars without flooding a large dir
   assert.match(people, /cache\/people\.json/)
   assert.match(people, /DIRECTORY_CACHE_MAX_AGE_MS = 60_000/)
   assert.match(app, /api\.searchPeople\(''\)/)
+  assert.match(board, /subscribeAvatar\(record, update\)/)
+  assert.doesNotMatch(board, /AVATAR_CONCURRENCY/)
+  assert.match(app, /primeAvatar\(result\.me\?\.host, result\.me\?\.avatar\)/)
 })
 
 test('publishing swaps one optimistic row into the confirmed feed without a second fetch', () => {

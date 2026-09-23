@@ -40,7 +40,7 @@ Owner surface (owner JWT or the Social app's scoped token):
   GET  /api/services/social/feed         community host's board (local read when self)
   GET  /api/services/social/people       community host directory search
   GET  /api/services/social/peer/{host}  a peer's actor card (profile view)
-  GET  /api/services/social/peer-avatar/{host}  a peer's cached profile avatar
+  POST /api/services/social/peer-avatars  a bounded visible-avatar batch
 
 Server-owned state lives under `<data_dir>/common/` (identity + community-host
 records). Conversation data lives in the Social app's per-app storage so
@@ -108,6 +108,12 @@ PEER_AVATAR_CACHE_TTL_S = 24 * 3600
 # on-disk markers because each service request runs in a fresh process.
 PEER_AVATAR_MISS_TTL_S = 15 * 60
 PEER_AVATAR_FAILURE_TTL_S = 45
+# Raster decode is deliberately serialized across service processes. Eight
+# worst-case accepted images leave headroom inside the process budget.
+PEER_AVATAR_BATCH_LIMIT = 8
+# Keep each peer inside the app-service's 15-second process ceiling while
+# leaving time to encode and return successful peers from the same batch.
+PEER_AVATAR_BATCH_TIMEOUT_S = 12
 # Peer avatars are re-encoded to a small validated raster before caching, so a
 # malicious raster never reaches the browser and cached blobs stay tiny.
 AVATAR_MAX_SIDE = 128
@@ -947,25 +953,12 @@ async def get_actor(db=Depends(get_db)):
   return _actor_doc(identity, await public_actor_metadata())
 
 
-def _serve_avatar(path: Path, media_type: str = "image/png") -> FileResponse:
-  if not path.is_file():
-    raise HTTPException(status_code=404, detail="Avatar not found.")
-  return FileResponse(
-    str(path),
-    media_type=media_type,
-    headers={
-      "Cache-Control": "private, max-age=3600",
-      "X-Content-Type-Options": "nosniff",
-    },
-  )
-
-
 def _temporarily_unavailable_avatar(
   host: str, cache: Path, cause: Exception,
-) -> FileResponse:
+) -> tuple[Path, str]:
   _mark_avatar_failure(host)
   if cache.is_file():
-    return _serve_avatar(cache, "image/webp")
+    return cache, "image/webp"
   raise HTTPException(
     status_code=502, detail="Peer avatar is temporarily unavailable.",
   ) from cause
@@ -978,7 +971,19 @@ def get_avatar():
     raise HTTPException(status_code=404, detail="Social profile not found.")
   if not _load_identity().get("joined_at"):
     raise HTTPException(status_code=404, detail="Social profile not found.")
-  return _serve_avatar(_avatar_path())
+  path = _avatar_path()
+  if not path.is_file():
+    raise HTTPException(status_code=404, detail="Avatar not found.")
+  return FileResponse(
+    str(path),
+    media_type="image/png",
+    headers={
+      "Cache-Control": (
+        "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
+      ),
+      "X-Content-Type-Options": "nosniff",
+    },
+  )
 
 
 @router.post("/inbox")
@@ -1159,16 +1164,21 @@ class PublishPost(BaseModel):
   thumbnails: Any = None
 
 
+class AvatarBatch(BaseModel):
+  hosts: list[str]
+
+
 async def _refresh_profile_cache(db, principal: Principal) -> dict:
   """Pull the mobius.you profile into the federation identity cache.
 
-  Returns {"identity", "profile", "account_error"}. The cache keeps the
+  Returns profile state and whether the authoritative avatar changed. The cache keeps the
   actor card and directory registration working when the account service is
   briefly unreachable; the live profile remains the source of truth.
   """
   identity = _load_identity()
   profile = None
   account_error = None
+  avatar_updated = False
   try:
     profile = await owner_profile()
   except HTTPException as exc:
@@ -1193,50 +1203,81 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
         atomic_write(_avatar_path(), avatar)
         identity["avatar_source_url"] = avatar_url
         _save_identity(identity)
+        avatar_updated = True
       except Exception:
         pass
-  return {"identity": identity, "profile": profile, "account_error": account_error}
-
-
-async def _me_payload(db: object, principal: Principal) -> dict:
-  _require_owner_or_common_app(db, principal)
-  state = await _refresh_profile_cache(db, principal)
-  identity = state["identity"]
+    elif "avatar_url" in profile and not avatar_url:
+      avatar_path = _avatar_path()
+      if avatar_path.is_file() or identity.get("avatar_source_url"):
+        avatar_path.unlink(missing_ok=True)
+        identity.pop("avatar_source_url", None)
+        _save_identity(identity)
+        avatar_updated = True
   return {
+    "identity": identity,
+    "profile": profile,
+    "account_error": account_error,
+    "avatar_updated": avatar_updated,
+  }
+
+
+def _avatar_wire(path: Path, media_type: str) -> dict | None:
+  try:
+    data = path.read_bytes()
+  except OSError:
+    return None
+  return {"mime": media_type, "data_b64": base64.b64encode(data).decode()}
+
+
+async def _me_response(
+  identity: dict, *, connected: bool, account_error: str | None,
+  include_avatar: bool = True,
+) -> dict:
+  response = {
     "host": _own_host(),
     "name": identity.get("name") or "",
     "handle": identity.get("handle") or "",
     "bio": identity.get("bio") or "",
     "community_host": _canonical_community_host(identity.get("community_host")),
-    "connected": bool(state["profile"]) or bool(identity.get("name")),
+    "connected": connected,
     "joined": bool(identity.get("joined_at")),
-    "account_error": state["account_error"],
+    "account_error": account_error,
     "identity_app_id": await identity_app_id(),
   }
+  if include_avatar:
+    response["avatar"] = _avatar_wire(_avatar_path(), "image/png")
+  return response
+
+
+async def _me_payload(
+  db: object, principal: Principal, *, include_avatar: bool = True,
+) -> dict:
+  _require_owner_or_common_app(db, principal)
+  state = await _refresh_profile_cache(db, principal)
+  identity = state["identity"]
+  return await _me_response(
+    identity,
+    connected=bool(state["profile"]) or bool(identity.get("name")),
+    account_error=state["account_error"],
+    include_avatar=include_avatar or state["avatar_updated"],
+  )
 
 
 async def _cached_me_payload(db: object, principal: Principal) -> dict:
   """Return saved identity context without waiting on the account service."""
   _require_owner_or_common_app(db, principal)
   identity = _load_identity()
-  return {
-    "host": _own_host(),
-    "name": identity.get("name") or "",
-    "handle": identity.get("handle") or "",
-    "bio": identity.get("bio") or "",
-    "community_host": _canonical_community_host(identity.get("community_host")),
-    "connected": bool(identity.get("name")),
-    "joined": bool(identity.get("joined_at")),
-    "account_error": None,
-    "identity_app_id": await identity_app_id(),
-  }
+  return await _me_response(
+    identity, connected=bool(identity.get("name")), account_error=None,
+  )
 
 
 @router.get("/me")
 async def get_me(
-  db: object = Depends(get_db), principal: Principal = Depends(get_principal)
+  include_avatar: bool = True,
+  db: object = Depends(get_db), principal: Principal = Depends(get_principal),
 ):
-  return await _me_payload(db, principal)
+  return await _me_payload(db, principal, include_avatar=include_avatar)
 
 
 @router.post("/join")
@@ -1994,24 +2035,19 @@ async def get_peer(
   return actor
 
 
-@router.get("/peer-avatar/{host}")
-async def get_peer_avatar(
-  host: str,
-  db: object = Depends(get_db),
-  principal: Principal = Depends(get_principal),
-):
-  """A peer's profile avatar, cached locally for up to 24 hours."""
-  _require_owner_or_common_app(db, principal)
+async def _resolve_peer_avatar(host: str) -> tuple[Path, str]:
   host = host.strip().lower()
   if not _valid_host(host):
     raise HTTPException(status_code=400, detail="Invalid peer host.")
   if host == _own_host():
-    return _serve_avatar(_avatar_path())
+    if not _avatar_path().is_file():
+      raise HTTPException(status_code=404, detail="Avatar not found.")
+    return _avatar_path(), "image/png"
   cache = _peer_avatar_path(host)
   now = time.time()
   # Serve a fresh cached avatar without any federation hop (the common path).
   if cache.is_file() and now - cache.stat().st_mtime < PEER_AVATAR_CACHE_TTL_S:
-    return _serve_avatar(cache, "image/webp")
+    return cache, "image/webp"
   # A recently confirmed absence short-circuits without another federation hop.
   miss = _peer_avatar_miss_path(host)
   if _recent_marker(miss, PEER_AVATAR_MISS_TTL_S, now):
@@ -2019,7 +2055,7 @@ async def get_peer_avatar(
   failure = _peer_avatar_failure_path(host)
   if _recent_marker(failure, PEER_AVATAR_FAILURE_TTL_S, now):
     if cache.is_file():
-      return _serve_avatar(cache, "image/webp")
+      return cache, "image/webp"
     raise HTTPException(
       status_code=502, detail="Peer avatar is temporarily unavailable.",
     )
@@ -2037,8 +2073,8 @@ async def get_peer_avatar(
   try:
     raw = await _download_avatar(_peer_service_url(host, "avatar"))
     # Keep network fetches concurrent but serialize memory-heavy raster decode
-    # across the short-lived workers. This preserves the established #21 input
-    # contract while preventing four worst-case images from expanding at once.
+    # across short-lived workers. This preserves the established #21 input
+    # contract without expanding multiple untrusted rasters at once.
     with _peer_avatar_decode_lock():
       _mime, encoded = image_thumbnail_bytes(
         raw, AVATAR_MAX_SIDE, AVATAR_MAX_PIXELS,
@@ -2055,4 +2091,51 @@ async def get_peer_avatar(
     return _temporarily_unavailable_avatar(host, cache, exc)
   except Exception as exc:
     return _temporarily_unavailable_avatar(host, cache, exc)
-  return _serve_avatar(cache, "image/webp")
+  return cache, "image/webp"
+
+
+@router.post("/peer-avatars")
+async def get_peer_avatars(
+  batch: AvatarBatch,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Resolve one bounded visible-avatar batch in a single service process."""
+  _require_owner_or_common_app(db, principal)
+  if len(batch.hosts) > PEER_AVATAR_BATCH_LIMIT:
+    raise HTTPException(status_code=400, detail="Too many avatar hosts.")
+  hosts = list(dict.fromkeys(host.strip().lower() for host in batch.hosts))
+  if any(not _valid_host(host) for host in hosts):
+    raise HTTPException(status_code=400, detail="Invalid peer host.")
+
+  async def resolve(host: str):
+    try:
+      path, media_type = await asyncio.wait_for(
+        _resolve_peer_avatar(host), timeout=PEER_AVATAR_BATCH_TIMEOUT_S,
+      )
+      return host, _avatar_wire(path, media_type), None
+    except HTTPException as exc:
+      status = "missing" if exc.status_code == 404 else "unavailable"
+      return host, None, status
+    except TimeoutError:
+      _mark_avatar_failure(host)
+      cache = _peer_avatar_path(host)
+      if cache.is_file():
+        return host, _avatar_wire(cache, "image/webp"), None
+      return host, None, "unavailable"
+    except Exception:
+      _log.exception("Unexpected peer avatar batch failure for %s", host)
+      _mark_avatar_failure(host)
+      return host, None, "unavailable"
+
+  avatars = {}
+  missing = []
+  unavailable = []
+  for host, avatar, status in await asyncio.gather(*(resolve(host) for host in hosts)):
+    if avatar is not None:
+      avatars[host] = avatar
+    elif status == "missing":
+      missing.append(host)
+    else:
+      unavailable.append(host)
+  return {"avatars": avatars, "missing": missing, "unavailable": unavailable}
