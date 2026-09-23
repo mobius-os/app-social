@@ -25,6 +25,18 @@ export function avatarFailureState(error, now = Date.now()) {
     : { failedAt: now, notFoundAt: null }
 }
 
+export function avatarBlob(wire) {
+  if (!wire || typeof wire.mime !== 'string' || !wire.mime.startsWith('image/')
+      || typeof wire.data_b64 !== 'string') return null
+  try {
+    const binary = atob(wire.data_b64)
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+    return new Blob([bytes], { type: wire.mime })
+  } catch {
+    return null
+  }
+}
+
 export function focusProfileReturnTarget(primary, fallback) {
   const target = primary?.isConnected === false ? fallback : (primary || fallback)
   if (!target || typeof target.focus !== 'function') return false

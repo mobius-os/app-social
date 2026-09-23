@@ -92,8 +92,10 @@ export async function getAppIcon(appId) {
   if (!response.ok) throw new Error('icon unavailable')
   return response.blob()
 }
-export const getPeerAvatar = (host) =>
-  call(`peer-avatar/${encodeURIComponent(host)}`, {}, 'blob')
+export const getPeerAvatars = (hosts) =>
+  call('peer-avatars', {
+    method: 'POST', body: JSON.stringify({ hosts }),
+  })
 
 // ── conversation storage (each side keeps only its own copy) ────────────────
 

@@ -3,6 +3,7 @@ import { Chat, Globe, Plus, Users } from '@openai/apps-sdk-ui/components/Icon'
 import { CSS } from './theme.js'
 import * as api from './api.js'
 import Board, { Avatar } from './ui/Board.jsx'
+import { primeAvatar } from './avatarCache.js'
 import Messages from './ui/Messages.jsx'
 import Thread from './ui/Thread.jsx'
 import GroupThread from './ui/GroupThread.jsx'
@@ -139,6 +140,7 @@ export default function App({ appId, token }) {
       // Identity is useful context, not a prerequisite for the public board.
       // Reveal it after the local profile read while directory verification
       // continues in the background.
+      primeAvatar(profile.host, profile.avatar)
       setMe(profile)
       setMeState('ready')
       const registration = await checkGlobalRegistration(profile, api.searchPeople)
@@ -200,6 +202,7 @@ export default function App({ appId, token }) {
   async function loadBootstrap() {
     try {
       const result = await api.getBootstrap()
+      primeAvatar(result.me?.host, result.me?.avatar)
       acceptFeed(result.feed?.posts || [], false, result.feed?.capabilities)
       setMe(result.me || null)
       setMeState('ready')

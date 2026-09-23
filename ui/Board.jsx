@@ -3,7 +3,7 @@ import {
   ArrowUp, Chat, EmojiAdd, Heart, ImageSquare, Trash, X,
 } from '@openai/apps-sdk-ui/components/Icon'
 import {
-  avatarHue, deletePost, getPeer, getPeerAvatar, getReplies, initials,
+  avatarHue, deletePost, getPeer, getReplies, initials,
   postDateTime, postReply, publishPost, reactToPost, timeAgo,
 } from '../api.js'
 import {
@@ -13,9 +13,10 @@ import {
 import { useModalFocus } from './modalFocus.js'
 import { BoardImage, prepareImage, SelectedImagesStrip } from './Media.jsx'
 import RichText from './RichText.jsx'
+import { membershipDuration } from '../profile.js'
 import {
-  avatarCacheIsFresh, avatarFailureState, membershipDuration,
-} from '../profile.js'
+  cachedAvatar, cachedAvatarUrl, discardAvatar, subscribeAvatar,
+} from '../avatarCache.js'
 import { EMOJI_ART } from '../emoji_art.js'
 import { boardPostFitsWireLimit } from '../board_payload.js'
 
@@ -25,7 +26,6 @@ import {
   createParticipationIntent, participationActionLabel, participationStep,
 } from '../participation.js'
 
-const avatarCache = new Map()
 const profileCache = new Map()
 const replyCache = new Map()
 const REPLY_CACHE_TTL_MS = 60_000
@@ -71,53 +71,12 @@ function FlatEmoji({ emoji }) {
   return <img className="cn-flat-emoji" src={EMOJI_ART[emoji]} alt="" aria-hidden="true" draggable="false" />
 }
 
-const AVATAR_CONCURRENCY = 4
-let avatarActive = 0
-const avatarQueue = []
-function pumpAvatars() {
-  while (avatarActive < AVATAR_CONCURRENCY && avatarQueue.length) {
-    const job = avatarQueue.shift()
-    avatarActive += 1
-    job().finally(() => { avatarActive -= 1; pumpAvatars() })
-  }
-}
-
-function cachedAvatar(host) {
-  const key = hostKey(host)
-  const now = Date.now()
-  let record = avatarCache.get(key)
-  if (avatarCacheIsFresh(record, now)) return record
-  record = record || { url: null, promise: null }
-  // One request per unique host, shared across every visible post, and capped:
-  // each peer-avatar call is a cold per-request process, so a screenful of new
-  // hosts must not spawn dozens of federation fetches at once.
-  record.promise = new Promise((resolve) => {
-    avatarQueue.push(() => Promise.resolve(getPeerAvatar(key))
-      .then((blob) => {
-        if (blob?.size) {
-          Object.assign(record, {
-            url: URL.createObjectURL(blob), failedAt: null, notFoundAt: null,
-          })
-        } else {
-          Object.assign(record, avatarFailureState(null))
-        }
-      })
-      .catch((error) => {
-        Object.assign(record, avatarFailureState(error))
-      })
-      .finally(() => { record.promise = null; resolve() }))
-    pumpAvatars()
-  })
-  avatarCache.set(key, record)
-  return record
-}
-
 function Avatar({ name, host, size, remote = false, lazy = false, onOpen = null }) {
   const elementRef = useRef(null)
   const key = remote && host ? hostKey(host) : ''
   // An already-cached avatar paints immediately even when lazy — otherwise every
   // remount (tab switch) flashes initials before the observer fires.
-  const cachedUrl = key ? (avatarCache.get(key)?.url || null) : null
+  const cachedUrl = key ? cachedAvatarUrl(key) : null
   const hasCached = Boolean(cachedUrl)
   const [nearViewport, setNearViewport] = useState(!lazy || hasCached)
   const hue = avatarHue(host)
@@ -152,16 +111,13 @@ function Avatar({ name, host, size, remote = false, lazy = false, onOpen = null 
     }
     const record = cachedAvatar(cacheKey)
     setAvatarUrl(record.url)
-    record.promise?.then(() => { if (active) setAvatarUrl(record.url) })
-    return () => { active = false }
+    const update = (url) => { if (active) setAvatarUrl(url) }
+    const unsubscribe = subscribeAvatar(record, update)
+    return () => { active = false; unsubscribe() }
   }, [cacheKey])
 
   function handleImageError() {
-    const record = avatarCache.get(cacheKey)
-    if (record?.url === avatarUrl) {
-      URL.revokeObjectURL(record.url)
-      record.url = null
-    }
+    discardAvatar(cacheKey, avatarUrl)
     setAvatarUrl(null)
   }
 

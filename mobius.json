@@ -24,6 +24,7 @@
   },
   "source_files": [
     "api.js",
+    "avatarCache.js",
     "message_ui_state.js",
     "community.js",
     "participation.js",
