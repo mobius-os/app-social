@@ -251,7 +251,7 @@ export default function App({ appId, token }) {
   }
 
   const loadEarlierFeed = useCallback(async (before) => {
-    const result = await api.getFeed(feedNextCursor || before)
+    const result = await api.getFeed(feedNextCursor ?? before)
     const older = result.posts || []
     setFeed((current) => {
       const seen = new Set(current.map((post) => post.id))

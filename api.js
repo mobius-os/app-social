@@ -66,7 +66,7 @@ export const getFeed = (before = null) => {
     community_host: SHARED_COMMUNITY_HOST,
     limit: String(BOARD_PAGE_SIZE),
   })
-  if (before) query.set('before', String(before))
+  if (before !== null && before !== undefined) query.set('before', String(before))
   return call(`feed?${query}`)
 }
 export const getBoardMedia = (postId, index, { thumbnail = false } = {}) =>

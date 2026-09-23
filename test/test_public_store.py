@@ -17,7 +17,12 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from common_protocol import validate_attachment
-from common_public import CommonPublicStore, create_public_router, image_thumbnail_bytes
+from common_public import (
+  BOARD_INDEX_NORMALIZATION_VERSION,
+  CommonPublicStore,
+  create_public_router,
+  image_thumbnail_bytes,
+)
 
 
 def forged_png_header(width=20000, height=20000):
@@ -361,6 +366,83 @@ class PublicBoardIndexTests(unittest.TestCase):
         5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
       ])
 
+  def test_page_ending_at_normalized_zero_retains_older_records(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      for post_id, created_at in (
+        ("new", 1.0), ("normalized", float("inf")), ("old", -1.0),
+      ):
+        store.store_post({
+          "id": post_id, "host": "author.example", "text": post_id,
+          "created_at": created_at, "replies": [],
+        })
+      app = FastAPI()
+      router, _ = create_public_router(store, None)
+      app.include_router(router)
+
+      with TestClient(app) as client:
+        first = client.get("/board", params={"limit": 2}).json()
+        second = client.get("/board", params={
+          "limit": 2, "before": first["next_cursor"],
+        }).json()
+
+      self.assertEqual([post["id"] for post in first["posts"]], [
+        "new", "normalized",
+      ])
+      self.assertEqual(first["posts"][-1]["created_at"], 0.0)
+      self.assertIsNotNone(first["next_cursor"])
+      self.assertEqual([post["id"] for post in second["posts"]], ["old"])
+
+  def test_old_index_normalization_version_rebuilds_unchanged_infinity_row(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      path = store.board_dir() / "legacy-infinity.json"
+      record = {
+        "id": "legacy-infinity", "host": "author.example", "text": "Old",
+        "created_at": float("inf"), "replies": [],
+      }
+      path.write_text(json.dumps(record))
+      stat = path.stat()
+      with sqlite3.connect(store.board_index_path()) as connection:
+        connection.execute(
+          """
+          CREATE TABLE board_posts (
+            id TEXT PRIMARY KEY,
+            created_at REAL NOT NULL,
+            record_json TEXT NOT NULL,
+            source_mtime_ns INTEGER NOT NULL,
+            source_size INTEGER NOT NULL
+          ) WITHOUT ROWID
+          """
+        )
+        connection.execute(
+          """
+          INSERT INTO board_posts(
+            id, created_at, record_json, source_mtime_ns, source_size
+          ) VALUES (?, ?, ?, ?, ?)
+          """,
+          (
+            record["id"], float("inf"), json.dumps(record),
+            stat.st_mtime_ns, stat.st_size,
+          ),
+        )
+
+      posts = store.read_board(10, None)
+
+      self.assertEqual(posts[0]["created_at"], 0.0)
+      with sqlite3.connect(store.board_index_path()) as connection:
+        self.assertEqual(
+          connection.execute("PRAGMA user_version").fetchone()[0],
+          BOARD_INDEX_NORMALIZATION_VERSION,
+        )
+        self.assertEqual(
+          connection.execute(
+            "SELECT created_at FROM board_posts WHERE id = ?",
+            (record["id"],),
+          ).fetchone()[0],
+          0.0,
+        )
+
   def test_file_fallback_cursor_pages_match_indexed_normalization(self):
     with tempfile.TemporaryDirectory() as directory:
       store = CommonPublicStore(directory)
@@ -469,6 +551,58 @@ class PublicBoardIndexTests(unittest.TestCase):
       self.assertEqual(
         [post["id"] for post in reader.read_board(10, None)], ["two"],
       )
+
+  def test_corrupt_disposable_index_is_rebuilt_once_from_json_records(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      store.store_post({
+        "id": "kept", "host": "author.example", "text": "Keep me",
+        "created_at": 1.0, "replies": [],
+      })
+      self.assertEqual([post["id"] for post in store.read_board(10, None)], ["kept"])
+      store.board_index_path().write_bytes(b"not a sqlite database")
+
+      restarted = CommonPublicStore(directory)
+      first = restarted.read_board(10, None)
+      second = restarted.read_board(10, None)
+
+      self.assertEqual([post["id"] for post in first], ["kept"])
+      self.assertEqual(second, first)
+      with sqlite3.connect(restarted.board_index_path()) as connection:
+        self.assertEqual(
+          connection.execute("SELECT COUNT(*) FROM board_posts").fetchone()[0], 1,
+        )
+
+  def test_inherited_dirty_marker_uses_source_count_for_admission(self):
+    with tempfile.TemporaryDirectory() as directory, patch(
+      "common_public.BOARD_POST_LIMIT", 2,
+    ):
+      failing_writer = CommonPublicStore(directory)
+      later_writer = CommonPublicStore(directory)
+      failing_writer.store_post({
+        "id": "one", "host": "author.example", "text": "One",
+        "created_at": 1.0, "replies": [],
+      })
+      self.assertEqual(len(later_writer.read_board(10, None)), 1)
+
+      with patch.object(
+        failing_writer, "_board_index",
+        side_effect=sqlite3.OperationalError("synthetic mirror failure"),
+      ):
+        failing_writer.store_post({
+          "id": "two", "host": "author.example", "text": "Two",
+          "created_at": 2.0, "replies": [],
+        })
+
+      with patch.object(later_writer, "_ensure_board_index", return_value=None):
+        with self.assertRaises(HTTPException) as raised:
+          later_writer.store_post({
+            "id": "three", "host": "author.example", "text": "Three",
+            "created_at": 3.0, "replies": [],
+          })
+
+      self.assertEqual(raised.exception.status_code, 507)
+      self.assertEqual(len(list(later_writer.board_dir().glob("*.json"))), 2)
 
 
 if __name__ == "__main__":
