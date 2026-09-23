@@ -157,16 +157,34 @@ test('compact reaction visuals keep real 44 pixel controls', () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
   assert.match(board, /className="cn-reaction-visual"/)
-  assert.match(theme, /\.cn-reaction-chip \{[\s\S]*width: 44px;[\s\S]*height: 44px;/)
+  assert.match(theme, /\.cn-reaction-chip \{[\s\S]*width: auto; min-width: 44px; height: 44px;/)
   assert.match(theme, /\.cn-reaction-visual \{[\s\S]*height: 30px;/)
   assert.match(theme, /\.cn-reaction-grid button \{[\s\S]*width: 44px; height: 44px;/)
 })
 
+test('high-cardinality phone reactions wrap without clipping accessible controls', () => {
+  const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
+  const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
+  assert.match(theme, /\.cn-post-actions \{[^}]*flex-wrap: wrap;/)
+  assert.match(theme, /\.cn-reactions \{[\s\S]*flex: 1 1 180px; flex-wrap: wrap;/)
+  assert.doesNotMatch(theme, /\.cn-reactions \{ flex-basis: 100%; \}/)
+  assert.match(board, /visibleReactions\.map\(\(emoji\) =>/)
+  assert.doesNotMatch(board, /visibleReactions\.slice/)
+  assert.match(board, /aria-label=\{reactionActionLabel\(reactions\[emoji\], emoji\)\}/)
+  assert.doesNotMatch(board, /className="cn-reaction-anchor"/)
+  assert.match(board, /className=\{`cn-reactions\$\{reactionPickerFor === post\.id \? ' has-picker' : ''\}`\}[\s\S]*aria-label=\{emojiReactions \? 'Add reaction' : 'Like'\}[\s\S]*className="cn-reaction-picker"/)
+})
+
 test('reaction picker width fits every 44 pixel choice without horizontal spill', () => {
+  const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
   assert.match(theme, /\.cn-reaction-picker \{[\s\S]*width: max-content;/)
+  assert.doesNotMatch(theme, /\.cn-reaction-picker \{[^}]*position: absolute;/)
   assert.match(theme, /\.cn-reaction-grid \{ display: grid; grid-template-columns: repeat\(6, 44px\); gap: 3px; \}/)
   assert.match(theme, /\.cn-reaction-grid \{ grid-template-columns: repeat\(5, 44px\); \}/)
+  assert.match(theme, /\.cn-reaction-grid \{ grid-template-columns: repeat\(4, 44px\); \}/)
+  assert.match(board, /if \(event\.key === 'Escape'\)/)
+  assert.match(board, /aria-pressed=\{reactions\[emoji\]\.reacted\}/)
 })
 test('handle search accepts the displayed @handle form and surrounding spaces', async () => {
   const original = globalThis.fetch
