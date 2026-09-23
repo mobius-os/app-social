@@ -157,12 +157,12 @@ export default function App({ appId, token }) {
 
   async function loadMe({ background = false } = {}) {
     try {
-      const loaded = await api.getMe()
+      const loaded = await api.getMe({ includeAvatar: !background })
       const profile = loaded
       // Identity is useful context, not a prerequisite for the public board.
       // Reveal it after the local profile read while directory verification
       // continues in the background.
-      primeAvatar(profile.host, profile.avatar)
+      if ('avatar' in profile) primeAvatar(profile.host, profile.avatar)
       setMe(profile)
       setMeState('ready')
       const registration = await checkGlobalRegistration(profile, api.searchPeople)

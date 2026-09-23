@@ -33,10 +33,14 @@ test('avatar cache batches peers, serializes batches, and tracks authoritative p
       calls.push(hosts)
       return response(Object.fromEntries(hosts.map((host, index) => [host, wire(index + 1)])))
     }
-    const one = cachedAvatar('one.example')
-    const two = cachedAvatar('two.example')
-    await Promise.all([one.promise, two.promise])
-    assert.deepEqual(calls, [['one.example', 'two.example']])
+    const initial = Array.from({ length: 10 }, (_, index) => (
+      cachedAvatar(`initial-${index}.example`)
+    ))
+    await Promise.all(initial.map(record => record.promise))
+    assert.deepEqual(calls, [
+      Array.from({ length: 8 }, (_, index) => `initial-${index}.example`),
+      ['initial-8.example', 'initial-9.example'],
+    ])
 
     calls.length = 0
     globalThis.fetch = async (_url, options) => {
@@ -77,8 +81,6 @@ test('avatar cache batches peers, serializes batches, and tracks authoritative p
     assert.equal(cachedAvatarUrl('owner.example'), authoritativeUrl)
     assert.deepEqual(updates, [authoritativeUrl])
 
-    primeAvatar('owner.example', wire(9))
-    assert.equal(cachedAvatarUrl('owner.example'), authoritativeUrl)
     primeAvatar('owner.example', wire(10))
     const changedUrl = cachedAvatarUrl('owner.example')
     assert.notEqual(changedUrl, authoritativeUrl)
@@ -88,6 +90,12 @@ test('avatar cache batches peers, serializes batches, and tracks authoritative p
     assert.deepEqual(updates, [authoritativeUrl, changedUrl, null])
     assert.equal(revoked.length, 2)
     unsubscribe()
+
+    const revokedBeforePrune = revoked.length
+    for (let index = 0; index < 70; index += 1) {
+      primeAvatar(`idle-${index}.example`, wire(index % 255))
+    }
+    assert.ok(revoked.length > revokedBeforePrune)
   } finally {
     globalThis.fetch = originalFetch
     URL.createObjectURL = originalCreate

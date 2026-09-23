@@ -40,7 +40,6 @@ Owner surface (owner JWT or the Social app's scoped token):
   GET  /api/services/social/feed         community host's board (local read when self)
   GET  /api/services/social/people       community host directory search
   GET  /api/services/social/peer/{host}  a peer's actor card (profile view)
-  GET  /api/services/social/peer-avatar/{host}  a peer's cached profile avatar
   POST /api/services/social/peer-avatars  a bounded visible-avatar batch
 
 Server-owned state lives under `<data_dir>/common/` (identity + community-host
@@ -109,7 +108,9 @@ PEER_AVATAR_CACHE_TTL_S = 24 * 3600
 # on-disk markers because each service request runs in a fresh process.
 PEER_AVATAR_MISS_TTL_S = 15 * 60
 PEER_AVATAR_FAILURE_TTL_S = 45
-PEER_AVATAR_BATCH_LIMIT = 24
+# Raster decode is deliberately serialized across service processes. Eight
+# worst-case accepted images leave headroom inside the process budget.
+PEER_AVATAR_BATCH_LIMIT = 8
 # Keep each peer inside the app-service's 15-second process ceiling while
 # leaving time to encode and return successful peers from the same batch.
 PEER_AVATAR_BATCH_TIMEOUT_S = 12
@@ -952,22 +953,6 @@ async def get_actor(db=Depends(get_db)):
   return _actor_doc(identity, await public_actor_metadata())
 
 
-def _serve_avatar(
-  path: Path, media_type: str = "image/png",
-  cache_control: str = "private, max-age=3600",
-) -> FileResponse:
-  if not path.is_file():
-    raise HTTPException(status_code=404, detail="Avatar not found.")
-  return FileResponse(
-    str(path),
-    media_type=media_type,
-    headers={
-      "Cache-Control": cache_control,
-      "X-Content-Type-Options": "nosniff",
-    },
-  )
-
-
 def _temporarily_unavailable_avatar(
   host: str, cache: Path, cause: Exception,
 ) -> tuple[Path, str]:
@@ -986,10 +971,18 @@ def get_avatar():
     raise HTTPException(status_code=404, detail="Social profile not found.")
   if not _load_identity().get("joined_at"):
     raise HTTPException(status_code=404, detail="Social profile not found.")
-  return _serve_avatar(
-    _avatar_path(), cache_control=(
-      "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
-    ),
+  path = _avatar_path()
+  if not path.is_file():
+    raise HTTPException(status_code=404, detail="Avatar not found.")
+  return FileResponse(
+    str(path),
+    media_type="image/png",
+    headers={
+      "Cache-Control": (
+        "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
+      ),
+      "X-Content-Type-Options": "nosniff",
+    },
   )
 
 
@@ -1178,13 +1171,14 @@ class AvatarBatch(BaseModel):
 async def _refresh_profile_cache(db, principal: Principal) -> dict:
   """Pull the mobius.you profile into the federation identity cache.
 
-  Returns {"identity", "profile", "account_error"}. The cache keeps the
+  Returns profile state and whether the authoritative avatar changed. The cache keeps the
   actor card and directory registration working when the account service is
   briefly unreachable; the live profile remains the source of truth.
   """
   identity = _load_identity()
   profile = None
   account_error = None
+  avatar_updated = False
   try:
     profile = await owner_profile()
   except HTTPException as exc:
@@ -1209,9 +1203,22 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
         atomic_write(_avatar_path(), avatar)
         identity["avatar_source_url"] = avatar_url
         _save_identity(identity)
+        avatar_updated = True
       except Exception:
         pass
-  return {"identity": identity, "profile": profile, "account_error": account_error}
+    elif "avatar_url" in profile and not avatar_url:
+      avatar_path = _avatar_path()
+      if avatar_path.is_file() or identity.get("avatar_source_url"):
+        avatar_path.unlink(missing_ok=True)
+        identity.pop("avatar_source_url", None)
+        _save_identity(identity)
+        avatar_updated = True
+  return {
+    "identity": identity,
+    "profile": profile,
+    "account_error": account_error,
+    "avatar_updated": avatar_updated,
+  }
 
 
 def _avatar_wire(path: Path, media_type: str) -> dict | None:
@@ -1224,6 +1231,7 @@ def _avatar_wire(path: Path, media_type: str) -> dict | None:
 
 async def _me_response(
   identity: dict, *, connected: bool, account_error: str | None,
+  include_avatar: bool = True,
 ) -> dict:
   response = {
     "host": _own_host(),
@@ -1236,13 +1244,14 @@ async def _me_response(
     "account_error": account_error,
     "identity_app_id": await identity_app_id(),
   }
-  avatar = _avatar_wire(_avatar_path(), "image/png")
-  if avatar is not None:
-    response["avatar"] = avatar
+  if include_avatar:
+    response["avatar"] = _avatar_wire(_avatar_path(), "image/png")
   return response
 
 
-async def _me_payload(db: object, principal: Principal) -> dict:
+async def _me_payload(
+  db: object, principal: Principal, *, include_avatar: bool = True,
+) -> dict:
   _require_owner_or_common_app(db, principal)
   state = await _refresh_profile_cache(db, principal)
   identity = state["identity"]
@@ -1250,6 +1259,7 @@ async def _me_payload(db: object, principal: Principal) -> dict:
     identity,
     connected=bool(state["profile"]) or bool(identity.get("name")),
     account_error=state["account_error"],
+    include_avatar=include_avatar or state["avatar_updated"],
   )
 
 
@@ -1264,9 +1274,10 @@ async def _cached_me_payload(db: object, principal: Principal) -> dict:
 
 @router.get("/me")
 async def get_me(
-  db: object = Depends(get_db), principal: Principal = Depends(get_principal)
+  include_avatar: bool = True,
+  db: object = Depends(get_db), principal: Principal = Depends(get_principal),
 ):
-  return await _me_payload(db, principal)
+  return await _me_payload(db, principal, include_avatar=include_avatar)
 
 
 @router.post("/join")
@@ -2081,18 +2092,6 @@ async def _resolve_peer_avatar(host: str) -> tuple[Path, str]:
   except Exception as exc:
     return _temporarily_unavailable_avatar(host, cache, exc)
   return cache, "image/webp"
-
-
-@router.get("/peer-avatar/{host}")
-async def get_peer_avatar(
-  host: str,
-  db: object = Depends(get_db),
-  principal: Principal = Depends(get_principal),
-):
-  """A peer's profile avatar, cached locally for up to 24 hours."""
-  _require_owner_or_common_app(db, principal)
-  path, media_type = await _resolve_peer_avatar(host)
-  return _serve_avatar(path, media_type)
 
 
 @router.post("/peer-avatars")

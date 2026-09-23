@@ -1,10 +1,14 @@
 import { getPeerAvatars } from './api.js'
 import { avatarBlob, avatarCacheIsFresh, avatarFailureState } from './profile.js'
 
-const AVATAR_BATCH_SIZE = 24
+// A service process has a hard lifetime budget. Eight worst-case guarded
+// decodes leave room for transport cleanup before the process deadline.
+const AVATAR_BATCH_SIZE = 8
+const MAX_IDLE_AVATARS = AVATAR_BATCH_SIZE * 8
 const cache = new Map()
 const queue = []
 let flushActive = false
+let accessSequence = 0
 
 const hostKey = (host) => String(host || '').trim().toLowerCase()
 
@@ -15,21 +19,35 @@ function newRecord() {
     failedAt: null,
     notFoundAt: null,
     generation: 0,
-    mime: null,
-    dataB64: null,
+    lastUsed: ++accessSequence,
     listeners: new Set(),
+  }
+}
+
+function touch(record) {
+  record.lastUsed = ++accessSequence
+}
+
+function pruneIdleAvatars() {
+  if (cache.size <= MAX_IDLE_AVATARS) return
+  const idle = [...cache.entries()]
+    .filter(([, record]) => !record.promise && record.listeners.size === 0)
+    .sort((left, right) => left[1].lastUsed - right[1].lastUsed)
+  while (cache.size > MAX_IDLE_AVATARS && idle.length) {
+    const [key, record] = idle.shift()
+    cache.delete(key)
+    if (record.url) URL.revokeObjectURL(record.url)
   }
 }
 
 function updateRecord(record, wire, error = null, expectedGeneration = null) {
   if (expectedGeneration !== null && record.generation !== expectedGeneration) return
-  if (wire && wire.mime === record.mime && wire.data_b64 === record.dataB64) return
+  touch(record)
   const blob = avatarBlob(wire)
   const oldUrl = record.url
   if (blob?.size) {
     Object.assign(record, {
-      url: URL.createObjectURL(blob), mime: wire.mime, dataB64: wire.data_b64,
-      failedAt: null, notFoundAt: null,
+      url: URL.createObjectURL(blob), failedAt: null, notFoundAt: null,
     })
   } else if (!record.url) {
     Object.assign(record, avatarFailureState(error))
@@ -63,6 +81,7 @@ function scheduleFlush() {
           if (job.record.promise === job.promise) job.record.promise = null
           job.resolve()
         }
+        pruneIdleAvatars()
       }
     } finally {
       flushActive = false
@@ -75,7 +94,10 @@ export function cachedAvatar(host) {
   const key = hostKey(host)
   const now = Date.now()
   let record = cache.get(key)
-  if (avatarCacheIsFresh(record, now)) return record
+  if (avatarCacheIsFresh(record, now)) {
+    touch(record)
+    return record
+  }
   record = record || newRecord()
   let resolveJob
   const promise = new Promise((resolve) => { resolveJob = resolve })
@@ -84,6 +106,7 @@ export function cachedAvatar(host) {
     key, record, promise, resolve: resolveJob, generation: record.generation,
   })
   cache.set(key, record)
+  pruneIdleAvatars()
   scheduleFlush()
   return record
 }
@@ -96,25 +119,31 @@ export function primeAvatar(host, wire) {
   const key = hostKey(host)
   if (!key) return
   const record = cache.get(key) || newRecord()
+  touch(record)
   if (!wire) {
     const oldUrl = record.url
     Object.assign(record, {
-      url: null, mime: null, dataB64: null,
-      failedAt: null, notFoundAt: null,
+      url: null, failedAt: null, notFoundAt: null,
     })
     record.generation += 1
     for (const listener of record.listeners) listener(null)
     if (oldUrl) URL.revokeObjectURL(oldUrl)
     cache.set(key, record)
+    pruneIdleAvatars()
     return
   }
   updateRecord(record, wire, { status: 404 })
   cache.set(key, record)
+  pruneIdleAvatars()
 }
 
 export function subscribeAvatar(record, listener) {
+  touch(record)
   record.listeners.add(listener)
-  return () => record.listeners.delete(listener)
+  return () => {
+    record.listeners.delete(listener)
+    pruneIdleAvatars()
+  }
 }
 
 export function discardAvatar(host, url) {
@@ -122,8 +151,7 @@ export function discardAvatar(host, url) {
   if (!record || record.url !== url) return
   URL.revokeObjectURL(record.url)
   record.url = null
-  record.mime = null
-  record.dataB64 = null
   record.generation += 1
   for (const listener of record.listeners) listener(null)
+  pruneIdleAvatars()
 }

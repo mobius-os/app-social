@@ -27,7 +27,8 @@ async function call(path, options = {}, responseType = 'json') {
   return response.json()
 }
 
-export const getMe = () => call('me')
+export const getMe = ({ includeAvatar = true } = {}) =>
+  call(`me?include_avatar=${includeAvatar ? 'true' : 'false'}`)
 export const getBootstrap = () => call(`bootstrap?community_host=${encodeURIComponent(SHARED_COMMUNITY_HOST)}`)
 export const join = () => call('join', { method: 'POST', body: JSON.stringify({}) })
 export const saveMe = (settings) =>
