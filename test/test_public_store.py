@@ -30,6 +30,58 @@ def forged_png_header(width=20000, height=20000):
 
 
 class PublicBoardIndexTests(unittest.TestCase):
+  def _write_cursor_edge_records(self, store):
+    records = [
+      ("normal-top", {"id": "normal-top", "created_at": 5.0}),
+      ("edge-string", {"id": "edge-string", "created_at": "4.0"}),
+      ("edge-nan", {"id": "edge-nan", "created_at": float("nan")}),
+      ("edge-missing", {"id": "edge-missing"}),
+      ("edge-infinity", {"id": "edge-infinity", "created_at": float("inf")}),
+      ("edge-huge", {"id": "edge-huge", "created_at": 10 ** 1000}),
+      ("edge-bool", {"id": "edge-bool", "created_at": True}),
+      ("normal-old", {"id": "normal-old", "created_at": -1.0}),
+      ("missing-id", {"created_at": 4.0}),
+      ("empty-id", {"id": "", "created_at": 4.0}),
+      ("non-string-id", {"id": 123, "created_at": 4.0}),
+      ("mismatched-id", {"id": "other-id", "created_at": 4.0}),
+    ]
+    for filename, fields in records:
+      (store.board_dir() / f"{filename}.json").write_text(json.dumps({
+        "host": "author.example", "text": filename, "replies": [], **fields,
+      }))
+
+  def _collect_cursor_pages(self, store, *, force_file_fallback=False):
+    app = FastAPI()
+    router, _ = create_public_router(store, None)
+    app.include_router(router)
+
+    def collect():
+      posts = []
+      seen_cursors = set()
+      cursor = None
+      with TestClient(app, raise_server_exceptions=False) as client:
+        while True:
+          params = {"limit": 2}
+          if cursor is not None:
+            params["before"] = cursor
+          response = client.get("/board", params=params)
+          self.assertEqual(response.status_code, 200, response.text)
+          page = response.json()
+          posts.extend(page["posts"])
+          cursor = page["next_cursor"]
+          if cursor is None:
+            return posts
+          self.assertNotIn(cursor, seen_cursors)
+          seen_cursors.add(cursor)
+
+    if not force_file_fallback:
+      return collect()
+    store._ensure_board_index()
+    with patch.object(
+      store, "_board_index", side_effect=sqlite3.DatabaseError("forced fallback"),
+    ):
+      return collect()
+
   def test_oversized_original_header_rejects_entire_gallery_before_media_write(self):
     for size in ((6000, 5000), (20000, 20000)):
       with self.subTest(size=size), tempfile.TemporaryDirectory() as directory:
@@ -293,6 +345,31 @@ class PublicBoardIndexTests(unittest.TestCase):
       self.assertEqual(legacy["posts"], [])
       self.assertEqual(invalid.status_code, 400)
       self.assertEqual(invalid.json()["detail"], "Board cursor is invalid.")
+
+  def test_indexed_cursor_pages_normalize_legacy_positions_without_gaps(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      self._write_cursor_edge_records(store)
+
+      posts = self._collect_cursor_pages(store)
+
+      self.assertEqual([post["id"] for post in posts], [
+        "normal-top", "edge-string", "edge-nan", "edge-missing",
+        "edge-infinity", "edge-huge", "edge-bool", "normal-old",
+      ])
+      self.assertEqual([post["created_at"] for post in posts], [
+        5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+      ])
+
+  def test_file_fallback_cursor_pages_match_indexed_normalization(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      self._write_cursor_edge_records(store)
+
+      indexed = self._collect_cursor_pages(store)
+      fallback = self._collect_cursor_pages(store, force_file_fallback=True)
+
+      self.assertEqual(fallback, indexed)
 
   def test_mutations_update_the_index_and_json_remains_rollback_readable(self):
     with tempfile.TemporaryDirectory() as directory:

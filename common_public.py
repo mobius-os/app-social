@@ -84,6 +84,21 @@ class BoardImageTooLarge(ValueError):
   """A raster must be rejected before decoding or storing its media."""
 
 
+def _board_record_position(record: dict) -> tuple[float, str] | None:
+  """Return the one stable feed position for a readable Board record."""
+  post_id = record.get("id")
+  if not isinstance(post_id, str) or not post_id:
+    return None
+  created_at = record.get("created_at", 0)
+  if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+    return 0.0, post_id
+  try:
+    created_at = float(created_at)
+  except OverflowError:
+    return 0.0, post_id
+  return (created_at if math.isfinite(created_at) else 0.0), post_id
+
+
 def _open_board_image(data: bytes) -> Image.Image:
   try:
     return Image.open(io.BytesIO(data))
@@ -245,12 +260,13 @@ class CommonPublicStore:
       connection.close()
 
   @staticmethod
-  def _board_record_values(record: dict, stat) -> tuple:
-    created_at = record.get("created_at", 0)
-    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
-      created_at = 0
+  def _board_record_values(record: dict, stat) -> tuple | None:
+    position = _board_record_position(record)
+    if position is None:
+      return None
+    created_at, post_id = position
     return (
-      str(record.get("id") or ""), float(created_at),
+      post_id, created_at,
       json.dumps(record, separators=(",", ":")),
       int(stat.st_mtime_ns), int(stat.st_size),
     )
@@ -313,9 +329,11 @@ class CommonPublicStore:
             if record.get("id") != post_id:
               invalid.add(post_id)
               continue
-            self._upsert_board_record(
-              connection, self._board_record_values(record, stat),
-            )
+            values = self._board_record_values(record, stat)
+            if values is None:
+              invalid.add(post_id)
+              continue
+            self._upsert_board_record(connection, values)
           stale = (set(existing) - seen) | invalid
           connection.executemany(
             "DELETE FROM board_posts WHERE id = ?",
@@ -331,9 +349,10 @@ class CommonPublicStore:
     try:
       stat = path.stat()
       with self._board_index() as connection:
-        self._upsert_board_record(
-          connection, self._board_record_values(record, stat),
-        )
+        values = self._board_record_values(record, stat)
+        if values is None:
+          return False
+        self._upsert_board_record(connection, values)
       return True
     except (OSError, sqlite3.Error):
       self._board_index_ready = False
@@ -352,7 +371,13 @@ class CommonPublicStore:
 
   @staticmethod
   def _present_board_record(raw: dict, viewer: str | None) -> dict:
+    position = _board_record_position(raw)
+    if position is None:
+      raise ValueError("Board record has no stable position.")
+    created_at, post_id = position
     post = dict(raw)
+    post["id"] = post_id
+    post["created_at"] = created_at
     reactions = CommonPublicStore._reaction_hosts(post)
     post.pop("likes", None)
     post.pop("reactions", None)
@@ -402,10 +427,11 @@ class CommonPublicStore:
         raw = self._load_object(file)
       except HTTPException:
         continue
-      created_at = raw.get("created_at", 0)
-      if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
-        created_at = 0
-      position = (float(created_at), str(raw.get("id") or ""))
+      if raw.get("id") != file.stem:
+        continue
+      position = _board_record_position(raw)
+      if position is None:
+        continue
       if before is not None and position >= before:
         continue
       posts.append((position, self._present_board_record(raw, viewer)))
@@ -522,7 +548,7 @@ class CommonPublicStore:
         self._present_board_record(json.loads(row["record_json"]), viewer)
         for row in rows
       ]
-    except (json.JSONDecodeError, sqlite3.Error):
+    except (ValueError, json.JSONDecodeError, sqlite3.Error):
       self._board_index_ready = False
       return self._read_board_files(limit, before, viewer)
 
@@ -892,7 +918,9 @@ def read_board_page(
   next_cursor = None
   if has_more and posts:
     last = posts[-1]
-    next_cursor = _encode_board_cursor(last["created_at"], last["id"])
+    position = _board_record_position(last)
+    if position is not None:
+      next_cursor = _encode_board_cursor(*position)
   return {
     "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
     "posts": posts,
