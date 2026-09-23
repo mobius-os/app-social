@@ -154,7 +154,7 @@ async function listHistory(path, fallbackPrefix, cachePath, before) {
   const timer = setTimeout(() => controller.abort(), HISTORY_TIMEOUT_MS)
   try {
     const page = await call(`${path}?${query}`, { signal: controller.signal })
-    if (!before) await writeCachedHistory(cachePath, page)
+    if (!before) void writeCachedHistory(cachePath, page)
     return page
   } catch (error) {
     // Keep already-cached history readable offline. Online service failures
