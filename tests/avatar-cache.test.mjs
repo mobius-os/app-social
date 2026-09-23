@@ -11,7 +11,7 @@ const response = (avatars = {}) => ({
   json: async () => ({ avatars, missing: [], unavailable: [] }),
 })
 
-test('avatar cache batches peers, serializes batches, and preserves a newer profile prime', async () => {
+test('avatar cache batches peers, serializes batches, and tracks authoritative profile changes', async () => {
   const originalFetch = globalThis.fetch
   const originalCreate = URL.createObjectURL
   const originalRevoke = URL.revokeObjectURL
@@ -80,8 +80,13 @@ test('avatar cache batches peers, serializes batches, and preserves a newer prof
     primeAvatar('owner.example', wire(9))
     assert.equal(cachedAvatarUrl('owner.example'), authoritativeUrl)
     primeAvatar('owner.example', wire(10))
-    assert.notEqual(cachedAvatarUrl('owner.example'), authoritativeUrl)
+    const changedUrl = cachedAvatarUrl('owner.example')
+    assert.notEqual(changedUrl, authoritativeUrl)
     assert.deepEqual(revoked, [authoritativeUrl])
+    primeAvatar('owner.example', null)
+    assert.equal(cachedAvatarUrl('owner.example'), null)
+    assert.deepEqual(updates, [authoritativeUrl, changedUrl, null])
+    assert.equal(revoked.length, 2)
     unsubscribe()
   } finally {
     globalThis.fetch = originalFetch

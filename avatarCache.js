@@ -94,8 +94,20 @@ export function cachedAvatarUrl(host) {
 
 export function primeAvatar(host, wire) {
   const key = hostKey(host)
-  if (!key || !wire) return
+  if (!key) return
   const record = cache.get(key) || newRecord()
+  if (!wire) {
+    const oldUrl = record.url
+    Object.assign(record, {
+      url: null, mime: null, dataB64: null,
+      failedAt: null, notFoundAt: null,
+    })
+    record.generation += 1
+    for (const listener of record.listeners) listener(null)
+    if (oldUrl) URL.revokeObjectURL(oldUrl)
+    cache.set(key, record)
+    return
+  }
   updateRecord(record, wire, { status: 404 })
   cache.set(key, record)
 }
