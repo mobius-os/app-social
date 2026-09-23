@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  getGroup, listConversations, listGroupMessages, listGroups, listMessages,
+  getCachedMessages, getGroup, listConversations, listGroupMessages, listGroups, listMessages,
   requestStatus,
 } from '../api.js'
 
@@ -104,4 +104,54 @@ test('cached direct history remains readable when the local service is offline',
     ],
     next_cursor: null,
   })
+})
+
+test('an offline history miss remains visible instead of becoming a false empty conversation', async () => {
+  globalThis.fetch = async () => { throw new TypeError('offline') }
+  globalThis.window = { mobius: { storage: {
+    async get() { return null },
+    async list() { return [] },
+  } } }
+  await assert.rejects(() => listMessages('peer.example'), /offline/)
+})
+
+test('the newest direct history page is cached for an immediate reopen', async () => {
+  const writes = []
+  const page = { messages: [{ id: 'one', sent_at: 1 }], next_cursor: 'next' }
+  globalThis.window = { mobius: { storage: {
+    async set(path, value) { writes.push([path, value]) },
+    async get(path) {
+      assert.equal(path, 'cache/message-history/dm/peer.example.json')
+      return page
+    },
+  } } }
+  globalThis.fetch = async () => ({ ok: true, async json() { return page } })
+
+  assert.deepEqual(await listMessages('peer.example'), page)
+  assert.deepEqual(writes, [['cache/message-history/dm/peer.example.json', page]])
+  assert.deepEqual(await getCachedMessages('peer.example'), page)
+})
+
+test('a stalled history request ends at its deadline and uses the bounded cache', async () => {
+  const originalSetTimeout = globalThis.setTimeout
+  const originalClearTimeout = globalThis.clearTimeout
+  const cached = { messages: [{ id: 'saved', sent_at: 1 }], next_cursor: null }
+  globalThis.window = { mobius: { storage: {
+    async get(path) {
+      assert.equal(path, 'cache/message-history/dm/peer.example.json')
+      return cached
+    },
+  } } }
+  globalThis.setTimeout = (callback) => { queueMicrotask(callback); return 1 }
+  globalThis.clearTimeout = () => {}
+  globalThis.fetch = (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+  })
+
+  try {
+    assert.deepEqual(await listMessages('peer.example'), cached)
+  } finally {
+    globalThis.setTimeout = originalSetTimeout
+    globalThis.clearTimeout = originalClearTimeout
+  }
 })

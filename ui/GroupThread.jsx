@@ -4,7 +4,7 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptGroupInvitation, clearGroupUnread, clockTime, declineGroupInvitation,
-  getGroup, listGroupMessages, requestStatus, sendGroupMessage,
+  getCachedGroupMessages, getGroup, listGroupMessages, requestStatus, sendGroupMessage,
 } from '../api.js'
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
@@ -68,13 +68,20 @@ export default function GroupThread({
   }
 
   useEffect(() => {
+    let active = true
     seenVersion.current = version
     paginationGeneration.current += 1
     updateMessages(null)
     setNextCursor(null)
+    getCachedGroupMessages(gid).then((page) => {
+      if (!active || messagesRef.current !== null || !page?.messages.length) return
+      const reconciled = reconcileLatestPage(null, page, { replace: true })
+      updateMessages(reconciled.messages)
+      setNextCursor(reconciled.nextCursor)
+    }).catch(() => {})
     refresh({ replace: true })
     if (requestStatus(currentGroup) === 'accepted') clearGroupUnread(gid).catch(() => {})
-    return () => { refreshRequest.current += 1 }
+    return () => { active = false; refreshRequest.current += 1 }
   }, [gid])
   useEffect(() => {
     if (version > 0 && version !== seenVersion.current) {
@@ -324,7 +331,7 @@ export default function GroupThread({
           </button>
         )}
         {loadError && <div className="cn-directory-error" role="alert"><p>{loadError}</p><button className="cn-btn cn-btn-secondary" onClick={refresh}>Try again</button></div>}
-        {messages === null && !loadError && <div className="cn-center"><div className="cn-spinner" /></div>}
+        {messages === null && !loadError && <div className="cn-center cn-history-loading" role="status"><div className="cn-spinner" /><span>Loading messages…</span></div>}
         {messages !== null && messages.length === 0 && (
           <div className="cn-empty">
             <div className="cn-empty-title">Say hello</div>

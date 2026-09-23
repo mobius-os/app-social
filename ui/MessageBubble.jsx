@@ -1,43 +1,5 @@
-import { useRef } from 'react'
 import { Reply, X } from '@openai/apps-sdk-ui/components/Icon'
 import { MessageImage } from './Media.jsx'
-
-function useReplyLongPress(onReply) {
-  const press = useRef(null)
-  const consumed = useRef(false)
-
-  function clear() {
-    if (press.current?.timer) clearTimeout(press.current.timer)
-    press.current = null
-  }
-
-  return {
-    onPointerDown(event) {
-      if (event.pointerType === 'mouse' || !onReply) return
-      consumed.current = false
-      const start = { x: event.clientX, y: event.clientY }
-      start.timer = setTimeout(() => {
-        consumed.current = true
-        onReply()
-        press.current = null
-      }, 450)
-      press.current = start
-    },
-    onPointerMove(event) {
-      const start = press.current
-      if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) clear()
-    },
-    onPointerUp: clear,
-    onPointerCancel: clear,
-    onPointerLeave: clear,
-    onClickCapture(event) {
-      if (!consumed.current) return
-      consumed.current = false
-      event.preventDefault()
-      event.stopPropagation()
-    },
-  }
-}
 
 function handleLabel(handle) {
   const clean = String(handle || 'Unknown').replace(/^@/, '')
@@ -82,7 +44,6 @@ export default function MessageBubble({
   message, mine, tick, avatar, indent, conversationPath, onOpenImage, onImageUnavailable, onReply,
 }) {
   const canReply = !!onReply && !String(message.id || '').startsWith('local-') && message.status !== 'sending'
-  const longPress = useReplyLongPress(canReply ? onReply : null)
 
   const replyButton = canReply && (
     <button className="cn-bubble-reply" type="button" onClick={onReply} aria-label="Reply to message">
@@ -96,8 +57,6 @@ export default function MessageBubble({
       {mine && replyButton}
       <div
         className={`cn-bubble ${mine ? 'is-mine' : 'is-theirs'}${message.status === 'failed' ? ' is-failed' : ''}${message.attachment ? ' has-attachment' : ''}`}
-        onContextMenu={(event) => { if (canReply) event.preventDefault() }}
-        {...longPress}
       >
         <Quote reply={message.reply_to} />
         <MessageImage attachment={message.attachment} conversationPath={conversationPath}

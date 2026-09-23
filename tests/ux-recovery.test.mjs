@@ -53,7 +53,19 @@ test('conversation recovery is visible and new messages do not steal the reading
     assert.match(source, /paginationGeneration\.current \+= 1/)
     assert.match(source, /reconcileOlderPage/)
     assert.match(source, /generation === paginationGeneration\.current/)
+    assert.match(source, /Loading messages…/)
+    assert.match(source, /getCached(?:Group)?Messages/)
   }
+})
+
+test('message text stays selectable and reply uses an explicit touch target', () => {
+  const bubble = readFileSync(new URL('../ui/MessageBubble.jsx', import.meta.url), 'utf8')
+  const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(bubble, /useReplyLongPress|onContextMenu|onPointerDown/)
+  assert.match(bubble, /className="cn-bubble-reply"/)
+  assert.match(theme, /\.cn-bubble-copy[\s\S]*user-select: text/)
+  assert.match(theme, /@media \(hover: none\)[\s\S]*\.cn-bubble-reply \{ opacity: 1; pointer-events: auto; \}/)
+  assert.doesNotMatch(theme, /\.cn-bubble-reply \{ display: none; \}/)
 })
 
 test('direct messages keep one client identity and expose interrupted delivery retry', () => {

@@ -4,7 +4,7 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptMessageRequest, blockMessageRequest, clearUnread, clockTime,
-  declineMessageRequest, getPeer, listMessages, retryMessage, sendMessage,
+  declineMessageRequest, getCachedMessages, getPeer, listMessages, retryMessage, sendMessage,
 } from '../api.js'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
@@ -68,13 +68,20 @@ export default function Thread({
   }
 
   useEffect(() => {
+    let active = true
     seenVersion.current = version
     paginationGeneration.current += 1
     updateMessages(null)
     setNextCursor(null)
+    getCachedMessages(peer).then((page) => {
+      if (!active || messagesRef.current !== null || !page?.messages.length) return
+      const reconciled = reconcileLatestPage(null, page, { replace: true })
+      updateMessages(reconciled.messages)
+      setNextCursor(reconciled.nextCursor)
+    }).catch(() => {})
     refresh({ replace: true })
     if (!requestPending) clearUnread(peer).catch(() => {})
-    return () => { refreshRequest.current += 1 }
+    return () => { active = false; refreshRequest.current += 1 }
   }, [peer])
 
   useEffect(() => {
@@ -374,7 +381,7 @@ export default function Thread({
           </button>
         )}
         {loadError && <div className="cn-directory-error" role="alert"><p>{loadError}</p><button className="cn-btn cn-btn-secondary" onClick={refresh}>Try again</button></div>}
-        {messages === null && !loadError && <div className="cn-center"><div className="cn-spinner" /></div>}
+        {messages === null && !loadError && <div className="cn-center cn-history-loading" role="status"><div className="cn-spinner" /><span>Loading messages…</span></div>}
         {messages !== null && messages.length === 0 && (
           <div className="cn-empty">
             <div className="cn-empty-title">Say hello</div>
