@@ -5,6 +5,7 @@ import asyncio
 import multiprocessing
 import os
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import contextmanager
@@ -30,6 +31,19 @@ def png(width=32, height=24) -> bytes:
 def take_decode_lock(acquired):
   with social_routes._peer_avatar_decode_lock():
     acquired.set()
+
+
+def take_decode_lock_at(root, acquired):
+  with patch.object(social_routes, "_peers_dir", return_value=Path(root)):
+    with social_routes._peer_avatar_decode_lock():
+      acquired.set()
+
+
+def hold_decode_lock(root, acquired, duration):
+  with patch.object(social_routes, "_peers_dir", return_value=Path(root)):
+    with social_routes._peer_avatar_decode_lock():
+      acquired.set()
+      time.sleep(duration)
 
 
 class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
@@ -251,6 +265,94 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(set(response["avatars"]), {"fast.example"})
     self.assertEqual(response["unavailable"], ["slow.example"])
     self.assertTrue((self.root / "avatars" / "slow.example.fail").is_file())
+
+  async def test_decode_lock_timeout_keeps_event_loop_responsive_and_releases_worker_lock(self):
+    context = multiprocessing.get_context("fork")
+    acquired = context.Event()
+    process = context.Process(
+      target=hold_decode_lock, args=(self.root, acquired, 0.3),
+    )
+    with self.route_context(), patch.object(
+      social_routes, "_fetch_actor", AsyncMock(return_value={"avatar": True}),
+    ), patch.object(
+      social_routes, "_download_avatar", AsyncMock(return_value=png()),
+    ), patch.object(
+      social_routes, "PEER_AVATAR_BATCH_TIMEOUT_S", 0.03,
+    ):
+      process.start()
+      self.assertTrue(acquired.wait(2))
+      ticks = 0
+
+      async def heartbeat():
+        nonlocal ticks
+        for _ in range(8):
+          await asyncio.sleep(0.01)
+          ticks += 1
+
+      heartbeat_task = asyncio.create_task(heartbeat())
+      started = time.monotonic()
+      response = await social_routes.get_peer_avatars(
+        social_routes.AvatarBatch(hosts=["locked.example"]), None, None,
+      )
+      elapsed = time.monotonic() - started
+      await heartbeat_task
+
+    try:
+      process.join(2)
+      self.assertEqual(process.exitcode, 0)
+      self.assertLess(elapsed, 0.2)
+      self.assertGreaterEqual(ticks, 3)
+      self.assertEqual(response["avatars"], {})
+      self.assertEqual(response["unavailable"], ["locked.example"])
+      # The detached worker owns its file descriptor until the decode ends.
+      with patch.object(social_routes, "_peers_dir", return_value=self.root):
+        with social_routes._peer_avatar_decode_lock():
+          pass
+    finally:
+      if process.is_alive():
+        process.kill()
+        process.join()
+
+  async def test_decode_timeout_worker_keeps_lock_until_pil_finishes(self):
+    decode_started = threading.Event()
+    release_decode = threading.Event()
+
+    def slow_decode(*_args):
+      decode_started.set()
+      release_decode.wait(2)
+      return "image/webp", b"encoded"
+
+    with self.route_context(), patch.object(
+      social_routes, "_fetch_actor", AsyncMock(return_value={"avatar": True}),
+    ), patch.object(
+      social_routes, "_download_avatar", AsyncMock(return_value=png()),
+    ), patch.object(
+      social_routes, "image_thumbnail_bytes", side_effect=slow_decode,
+    ), patch.object(
+      social_routes, "PEER_AVATAR_BATCH_TIMEOUT_S", 0.03,
+    ):
+      task = asyncio.create_task(social_routes.get_peer_avatars(
+        social_routes.AvatarBatch(hosts=["slow-decode.example"]), None, None,
+      ))
+      self.assertTrue(await asyncio.to_thread(decode_started.wait, 2))
+      response = await task
+      self.assertEqual(response["unavailable"], ["slow-decode.example"])
+
+      acquired = threading.Event()
+      waiter = threading.Thread(
+        target=take_decode_lock_at, args=(self.root, acquired),
+        daemon=True,
+      )
+      waiter.start()
+      try:
+        self.assertFalse(acquired.wait(0.15))
+        release_decode.set()
+        self.assertTrue(acquired.wait(2))
+        waiter.join(2)
+        self.assertFalse(waiter.is_alive())
+      finally:
+        release_decode.set()
+        waiter.join(2)
 
   async def test_timed_out_refresh_keeps_a_stale_cached_avatar(self):
     async def resolve(_host):

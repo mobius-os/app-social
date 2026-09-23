@@ -18,6 +18,7 @@ function newRecord() {
     promise: null,
     failedAt: null,
     notFoundAt: null,
+    fetchedAt: null,
     generation: 0,
     lastUsed: ++accessSequence,
     listeners: new Set(),
@@ -48,9 +49,14 @@ function updateRecord(record, wire, error = null, expectedGeneration = null) {
   if (blob?.size) {
     Object.assign(record, {
       url: URL.createObjectURL(blob), failedAt: null, notFoundAt: null,
+      fetchedAt: Date.now(),
     })
-  } else if (!record.url) {
+  } else {
     Object.assign(record, avatarFailureState(error))
+    if (error?.status === 404) {
+      record.url = null
+      record.fetchedAt = null
+    }
   }
   record.generation += 1
   for (const listener of record.listeners) listener(record.url)
@@ -123,7 +129,7 @@ export function primeAvatar(host, wire) {
   if (!wire) {
     const oldUrl = record.url
     Object.assign(record, {
-      url: null, failedAt: null, notFoundAt: null,
+      url: null, failedAt: null, notFoundAt: null, fetchedAt: null,
     })
     record.generation += 1
     for (const listener of record.listeners) listener(null)
@@ -151,6 +157,7 @@ export function discardAvatar(host, url) {
   if (!record || record.url !== url) return
   URL.revokeObjectURL(record.url)
   record.url = null
+  record.fetchedAt = null
   record.generation += 1
   for (const listener of record.listeners) listener(null)
   pruneIdleAvatars()
