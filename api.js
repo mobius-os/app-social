@@ -147,21 +147,41 @@ async function writeCachedHistory(path, page) {
   try { await store.set(path, page) } catch { /* history remains canonical */ }
 }
 
+// Serialize advisory writes per conversation so a late response cannot replace
+// the newest page that the current view accepted.
+const historyCacheState = new Map()
+
+function beginHistoryRefresh(path) {
+  const state = historyCacheState.get(path) || {
+    generation: 0,
+    write: Promise.resolve(),
+  }
+  state.generation += 1
+  historyCacheState.set(path, state)
+  return { state, generation: state.generation }
+}
+
+function persistLatestHistory(path, page, refresh) {
+  refresh.state.write = refresh.state.write.then(async () => {
+    if (refresh.state.generation !== refresh.generation) return
+    await writeCachedHistory(path, page)
+  })
+}
+
 async function listHistory(path, fallbackPrefix, cachePath, before) {
   const query = new URLSearchParams({ limit: '50' })
   if (before) query.set('before', before)
+  const refresh = before ? null : beginHistoryRefresh(cachePath)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), HISTORY_TIMEOUT_MS)
   try {
     const page = await call(`${path}?${query}`, { signal: controller.signal })
-    if (!before) void writeCachedHistory(cachePath, page)
+    if (!before) persistLatestHistory(cachePath, page, refresh)
     return page
   } catch (error) {
-    // Keep already-cached history readable offline. Online service failures
-    // remain visible rather than being mistaken for an empty conversation.
+    // A snapshot only speeds first paint. Canonical per-message records own
+    // offline recovery, so an older snapshot cannot hide a newer saved message.
     if (before || error.status) throw error
-    const cached = await readCachedHistory(cachePath)
-    if (cached) return cached
     const messages = (await listStoredMessages(fallbackPrefix)).slice(-50)
     if (messages.length) return { messages, next_cursor: null }
     throw error
