@@ -72,7 +72,8 @@ from common_protocol import (
   ATTACHMENT_MIME_EXT as _ATTACHMENT_MIME_EXT,
   MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
   MAX_BOARD_ATTACHMENTS as _MAX_BOARD_ATTACHMENTS,
-  MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_REPLY_TEXT_CHARS,
+  MAX_ENVELOPE_BYTES, MAX_MESSAGE_TEXT_CHARS, MAX_NAME_CHARS,
+  MAX_POST_TEXT_CHARS, MAX_REPLY_TEXT_CHARS,
   OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
   canonical as _canonical, peer_service_url as _peer_service_url,
   post_signed_envelope as _post_signed_envelope,
@@ -142,6 +143,7 @@ _toggle_board_reaction = _public_store.toggle_reaction
 _add_board_reply = _public_store.add_reply
 _fetch_actor = _actor_verifier.fetch_actor
 _verify_peer_envelope = _actor_verifier.verify_envelope
+_message_text_overflow = _actor_verifier.message_text_overflow
 
 
 def _identity_path() -> Path:
@@ -413,8 +415,32 @@ def _open_dm(message_id: str, enc: Any, private_key_b64: str) -> dict:
     ) from exc
 
 
+_PREVIEW_CHARS = 120
+
+
 def _message_preview(text: str) -> str:
-  return text[:120] if text.strip() else "📷 Photo"
+  """One calm line: collapsed whitespace, cut on a word with an ellipsis."""
+  line = " ".join(text.split())
+  if not line:
+    return "📷 Photo"
+  if len(line) <= _PREVIEW_CHARS:
+    return line
+  cut = line[:_PREVIEW_CHARS - 1]
+  space = cut.rfind(" ")
+  if space >= _PREVIEW_CHARS // 2:
+    cut = cut[:space]
+  return cut.rstrip(" .,;:") + "…"
+
+
+def _dm_intent(peer_host: str) -> str:
+  return f"dm:{peer_host}"
+
+
+def _group_intent(gid: str) -> str:
+  return f"group:{gid}"
+
+
+BOARD_INTENT = "board"
 
 
 def _write_app_attachment(
@@ -548,6 +574,7 @@ def _key_actor_doc(identity: dict) -> dict:
       "key_b64": _encryption_public_key(identity["enc_private_key_b64"]),
     },
     "inbox": f"{PUBLIC_SERVICE_PATH}/inbox",
+    "limits": {"message_text_chars": MAX_MESSAGE_TEXT_CHARS},
   }
 
 
@@ -851,6 +878,21 @@ async def _require_encrypted_delivery(
     return record
 
 
+class _PeerTextLimit(Exception):
+  """The recipient's Social predates messages of this length."""
+
+  def __init__(self, limit: int):
+    super().__init__(limit)
+    self.limit = limit
+
+
+def _text_limit_detail(recipient: str, limit: int) -> str:
+  return (
+    f"{recipient} can receive up to {limit:,} characters until their Social "
+    "is updated. Retry later or send a shorter message."
+  )
+
+
 async def _attempt_direct_delivery(app, peer_host: str, message_id: str) -> dict:
   attempt_id, record = await _begin_delivery_attempt(app, peer_host, message_id)
   if attempt_id is None:
@@ -862,6 +904,11 @@ async def _attempt_direct_delivery(app, peer_host: str, message_id: str) -> dict
   try:
     attachment = _stored_attachment(app, peer_host, record)
     actor = await _fetch_actor(peer_host)
+    text_limit = await _message_text_overflow(
+      peer_host, len(record.get("text") or ""),
+    )
+    if text_limit is not None:
+      raise _PeerTextLimit(text_limit)
     identity = _load_identity()
     envelope = {
       "v": 0,
@@ -912,6 +959,11 @@ async def _attempt_direct_delivery(app, peer_host: str, message_id: str) -> dict
     response.raise_for_status()
     status = "delivered"
     detail = None
+  except _PeerTextLimit as exc:
+    peer_handle = record.get("peer_handle")
+    detail = _text_limit_detail(
+      f"@{peer_handle}" if peer_handle else peer_host, exc.limit,
+    )
   except httpx.HTTPStatusError as exc:
     detail = f"The peer rejected the message ({exc.response.status_code})."
   except httpx.TimeoutException:
@@ -1060,7 +1112,10 @@ async def receive_message(request: Request, db=Depends(get_db)):
     text = envelope.get("text")
     attachment = _validate_attachment(envelope.get("attachment"))
     reply_to = _validate_reply_to(envelope.get("reply_to"))
-  _validate_text_or_attachment(text, attachment, "Message text is invalid.")
+  _validate_text_or_attachment(
+    text, attachment, "Message text is invalid.",
+    max_chars=MAX_MESSAGE_TEXT_CHARS,
+  )
   sender = envelope["from"]
   app = _common_app(db)
   sender_label = f"@{actor['handle']}" if actor.get("handle") else sender
@@ -1087,12 +1142,16 @@ async def receive_message(request: Request, db=Depends(get_db)):
       return {"status": "delivered"}
     return {"status": "duplicate"}
   if request_state == "accepted":
-    await notify(f"Message from {sender_label}", _message_preview(text))
+    await notify(
+      f"Message from {sender_label}", _message_preview(text),
+      intent=_dm_intent(sender),
+    )
   elif new_request:
     # Only the first message of a new request notifies, so an un-accepted
     # sender cannot spam the owner with a push per message.
     await notify(
-      f"Message request from {sender_label}", _message_preview(text)
+      f"Message request from {sender_label}", _message_preview(text),
+      intent=_dm_intent(sender),
     )
   return {
     "status": "delivered" if request_state == "accepted" else "pending",
@@ -1118,7 +1177,10 @@ async def _relay_board_activity(
   if not author_host or author_host == actor_host:
     return
   if author_host == _own_host():
-    await notify("Activity on your post", _activity_line(kind, actor_host, actor_handle))
+    await notify(
+      "Activity on your post", _activity_line(kind, actor_host, actor_handle),
+      intent=BOARD_INTENT,
+    )
     return
   identity = _load_identity()
   envelope = {
@@ -1157,13 +1219,23 @@ async def receive_board_activity(request: Request):
   kind = envelope.get("kind")
   if kind not in ("like", "reply"):
     raise HTTPException(status_code=400, detail="Unsupported activity kind.")
-  # The signature proves this came from the host that holds the post; the host
-  # is authoritative for activity on the boards it serves.
+  # Only the community host stores boards, so only it may report activity on
+  # the owner's posts; any other signed peer could otherwise push arbitrary
+  # "activity" notifications. The signature proves the sender's identity.
+  if envelope.get("from") != _canonical_community_host(envelope.get("from")):
+    raise HTTPException(status_code=403, detail="Only the community host reports board activity.")
   await _verify_peer_envelope(envelope)
   actor_host = envelope.get("actor") or envelope["from"]
+  if not _valid_host(actor_host):
+    raise HTTPException(status_code=400, detail="Activity actor is invalid.")
   actor_handle = envelope.get("actor_handle")
-  actor_handle = actor_handle if isinstance(actor_handle, str) else ""
-  await notify("Activity on your post", _activity_line(kind, actor_host, actor_handle))
+  actor_handle = (
+    actor_handle.strip()[:MAX_NAME_CHARS] if isinstance(actor_handle, str) else ""
+  )
+  await notify(
+    "Activity on your post", _activity_line(kind, actor_host, actor_handle),
+    intent=BOARD_INTENT,
+  )
   return {"status": "ok"}
 
 
@@ -1517,7 +1589,10 @@ async def send_message(
     raise HTTPException(status_code=400, detail="Invalid recipient.")
   attachment = _validate_attachment(message.attachment)
   reply_to = _validate_reply_to(message.reply_to)
-  _validate_text_or_attachment(text, attachment, "Message text is invalid.")
+  _validate_text_or_attachment(
+    text, attachment, "Message text is invalid.",
+    max_chars=MAX_MESSAGE_TEXT_CHARS,
+  )
   message_id = message.id or str(uuid.uuid4())
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
@@ -1587,7 +1662,9 @@ async def publish_post(
   if thumbnails and len(thumbnails) != image_count:
     raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
   first = attachment or (attachments[0] if attachments else None)
-  _validate_text_or_attachment(text, first, "Post text is invalid.")
+  _validate_text_or_attachment(
+    text, first, "Post text is invalid.", max_chars=MAX_POST_TEXT_CHARS,
+  )
   identity = _load_identity()
   envelope = {
     "v": 0,

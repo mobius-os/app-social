@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import logging
 import os
+import re
 import shutil
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -210,14 +212,29 @@ async def resolve_handle_hosts(handle: str) -> list[str] | None:
   return hosts if isinstance(hosts, list) else None
 
 
-async def notify(title: str, body: str) -> None:
+_logger = logging.getLogger("social.notify")
+# The shell forwards only intents in this form to the app frame.
+_INTENT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+async def notify(title: str, body: str, *, intent: str | None = None) -> None:
+  """Push one owner notification; a tap opens ``intent`` inside Social.
+
+  Notification delivery is best-effort and never fails the federation write
+  that caused it, but a refusal is logged rather than silently lost.
+  """
+  target = f"/shell/?app={APP.id}"
+  if intent and _INTENT_RE.fullmatch(intent):
+    target += f"&intent={intent}"
   try:
-    await platform_request("POST", "/api/notifications/send", json_body={
+    response = await platform_request("POST", "/api/notifications/send", json_body={
       "title": title,
       "body": body,
       "source_type": "app",
       "source_id": str(APP.id),
-      "target": f"/shell/?app={APP.id}",
+      "target": target,
     })
-  except Exception:
-    pass
+    if response.status_code >= 400:
+      _logger.warning("Notification refused (%s): %s", response.status_code, title)
+  except Exception as exc:
+    _logger.warning("Notification failed (%s): %s", type(exc).__name__, title)

@@ -49,6 +49,7 @@ from pydantic import BaseModel
 
 from common_protocol import (
   MAX_ENVELOPE_BYTES,
+  MAX_MESSAGE_TEXT_CHARS,
   MAX_NAME_CHARS,
   post_signed_envelope as _post_signed_envelope,
   peer_service_url as _peer_service_url,
@@ -70,7 +71,10 @@ from social_routes import (
   _common_dir,
   _fetch_actor,
   _load_identity,
+  _group_intent,
   _message_preview,
+  _message_text_overflow,
+  _text_limit_detail,
   _own_host,
   _require_owner_or_common_app,
   _verify_peer_envelope,
@@ -483,14 +487,18 @@ async def _deliver_committed_host_post(
   """Perform post-commit fan-out and notification outside the transaction."""
   delivered = await _fan_out(group, relays)
   if author != _own_host():
-    await _notify_group_message(db, app, group["name"], author_handle, text)
+    await _notify_group_message(group["id"], group["name"], author_handle, text)
   return delivered
 
 
 async def _notify_group_message(
-  db, app, group_name: str, author_handle: str, text: str
+  gid: str, group_name: str, author_handle: str, text: str,
 ) -> None:
-  await notify(f"{group_name} — {author_handle}", _message_preview(text))
+  author = author_handle if "." in author_handle else f"@{author_handle}"
+  await notify(
+    f"{group_name} — {author}", _message_preview(text),
+    intent=_group_intent(gid),
+  )
 
 
 # ── peer surface ────────────────────────────────────────────────────────────
@@ -606,6 +614,7 @@ async def _accept_group_envelope(
       or invitation_version < 1
     ):
       raise HTTPException(status_code=400, detail="Invitation version is invalid.")
+    prior = _load_group_meta(app, gid)
     status = await _apply_member_group_lifecycle(app, gid, sender, kind, {
       "gid": gid, "name": name, "host": sender,
       "members": list(roster.values()),
@@ -613,6 +622,18 @@ async def _accept_group_envelope(
       "invitation_id": invitation_id,
       "invitation_version": invitation_version,
     }, invitation_id=invitation_id, invitation_version=invitation_version)
+    newly_invited = status == "pending" and (
+      prior is None
+      or prior.get("invitation_id") != invitation_id
+      or _group_request_state(prior) != "pending"
+    )
+    if newly_invited:
+      # Roster refreshes re-deliver the same invitation; only a new one pings.
+      inviter = actor.get("handle")
+      await notify(
+        f"{'@' + inviter if inviter else sender} invited you to {name}",
+        "Open Social to accept or decline.", intent=_group_intent(gid),
+      )
     return {"status": status}
 
   message_id = envelope.get("id")
@@ -622,7 +643,10 @@ async def _accept_group_envelope(
   if kind == "group_post":
     text = envelope.get("text")
     attachment = _validate_attachment(envelope.get("attachment"))
-    _validate_text_or_attachment(text, attachment, "Message text is invalid.")
+    _validate_text_or_attachment(
+      text, attachment, "Message text is invalid.",
+      max_chars=MAX_MESSAGE_TEXT_CHARS,
+    )
     reply_to = _validate_reply_to(envelope.get("reply_to"))
     with _host_group_transaction(gid):
       group = _load_host_group(gid)
@@ -672,7 +696,10 @@ async def _accept_group_envelope(
     ) from exc
   text = original.get("text")
   attachment = _validate_attachment(original.get("attachment"))
-  _validate_text_or_attachment(text, attachment, "Message text is invalid.")
+  _validate_text_or_attachment(
+    text, attachment, "Message text is invalid.",
+    max_chars=MAX_MESSAGE_TEXT_CHARS,
+  )
   reply_to = _validate_reply_to(original.get("reply_to"))
   author = original["from"]
   author_handle = str(original_actor.get("handle") or author)[:MAX_NAME_CHARS]
@@ -688,7 +715,7 @@ async def _accept_group_envelope(
     return {"status": "duplicate"}
   if _group_request_state(meta) == "accepted":
     await _notify_group_message(
-      db, app, meta.get("name") or "Group", author_handle, text,
+      gid, meta.get("name") or "Group", author_handle, text,
     )
     return {"status": "delivered"}
   return {"status": "pending"}
@@ -923,7 +950,10 @@ async def send_group_message(
   _validate_gid(gid)
   text = body.text.strip()
   attachment = _validate_attachment(body.attachment)
-  _validate_text_or_attachment(text, attachment, "Message text is invalid.")
+  _validate_text_or_attachment(
+    text, attachment, "Message text is invalid.",
+    max_chars=MAX_MESSAGE_TEXT_CHARS,
+  )
   reply_to = _validate_reply_to(body.reply_to)
   identity = _load_identity()
   message_id = str(uuid.uuid4())
@@ -970,7 +1000,11 @@ async def send_group_message(
 
   # Do not hold a member lock while contacting its host: a simultaneous host
   # deletion needs to deliver its tombstone back here without a lock cycle.
-  ok = await _deliver(meta["host"], envelope)
+  try:
+    host_text_limit = await _message_text_overflow(meta["host"], len(text))
+  except HTTPException:
+    host_text_limit = None  # Unreachable now; the delivery attempt reports it.
+  ok = host_text_limit is None and await _deliver(meta["host"], envelope)
   async with _group_lock(gid):
     current = _load_group_meta(app, gid)
     if current is None:
@@ -988,7 +1022,12 @@ async def send_group_message(
     if reply_to is not None:
       record["reply_to"] = reply_to
     await _store_group_message(app, gid, record, attachment)
-  detail = None if ok else f"The group host {meta['host']} could not be reached."
+  if ok:
+    detail = None
+  elif host_text_limit is not None:
+    detail = _text_limit_detail("This group's host", host_text_limit)
+  else:
+    detail = f"The group host {meta['host']} could not be reached."
   return {
     "status": "delivered" if ok else "failed", "id": message_id, "detail": detail,
     **({"group_deleted": True} if current.get("deleted_at") else {}),
