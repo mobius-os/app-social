@@ -212,7 +212,10 @@ async def resolve_handle_hosts(handle: str) -> list[str] | None:
 
 
 async def notify(title: str, body: str, intent: str) -> None:
-  """Best-effort push; tapping it opens ``intent`` (dm:<host>, group:<gid>, board)."""
+  """Best-effort push; tapping it opens ``intent`` (dm:<host>, group:<gid>, board).
+
+  The intent is also the tag, so each conversation keeps one notification.
+  """
   try:
     response = await platform_request("POST", "/api/notifications/send", json_body={
       "title": title,
@@ -220,6 +223,7 @@ async def notify(title: str, body: str, intent: str) -> None:
       "source_type": "app",
       "source_id": str(APP.id),
       "target": f"/shell/?app={APP.id}&intent={quote(intent, safe=':')}",
+      "tag": intent,
     })
     response.raise_for_status()
   except Exception as exc:
