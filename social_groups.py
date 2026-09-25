@@ -483,14 +483,16 @@ async def _deliver_committed_host_post(
   """Perform post-commit fan-out and notification outside the transaction."""
   delivered = await _fan_out(group, relays)
   if author != _own_host():
-    await _notify_group_message(db, app, group["name"], author_handle, text)
+    await _notify_group_message(group["id"], group["name"], author_handle, text)
   return delivered
 
 
 async def _notify_group_message(
-  db, app, group_name: str, author_handle: str, text: str
+  gid: str, group_name: str, author_handle: str, text: str
 ) -> None:
-  await notify(f"{group_name} — {author_handle}", _message_preview(text))
+  await notify(
+    f"{group_name} — {author_handle}", _message_preview(text), f"group:{gid}",
+  )
 
 
 # ── peer surface ────────────────────────────────────────────────────────────
@@ -606,6 +608,7 @@ async def _accept_group_envelope(
       or invitation_version < 1
     ):
       raise HTTPException(status_code=400, detail="Invitation version is invalid.")
+    prior = _load_group_meta(app, gid) or {}
     status = await _apply_member_group_lifecycle(app, gid, sender, kind, {
       "gid": gid, "name": name, "host": sender,
       "members": list(roster.values()),
@@ -613,6 +616,13 @@ async def _accept_group_envelope(
       "invitation_id": invitation_id,
       "invitation_version": invitation_version,
     }, invitation_id=invitation_id, invitation_version=invitation_version)
+    # Roster refreshes re-deliver the same pending invitation; notify once.
+    if status == "pending" and (
+      prior.get("invitation_id") != invitation_id
+      or _group_request_state(prior) != "pending"
+    ):
+      inviter = f"@{actor['handle']}" if actor.get("handle") else sender
+      await notify(f"{inviter} invited you to {name}", "Open Social to reply.", f"group:{gid}")
     return {"status": status}
 
   message_id = envelope.get("id")
@@ -688,7 +698,7 @@ async def _accept_group_envelope(
     return {"status": "duplicate"}
   if _group_request_state(meta) == "accepted":
     await _notify_group_message(
-      db, app, meta.get("name") or "Group", author_handle, text,
+      gid, meta.get("name") or "Group", author_handle, text,
     )
     return {"status": "delivered"}
   return {"status": "pending"}

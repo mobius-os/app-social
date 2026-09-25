@@ -9,6 +9,7 @@ import {
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
+import MessageInput from './MessageInput.jsx'
 import GroupDetails from './GroupDetails.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import {
@@ -17,7 +18,7 @@ import {
 } from '../message_ui_state.js'
 
 export default function GroupThread({
-  group, me, version, onBack, showToast, onOpenImage,
+  group, me, version, foreground, onBack, showToast, onOpenImage,
 }) {
   const [details, setDetails] = useState(false)
   const [currentGroup, setCurrentGroup] = useState(group)
@@ -80,14 +81,17 @@ export default function GroupThread({
       setNextCursor(reconciled.nextCursor)
     }).catch(() => {})
     refresh({ replace: true })
-    if (requestStatus(currentGroup) === 'accepted') clearGroupUnread(gid).catch(() => {})
     return () => { active = false; refreshRequest.current += 1 }
   }, [gid])
+  // Messages are read only while this pane is actually visible to the owner.
+  const isMember = requestStatus(currentGroup) === 'accepted'
+  useEffect(() => {
+    if (foreground && isMember) clearGroupUnread(gid).catch(() => {})
+  }, [gid, version, foreground, isMember])
   useEffect(() => {
     if (version > 0 && version !== seenVersion.current) {
       seenVersion.current = version
       refresh()
-      if (requestStatus(currentGroup) === 'accepted') clearGroupUnread(gid).catch(() => {})
     }
   }, [version])
   async function loadEarlier() {
@@ -354,9 +358,8 @@ export default function GroupThread({
                   disabled={sending || processingImage} aria-label="Attach photo">
             {processingImage ? <span className="cn-spinner" /> : <ImageSquare aria-hidden="true" />}
           </button>
-          <input ref={inputRef} value={draft} onChange={(event) => setDraft(event.target.value)}
-                 disabled={sending || processingImage}
-                 placeholder="Message" autoComplete="off" aria-label="Message" />
+          <MessageInput inputRef={inputRef} value={draft} onChange={setDraft}
+                        disabled={sending || processingImage} />
           <button className="cn-send" type="submit"
                   disabled={sending || processingImage || (!draft.trim() && !selectedImage)} aria-label="Send">
             <ArrowUp />

@@ -25,7 +25,10 @@ from service_io import atomic_write, read_capped_body
 
 PROTOCOL = "common/0"
 PUBLIC_SERVICE_PATH = "/api/app-services/social"
-MAX_TEXT_CHARS = 4000
+# Messages match Slack's 40,000-character cap. Board posts stay short because a
+# feed page carries many of them through the bounded community-host transport.
+MAX_MESSAGE_TEXT_CHARS = 40_000
+MAX_POST_TEXT_CHARS = 4000
 MAX_REPLY_TEXT_CHARS = 1000
 MAX_NAME_CHARS = 80
 MAX_BIO_CHARS = 400
@@ -58,7 +61,7 @@ ATTACHMENT_MIME_EXT = {
   "image/png": "png",
   "image/webp": "webp",
 }
-_ATTACHMENT_ENVELOPE_TYPES = {
+_CONTENT_ENVELOPE_TYPES = {
   "message", "group_post", "group_message", "board_post",
 }
 
@@ -217,10 +220,11 @@ def validate_reply_to(value: Any) -> dict | None:
 
 def validate_text_or_attachment(
   text: Any, attachment: tuple[dict, bytes] | None, detail: str,
+  max_chars: int = MAX_MESSAGE_TEXT_CHARS,
 ) -> None:
   if (
     not isinstance(text, str)
-    or len(text) > MAX_TEXT_CHARS
+    or len(text) > max_chars
     or (not text.strip() and attachment is None)
   ):
     raise HTTPException(status_code=400, detail=detail)
@@ -235,17 +239,12 @@ async def read_envelope(request: Request) -> dict:
     raise HTTPException(status_code=400, detail="Envelope is not JSON.") from exc
   if not isinstance(envelope, dict):
     raise HTTPException(status_code=400, detail="Envelope is not an object.")
-  attachments = envelope.get("attachments")
-  supports_large_payload = (
-    envelope.get("type") in _ATTACHMENT_ENVELOPE_TYPES
-    and (
-      envelope.get("attachment") is not None
-      or (isinstance(attachments, list) and len(attachments) > 0)
-    )
-  ) or (
-    envelope.get("type") == "message" and envelope.get("enc") is not None
-  )
-  if len(body) > MAX_ENVELOPE_BYTES and not supports_large_payload:
+  # Content envelopes may carry long text, images, or ciphertext; their fields
+  # are validated individually. Control envelopes stay small.
+  if (
+    len(body) > MAX_ENVELOPE_BYTES
+    and envelope.get("type") not in _CONTENT_ENVELOPE_TYPES
+  ):
     raise HTTPException(status_code=413, detail="Envelope too large.")
   return envelope
 
@@ -392,7 +391,8 @@ __all__ = [
   "MAX_ATTACHMENT_ENVELOPE_BYTES", "MAX_AVATAR_BYTES", "MAX_BIO_CHARS",
   "MAX_BOARD_ATTACHMENTS", "validate_attachments",
   "MAX_ENVELOPE_BYTES", "MAX_NAME_CHARS", "MAX_REPLY_TEXT_CHARS",
-  "MAX_TEXT_CHARS", "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
+  "MAX_MESSAGE_TEXT_CHARS", "MAX_POST_TEXT_CHARS",
+  "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
   "PROTOCOL", "PUBLIC_SERVICE_PATH",
   "canonical", "peer_base_url", "peer_service_url", "post_signed_envelope",
   "read_envelope", "sign",

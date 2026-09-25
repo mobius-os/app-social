@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import logging
 import os
 import shutil
 from contextlib import asynccontextmanager
@@ -210,14 +211,16 @@ async def resolve_handle_hosts(handle: str) -> list[str] | None:
   return hosts if isinstance(hosts, list) else None
 
 
-async def notify(title: str, body: str) -> None:
+async def notify(title: str, body: str, intent: str) -> None:
+  """Best-effort push; tapping it opens ``intent`` (dm:<host>, group:<gid>, board)."""
   try:
-    await platform_request("POST", "/api/notifications/send", json_body={
+    response = await platform_request("POST", "/api/notifications/send", json_body={
       "title": title,
       "body": body,
       "source_type": "app",
       "source_id": str(APP.id),
-      "target": f"/shell/?app={APP.id}",
+      "target": f"/shell/?app={APP.id}&intent={quote(intent, safe=':')}",
     })
-  except Exception:
-    pass
+    response.raise_for_status()
+  except Exception as exc:
+    logging.getLogger("social").warning("Notification not sent: %s", exc)

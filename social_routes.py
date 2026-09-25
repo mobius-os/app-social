@@ -72,7 +72,7 @@ from common_protocol import (
   ATTACHMENT_MIME_EXT as _ATTACHMENT_MIME_EXT,
   MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
   MAX_BOARD_ATTACHMENTS as _MAX_BOARD_ATTACHMENTS,
-  MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_REPLY_TEXT_CHARS,
+  MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_POST_TEXT_CHARS, MAX_REPLY_TEXT_CHARS,
   OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
   canonical as _canonical, peer_service_url as _peer_service_url,
   post_signed_envelope as _post_signed_envelope,
@@ -1087,12 +1087,15 @@ async def receive_message(request: Request, db=Depends(get_db)):
       return {"status": "delivered"}
     return {"status": "duplicate"}
   if request_state == "accepted":
-    await notify(f"Message from {sender_label}", _message_preview(text))
+    await notify(
+      f"Message from {sender_label}", _message_preview(text), f"dm:{sender}",
+    )
   elif new_request:
     # Only the first message of a new request notifies, so an un-accepted
     # sender cannot spam the owner with a push per message.
     await notify(
-      f"Message request from {sender_label}", _message_preview(text)
+      f"Message request from {sender_label}", _message_preview(text),
+      f"dm:{sender}",
     )
   return {
     "status": "delivered" if request_state == "accepted" else "pending",
@@ -1118,7 +1121,10 @@ async def _relay_board_activity(
   if not author_host or author_host == actor_host:
     return
   if author_host == _own_host():
-    await notify("Activity on your post", _activity_line(kind, actor_host, actor_handle))
+    await notify(
+      "Activity on your post", _activity_line(kind, actor_host, actor_handle),
+      "board",
+    )
     return
   identity = _load_identity()
   envelope = {
@@ -1157,13 +1163,18 @@ async def receive_board_activity(request: Request):
   kind = envelope.get("kind")
   if kind not in ("like", "reply"):
     raise HTTPException(status_code=400, detail="Unsupported activity kind.")
-  # The signature proves this came from the host that holds the post; the host
-  # is authoritative for activity on the boards it serves.
+  # Only the community host stores boards, so only it may report activity;
+  # otherwise any signed peer could push arbitrary notifications.
+  if envelope.get("from") != _canonical_community_host(envelope.get("from")):
+    raise HTTPException(status_code=403, detail="Only the community host reports activity.")
   await _verify_peer_envelope(envelope)
   actor_host = envelope.get("actor") or envelope["from"]
   actor_handle = envelope.get("actor_handle")
-  actor_handle = actor_handle if isinstance(actor_handle, str) else ""
-  await notify("Activity on your post", _activity_line(kind, actor_host, actor_handle))
+  actor_handle = actor_handle[:MAX_NAME_CHARS] if isinstance(actor_handle, str) else ""
+  await notify(
+    "Activity on your post", _activity_line(kind, actor_host, actor_handle),
+    "board",
+  )
   return {"status": "ok"}
 
 
@@ -1587,7 +1598,9 @@ async def publish_post(
   if thumbnails and len(thumbnails) != image_count:
     raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
   first = attachment or (attachments[0] if attachments else None)
-  _validate_text_or_attachment(text, first, "Post text is invalid.")
+  _validate_text_or_attachment(
+    text, first, "Post text is invalid.", MAX_POST_TEXT_CHARS,
+  )
   identity = _load_identity()
   envelope = {
     "v": 0,

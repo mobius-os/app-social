@@ -40,6 +40,7 @@ from common_protocol import (
   MAX_BOARD_ATTACHMENTS,
   MAX_BIO_CHARS,
   MAX_NAME_CHARS,
+  MAX_POST_TEXT_CHARS,
   MAX_REPLY_TEXT_CHARS,
   ActorVerifier,
   canonical,
@@ -1103,7 +1104,9 @@ def create_public_router(
       raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
     text = envelope.get("text")
     first = attachment or (attachments[0] if attachments else None)
-    validate_text_or_attachment(text, first, "Post text is invalid.")
+    validate_text_or_attachment(
+      text, first, "Post text is invalid.", MAX_POST_TEXT_CHARS,
+    )
     post_id = envelope.get("id")
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")

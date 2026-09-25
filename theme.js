@@ -359,7 +359,7 @@ export const CSS = `
 .cn-row-top strong { font-size: 15.5px; font-weight: 720; letter-spacing: -0.012em; }
 .cn-time { font-size: 12px; color: var(--muted); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .cn-preview {
-  font-size: 13.5px; color: var(--muted); margin-top: 4px;
+  display: block; font-size: 13.5px; color: var(--muted); margin-top: 4px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .cn-unread-dot {
@@ -592,13 +592,14 @@ export const CSS = `
   display: flex; gap: 9px; align-items: flex-end;
   background: transparent;
 }
-.cn-compose-bar input {
-  min-height: 46px; border-radius: 23px; border: 1px solid var(--border);
-  background: var(--surface); padding: 0 16px; min-width: 0; flex: 1; outline: 0;
-  font-size: 16px; color: var(--text); font-family: var(--font);
+.cn-compose-bar textarea {
+  min-height: 46px; max-height: 168px; resize: none; overflow-y: auto;
+  border-radius: 23px; border: 1px solid var(--border);
+  background: var(--surface); padding: 12px 16px; min-width: 0; flex: 1; outline: 0;
+  font-size: 16px; line-height: 20px; color: var(--text); font-family: var(--font);
   transition: border-color 0.15s ease;
 }
-.cn-compose-bar input:focus { border-color: var(--accent); }
+.cn-compose-bar textarea:focus { border-color: var(--accent); }
 .cn-send {
   width: 46px; height: 46px; border-radius: 50%; border: 0; flex: 0 0 auto;
   background: var(--accent);

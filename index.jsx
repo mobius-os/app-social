@@ -145,6 +145,9 @@ export default function App({ appId, token }) {
   const [intentState, setIntentState] = useState('loading')
   const [appIconUrl, setAppIconUrl] = useState(null)
   const navHandle = useRef(null)
+  // The shell hides background panes without changing document visibility.
+  const [foreground, setForeground] = useState(true)
+  const onShellMessage = useRef(null)
   const toastTimer = useRef(null)
   const readySignalled = useRef(false)
   const freshFeedLoaded = useRef(false)
@@ -416,6 +419,34 @@ export default function App({ appId, token }) {
     if (rose) setBoardActivity(true)
   }, [feed, tab, me, feedState])
 
+  // ── shell messages: pane visibility and notification taps ────────────────
+  // A notification tap arrives as an app intent: dm:<host>, group:<gid>, board.
+  onShellMessage.current = async ({ type, visible, intent }) => {
+    if (type === 'moebius:frame-visibility') {
+      setForeground(visible !== false)
+      return
+    }
+    if (type !== 'moebius:app-intent' || typeof intent !== 'string') return
+    const [kind, id] = intent.split(/:(.*)/)
+    if (kind === 'board') {
+      if (thread) closeThread()
+      setTab('board')
+    } else if (kind === 'dm') {
+      const convo = (await api.listConversations()).find((item) => item.peer === id)
+      openThread(id, convo?.peer_handle, api.requestStatus(convo) === 'pending')
+    } else if (kind === 'group') {
+      openGroup(await api.getGroup(id))
+    }
+  }
+  useEffect(() => {
+    const listener = (event) => {
+      if (event.source !== window.parent || !event.data) return
+      onShellMessage.current(event.data).catch(() => setTab('messages'))
+    }
+    window.addEventListener('message', listener)
+    return () => window.removeEventListener('message', listener)
+  }, [])
+
   // ── thread navigation with a real shell back target ───────────────────────
   function openAnyThread(next) {
     navHandle.current?.close()
@@ -522,6 +553,7 @@ export default function App({ appId, token }) {
             group={groups.find((g) => g.gid === thread.group.gid) || thread.group}
             me={me}
             version={version}
+            foreground={foreground}
             onBack={closeThread}
             showToast={showToast}
             onOpenImage={(url, alt) => setLightbox({ url, alt })}
@@ -533,6 +565,7 @@ export default function App({ appId, token }) {
             peerHandle={thread.name || conversations.find((c) => c.peer === thread.peer)?.peer_handle}
             me={me}
             version={version}
+            foreground={foreground}
             request={thread.request}
             onBack={closeThread}
             showToast={showToast}
