@@ -44,16 +44,17 @@ class MessageLengthTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NotificationTests(unittest.IsolatedAsyncioTestCase):
-  async def test_a_notification_opens_its_conversation(self):
+  async def test_a_notification_opens_and_groups_by_its_conversation(self):
     send = AsyncMock(return_value=httpx.Response(
       200, request=httpx.Request("POST", "http://platform/api/notifications/send"),
     ))
     with patch.object(service_runtime, "platform_request", new=send):
       await service_runtime.notify("Message from @a", "hi", "dm:peer.example:8443")
+    sent = send.await_args.kwargs["json_body"]
     self.assertEqual(
-      send.await_args.kwargs["json_body"]["target"],
-      f"/shell/?app={service_runtime.APP.id}&intent=dm:peer.example:8443",
+      sent["target"], f"/shell/?app={service_runtime.APP.id}&intent=dm:peer.example:8443",
     )
+    self.assertEqual(sent["tag"], "dm:peer.example:8443")
 
   async def test_a_refused_notification_is_logged(self):
     refused = AsyncMock(return_value=httpx.Response(
