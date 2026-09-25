@@ -3,7 +3,6 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 
 import { setToken, postReply } from '../api.js'
-import { SHARED_COMMUNITY_HOST } from '../community.js'
 import {
   PARTICIPATION_INTENT_PATH, accountHandoff, clearParticipationIntent,
   createParticipationIntent, loadParticipationIntent, participationStep,
@@ -72,7 +71,7 @@ test('participation keeps account linking, directory consent and final action se
   assert.equal(participationStep({ connected: false, joined: false, identity_app_id: 8 }), 'identity')
   assert.equal(participationStep({ connected: true, joined: false, name: 'Ada' }), 'join')
   assert.equal(participationStep({
-    connected: true, joined: true, name: 'Ada', community_host: SHARED_COMMUNITY_HOST,
+    connected: true, joined: true, name: 'Ada',
   }), 'ready')
 })
 

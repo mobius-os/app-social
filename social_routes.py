@@ -86,9 +86,7 @@ from common_protocol import (
   validate_text_or_attachment as _validate_text_or_attachment,
 )
 from common_public import (
-  BOARD_REACTION_EMOJIS, CommonPublicStore,
-  create_public_router, image_thumbnail_bytes, read_board_page,
-  send_board_activity,
+  BOARD_REACTION_EMOJIS, CommonPublicStore, image_thumbnail_bytes,
 )
 from common_transport import FederationTransportError, federation_request
 from service_io import atomic_write
@@ -130,18 +128,15 @@ def _data_dir() -> str:
   return get_settings().data_dir
 
 
-_public_store = CommonPublicStore(_data_dir)
-_actor_verifier = ActorVerifier(_data_dir)
+def _common_dir() -> Path:
+  path = Path(_data_dir()) / "common"
+  path.mkdir(parents=True, exist_ok=True)
+  return path
 
-# Owner/personal code below shares the public service's canonical paths and
-# mutations instead of maintaining parallel storage logic.
-_common_dir = _public_store.common_dir
-_board_media_dir = _public_store.board_media_dir
-_find_image = _public_store.find_image
-_serve_image = _public_store.serve_image
-_store_board_post = _public_store.store_post
-_toggle_board_reaction = _public_store.toggle_reaction
-_add_board_reply = _public_store.add_reply
+
+_actor_verifier = ActorVerifier(_data_dir)
+_find_image = CommonPublicStore.find_image
+_serve_image = CommonPublicStore.serve_image
 _fetch_actor = _actor_verifier.fetch_actor
 _verify_peer_envelope = _actor_verifier.verify_envelope
 
@@ -282,18 +277,8 @@ def _peer_board_media_name(host: str, post_id: str) -> str:
   return f"{safe_host}-{post_id}"
 
 
-DEFAULT_COMMUNITY_HOST = COMMUNITY_HOST
-
-
 def _own_host() -> str:
   return get_settings().domain
-
-
-def _canonical_community_host(host: str | None = None) -> str:
-  """Return the canonical global community host."""
-  if _own_host() in ("testserver", "localhost", "127.0.0.1", "mobius.test"):
-    return host or _own_host()
-  return COMMUNITY_HOST
 
 
 async def _download_avatar(url: str) -> bytes:
@@ -492,7 +477,6 @@ def _load_identity() -> dict:
     "enc_public_key_b64": enc_public_b64,
     "name": "",
     "bio": "",
-    "community_host": _canonical_community_host(),
     "created_at": int(time.time()),
   }
   atomic_write(path, json.dumps(identity, indent=2))
@@ -1080,31 +1064,6 @@ def _activity_line(kind: str, actor_host: str, actor_handle: str) -> str:
   return f"{who} {verb} your post"
 
 
-async def _relay_board_activity(
-  kind: str, author_host: str, actor_host: str, actor_handle: str, post_id: str,
-) -> None:
-  """Tell a post's author that their post got a like or reply.
-
-  Runs on the host that stores the post. If the author lives here, notify the
-  owner directly; otherwise sign a `board_activity` envelope to the author's
-  host, which notifies its own owner. Best-effort: a failed relay never affects
-  the reactor's stored like/reply.
-  """
-  if not author_host or author_host == actor_host:
-    return
-  if author_host == _own_host():
-    await notify(
-      "Activity on your post", _activity_line(kind, actor_host, actor_handle),
-      "board",
-    )
-    return
-  await send_board_activity(
-    _load_identity()["private_key_b64"], _own_host(), kind=kind,
-    author_host=author_host, actor_host=actor_host, actor_handle=actor_handle,
-    post_id=post_id,
-  )
-
-
 @router.post("/activity")
 async def receive_board_activity(request: Request):
   """Accept a signed notice that one of the owner's posts got a like or reply."""
@@ -1120,7 +1079,7 @@ async def receive_board_activity(request: Request):
     raise HTTPException(status_code=400, detail="Unsupported activity kind.")
   # Only the community host stores boards, so only it may report activity;
   # otherwise any signed peer could push arbitrary notifications.
-  if envelope.get("from") != _canonical_community_host(envelope.get("from")):
+  if envelope.get("from") != COMMUNITY_HOST:
     raise HTTPException(status_code=403, detail="Only the community host reports activity.")
   await _verify_peer_envelope(envelope)
   actor_host = envelope.get("actor") or envelope["from"]
@@ -1131,13 +1090,6 @@ async def receive_board_activity(request: Request):
     "board",
   )
   return {"status": "ok"}
-
-
-# The directory and board peer surface is shared with the isolated host.
-_public_router, _public_write_limiter = create_public_router(
-  _public_store, _actor_verifier, prefix="", on_activity=_relay_board_activity,
-)
-router.include_router(_public_router)
 
 
 # ── owner surface ───────────────────────────────────────────────────────────
@@ -1154,7 +1106,6 @@ def _require_owner_or_common_app(db, principal: Principal):
 
 class ProfileUpdate(BaseModel):
   bio: str | None = None
-  community_host: str | None = None
 
 
 class SendMessage(BaseModel):
@@ -1254,7 +1205,6 @@ async def _me_response(
     "name": identity.get("name") or "",
     "handle": identity.get("handle") or "",
     "bio": identity.get("bio") or "",
-    "community_host": _canonical_community_host(identity.get("community_host")),
     "connected": connected,
     "joined": bool(identity.get("joined_at")),
     "account_error": account_error,
@@ -1326,7 +1276,7 @@ async def join_community(
 
 async def _register_with_community_host(identity: dict) -> str:
   """Announce this instance to its community host. Returns a status string."""
-  host = _canonical_community_host(identity.get("community_host"))
+  host = COMMUNITY_HOST
   envelope = {
     "v": 0,
     "type": "register",
@@ -1336,12 +1286,6 @@ async def _register_with_community_host(identity: dict) -> str:
     "sent_at": time.time(),
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-  if host == _own_host():
-    # Local shortcut: the community host is this very instance.
-    _public_store.register(
-      _own_host(), envelope["handle"], envelope["bio"],
-    )
-    return "registered"
   try:
     response = await _post_signed_envelope(
       _peer_service_url(host, "directory"), envelope,
@@ -1382,11 +1326,6 @@ async def update_me(
   identity = _load_identity()
   if update.bio is not None:
     identity["bio"] = update.bio.strip()[:MAX_BIO_CHARS]
-  if update.community_host is not None:
-    host = update.community_host.strip().lower()
-    if host and not _valid_host(host):
-      raise HTTPException(status_code=400, detail="Invalid community host.")
-    identity["community_host"] = host or _own_host()
   _save_identity(identity)
   status = (
     await _register_with_community_host(identity)
@@ -1538,7 +1477,6 @@ async def retry_direct_message(
 @router.post("/publish")
 async def publish_post(
   post: PublishPost,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1576,18 +1514,7 @@ async def publish_post(
     envelope["thumbnails"] = [wire for wire, _ in thumbnails]
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   _validate_attachment_envelope_size(envelope)
-  host = _browse_community_host(community_host)
-  if host == _own_host():
-    board_post = {
-      "id": envelope["id"],
-      "host": _own_host(),
-      "handle": identity.get("handle") or "",
-      "text": text,
-      "created_at": envelope["sent_at"],
-      "replies": [],
-    }
-    _store_board_post(board_post, attachment, attachments, thumbnails)
-    return {"status": "posted", "id": envelope["id"]}
+  host = COMMUNITY_HOST
   try:
     response = await _post_signed_envelope(
       _peer_service_url(host, "board"), envelope,
@@ -1601,22 +1528,9 @@ async def publish_post(
     ) from exc
 
 
-def _browse_community_host(requested: str | None) -> str:
-  """Choose a public read destination without changing membership or identity."""
-  if requested is not None:
-    host = requested.strip().lower()
-    if not _valid_host(host):
-      raise HTTPException(status_code=400, detail="Invalid community host.")
-    return host
-  path = _identity_path()
-  identity = json.loads(path.read_text()) if path.is_file() else {}
-  return _canonical_community_host(identity.get("community_host"))
-
-
 @router.get("/replies/{post_id}")
 async def get_replies_for_owner(
   post_id: str,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1624,9 +1538,7 @@ async def get_replies_for_owner(
   _require_owner_or_common_app(db, principal)
   if not _valid_id(post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
-  host = _browse_community_host(community_host)
-  if host == _own_host():
-    return _public_store.get_replies(post_id)
+  host = COMMUNITY_HOST
   try:
     response = await federation_request(
       "GET", _peer_service_url(host, f"board/{post_id}/replies"),
@@ -1650,12 +1562,6 @@ async def _serve_owner_board_media(
 ):
   """Serve one community-board image (a gallery index or the first/legacy one),
   caching remote hosts for 24 hours."""
-  if host == _own_host():
-    found = (
-      _public_store.board_thumbnail(post_id, index)
-      if thumbnail else _public_store.board_image(post_id, index)
-    )
-    return _serve_image(found or _public_store.board_image(post_id, index))
 
   cache_dir = _peer_board_media_dir()
   base_stem = _peer_board_media_name(host, post_id)
@@ -1708,7 +1614,6 @@ async def _serve_owner_board_media(
 async def get_board_media_for_owner(
   post_id: str,
   thumbnail: bool = False,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1717,7 +1622,7 @@ async def get_board_media_for_owner(
   if not _valid_id(post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
   return await _serve_owner_board_media(
-    _browse_community_host(community_host), post_id, None, thumbnail,
+    COMMUNITY_HOST, post_id, None, thumbnail,
   )
 
 
@@ -1726,7 +1631,6 @@ async def get_board_media_index_for_owner(
   post_id: str,
   index: int,
   thumbnail: bool = False,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1737,23 +1641,18 @@ async def get_board_media_index_for_owner(
   if not 0 <= index < _MAX_BOARD_ATTACHMENTS:
     raise HTTPException(status_code=400, detail="Image index is invalid.")
   return await _serve_owner_board_media(
-    _browse_community_host(community_host), post_id, index, thumbnail,
+    COMMUNITY_HOST, post_id, index, thumbnail,
   )
 
 
 async def _feed_payload(
   limit: int = 30,
   before: str | None = None,
-  community_host: str | None = None,
   db: object = None,
   principal: Principal = None,
 ) -> dict:
   _require_owner_or_common_app(db, principal)
-  host = _browse_community_host(community_host)
-  if host == _own_host():
-    return {"host": host, **read_board_page(
-      _public_store, limit, before, _own_host(),
-    )}
+  host = COMMUNITY_HOST
   try:
     response = await federation_request(
       "GET", _peer_service_url(host, "board"),
@@ -1777,12 +1676,11 @@ async def _feed_payload(
 async def get_feed(
   limit: int = 30,
   before: str | None = None,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """The community host's board, proxied for the app UI."""
-  return await _feed_payload(limit, before, community_host, db, principal)
+  return await _feed_payload(limit, before, db, principal)
 
 
 class LikePost(BaseModel):
@@ -1802,26 +1700,24 @@ class ReplyPost(BaseModel):
 @router.post("/like")
 async def like_post(
   body: LikePost,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """Toggle a like on a community-board post, signed as this instance."""
-  return await _react_to_post(body.post_id, "❤️", community_host, db, principal)
+  return await _react_to_post(body.post_id, "❤️", db, principal)
 
 
 @router.post("/reaction")
 async def react_to_post(
   body: ReactionPost,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """Toggle one standard emoji reaction on a community-board post."""
-  return await _react_to_post(body.post_id, body.emoji, community_host, db, principal)
+  return await _react_to_post(body.post_id, body.emoji, db, principal)
 
 
-async def _react_to_post(post_id_value, emoji, community_host, db, principal):
+async def _react_to_post(post_id_value, emoji, db, principal):
   require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   post_id = str(post_id_value).strip()
@@ -1830,15 +1726,7 @@ async def _react_to_post(post_id_value, emoji, community_host, db, principal):
   if emoji not in BOARD_REACTION_EMOJIS:
     raise HTTPException(status_code=400, detail="Reaction is not supported.")
   identity = _load_identity()
-  host = _browse_community_host(community_host)
-  if host == _own_host():
-    result = _toggle_board_reaction(post_id, _own_host(), emoji)
-    author_host = result.pop("author_host", None)
-    if result.pop("activity", False) and author_host:
-      await _relay_board_activity(
-        "like", author_host, _own_host(), identity.get("handle") or "", post_id,
-      )
-    return result
+  host = COMMUNITY_HOST
   envelope = {
     "v": 0,
     "type": "board_react",
@@ -1866,7 +1754,6 @@ async def _react_to_post(post_id_value, emoji, community_host, db, principal):
 @router.post("/reply")
 async def reply_to_post(
   body: ReplyPost,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1880,20 +1767,9 @@ async def reply_to_post(
   if not text or len(text) > MAX_REPLY_TEXT_CHARS:
     raise HTTPException(status_code=400, detail="Reply text is invalid.")
   identity = _load_identity()
-  host = _browse_community_host(community_host)
+  host = COMMUNITY_HOST
   reply_id = str(uuid.uuid4())
   sent_at = time.time()
-  if host == _own_host():
-    result = _add_board_reply(
-      post_id, reply_id, _own_host(), identity.get("handle") or "",
-      text, sent_at,
-    )
-    author_host = result.pop("author_host", None)
-    if result.pop("activity", False) and author_host:
-      await _relay_board_activity(
-        "reply", author_host, _own_host(), identity.get("handle") or "", post_id,
-      )
-    return result
   envelope = {
     "v": 0,
     "type": "board_reply",
@@ -1924,7 +1800,6 @@ class DeletePost(BaseModel):
 @router.post("/delete")
 async def delete_own_post(
   body: DeletePost,
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1935,9 +1810,7 @@ async def delete_own_post(
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
   identity = _load_identity()
-  host = _browse_community_host(community_host)
-  if host == _own_host():
-    return _public_store.delete_post(post_id, _own_host())
+  host = COMMUNITY_HOST
   envelope = {
     "v": 0,
     "type": "board_delete",
@@ -1979,14 +1852,11 @@ async def delete_own_post(
 
 async def _people_payload(
   q: str = "",
-  community_host: str | None = None,
   db: object = None,
   principal: Principal = None,
 ) -> dict:
   _require_owner_or_common_app(db, principal)
-  host = _browse_community_host(community_host)
-  if host == _own_host():
-    return {"host": host, **_public_store.search_directory(q)}
+  host = COMMUNITY_HOST
   try:
     response = await federation_request(
       "GET", _peer_service_url(host, "directory"), params={"q": q},
@@ -2003,30 +1873,28 @@ async def _people_payload(
 @router.get("/people")
 async def search_people(
   q: str = "",
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """Search the community host's user directory, proxied for the app UI."""
-  return await _people_payload(q, community_host, db, principal)
+  return await _people_payload(q, db, principal)
 
 
 @router.get("/bootstrap")
 async def bootstrap_social(
-  community_host: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """Return first-paint board and identity state in one service invocation."""
   me, feed = await asyncio.gather(
     _cached_me_payload(db, principal),
-    _feed_payload(30, None, community_host, db, principal),
+    _feed_payload(30, None, db, principal),
   )
   if not me.get("joined"):
     registration = "not_joined"
   else:
     try:
-      people = await _people_payload(me.get("host") or "", community_host, db, principal)
+      people = await _people_payload(me.get("host") or "", db, principal)
       registration = (
         "registered"
         if any(

@@ -9,9 +9,7 @@ import Thread from './ui/Thread.jsx'
 import GroupThread from './ui/GroupThread.jsx'
 import People from './ui/People.jsx'
 import { Lightbox } from './ui/Media.jsx'
-import {
-  needsGlobalJoin, joinGlobalCommunity, checkGlobalRegistration,
-} from './community.js'
+import { joinGlobalCommunity, checkGlobalRegistration } from './community.js'
 import {
   accountHandoff, clearParticipationIntent, loadParticipationIntent,
   participationActionLabel, participationIntentMatches, participationStep,
@@ -494,7 +492,7 @@ export default function App({ appId, token }) {
     setSaving(true)
     setJoinError(null)
     try {
-      await joinGlobalCommunity(me, api.saveMe, api.join)
+      await joinGlobalCommunity(api.join)
       const profile = await loadMe()
       if (!profile) return false
       await loadFeed()

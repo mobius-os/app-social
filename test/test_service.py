@@ -7,7 +7,6 @@ import tempfile
 import threading
 import time
 import unittest
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -583,60 +582,11 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
       root = Path(directory)
       legacy = root / "common"
       legacy.mkdir()
-      (legacy / "directory.json").write_text(json.dumps({
-        "peer.example": {"handle": "peer", "bio": "kept"},
-      }))
-      result = self.call(root, "directory")
-      self.assertEqual(result["body"]["users"][0]["host"], "peer.example")
+      (legacy / "peers").mkdir()
+      (legacy / "peers" / "peer.example.json").write_text("{}")
+      self.call(root, "actor")
       self.assertFalse(legacy.exists())
-      self.assertTrue((root / "apps/7/server/common/directory.json").is_file())
-
-  def test_public_signed_board_flow_and_binary_media_stay_app_owned(self):
-    with tempfile.TemporaryDirectory() as directory:
-      root = Path(directory)
-      self.call(root, "directory")
-      key, public = keypair()
-      peers = root / "apps/7/server/common/peers"
-      peers.mkdir(parents=True, exist_ok=True)
-      (peers / "peer.example.json").write_text(json.dumps({
-        "fetched_at": time.time(),
-        "actor": {
-          "protocol": "common/0", "host": "peer.example", "handle": "peer",
-          "bio": "", "public_key": {"alg": "ed25519", "key_b64": public},
-        },
-      }))
-      post_id = str(uuid.uuid4())
-      post = signed(key, {
-        "v": 0, "type": "board_post", "id": post_id,
-        "from": "peer.example", "text": "", "sent_at": time.time(),
-        "attachment": {
-          "mime": "image/png", "data_b64": base64.b64encode(b"image").decode(),
-          "w": 1, "h": 1,
-        },
-      })
-      created = self.call(root, "board", method="POST", body=post)
-      self.assertEqual(created["body"], {"status": "posted"})
-      legacy_reaction = signed(key, {
-        "v": 0, "type": "board_react", "post_id": post_id,
-        "from": "peer.example", "sent_at": time.time(),
-      })
-      legacy_result = self.call(
-        root, "board/react", method="POST", body=legacy_reaction,
-      )["body"]
-      self.assertEqual(set(legacy_result), {"status", "likes", "liked"})
-      self.assertEqual(legacy_result["likes"], 1)
-      emoji_reaction = signed(key, {
-        "v": 0, "type": "board_react", "post_id": post_id, "emoji": "🎉",
-        "from": "peer.example", "sent_at": time.time(),
-      })
-      emoji_result = self.call(
-        root, "board/react", method="POST", body=emoji_reaction,
-      )["body"]
-      self.assertEqual(emoji_result["reaction_counts"], {"❤️": 1, "🎉": 1})
-      self.assertEqual(emoji_result["reacted"], ["❤️", "🎉"])
-      media = self.call(root, f"board/media/{post_id}")
-      self.assertEqual(media["media_type"], "image/png")
-      self.assertEqual(base64.b64decode(media["body_base64"]), b"image")
+      self.assertTrue((root / "apps/7/server/common/peers/peer.example.json").is_file())
 
   def test_public_cannot_use_owner_object_routes_but_kanban_can(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -745,64 +695,37 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
       thread.join()
       server.server_close()
 
-  def test_bootstrap_returns_board_identity_and_registration_in_one_request(self):
-    class Handler(BaseHTTPRequestHandler):
-      def do_GET(self):
-        if self.headers.get("Authorization") != "Bearer test-app-token":
-          self.send_error(401)
-          return
-        if self.path == "/api/identity":
-          payload = {"profile": {"handle": "owner", "display_name": "Owner"}}
-        elif self.path == "/api/apps/":
-          payload = []
-        else:
-          self.send_error(404)
-          return
-        encoded = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
+  def test_bootstrap_reads_the_shared_board_and_registration_in_one_request(self):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    environment = {
+      "APP_ID": "7", "APP_SLUG": "social", "APP_STORAGE_DIR": "/tmp/social-bootstrap-test",
+      "INSTANCE_DOMAIN": "self.example", "INSTANCE_ORIGIN": "https://self.example",
+      "API_BASE_URL": "http://127.0.0.1:9",
+    }
+    with patch.dict(os.environ, environment):
+      import social_routes
 
-      def log_message(self, _format, *_args):
-        pass
+    def community(method, url, **kwargs):
+      self.assertTrue(url.startswith("https://www.mobius.you/api/app-services/social/"))
+      body = (
+        {"users": [{"host": "someone-else.example"}]} if url.endswith("/directory")
+        else {"capabilities": {}, "next_cursor": None, "posts": []}
+      )
+      return httpx.Response(200, json=body, request=httpx.Request(method, url))
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-      with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        common = root / "apps/7/server/common"
-        common.mkdir(parents=True)
-        (common / "identity.json").write_text(json.dumps({
-          "name": "Owner", "handle": "owner", "joined_at": 1,
-          "community_host": "self.example",
-        }))
-        (common / "avatar.png").write_bytes(b"avatar-bytes")
-        result = self.call(
-          root, "bootstrap", actor={"scope": "owner", "delegated": False},
-          query={"community_host": ["self.example"]},
-          api_base_url=f"http://127.0.0.1:{server.server_port}",
-        )
-        self.assertEqual(result["status"], 200)
-        self.assertEqual(result["body"]["feed"], {
-          "host": "self.example",
-          "capabilities": {"emoji_reactions": True, "image_thumbnails": True},
-          "next_cursor": None,
-          "posts": [],
-        })
-        self.assertEqual(result["body"]["me"]["handle"], "owner")
-        self.assertEqual(result["body"]["me"]["registration"], "missing")
-        self.assertEqual(result["body"]["me"]["avatar"], {
-          "mime": "image/png",
-          "data_b64": base64.b64encode(b"avatar-bytes").decode(),
-        })
-    finally:
-      server.shutdown()
-      thread.join()
-      server.server_close()
+    me = {"joined": True, "host": "self.example", "handle": "owner"}
+    with (
+      patch.dict(os.environ, environment),
+      patch.object(social_routes, "_require_owner_or_common_app"),
+      patch.object(social_routes, "_cached_me_payload", new=AsyncMock(return_value=me)),
+      patch.object(social_routes, "federation_request", new=AsyncMock(side_effect=community)),
+    ):
+      result = asyncio.run(social_routes.bootstrap_social(db=None, principal=None))
+    self.assertEqual(result["feed"]["host"], "www.mobius.you")
+    self.assertEqual(result["feed"]["posts"], [])
+    self.assertEqual(result["me"]["handle"], "owner")
+    self.assertEqual(result["me"]["registration"], "missing")
 
   def test_federation_source_has_no_legacy_platform_route(self):
     for name in (

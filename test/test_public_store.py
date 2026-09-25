@@ -1,10 +1,8 @@
 """Scale and rollback contracts for Social's public board store."""
 
-import asyncio
 import base64
 import io
 import json
-import os
 import sqlite3
 import struct
 import tempfile
@@ -121,10 +119,7 @@ class PublicBoardIndexTests(unittest.TestCase):
       self.assertFalse((store.board_dir() / "oversized-thumb.json").exists())
 
   def test_oversized_backfill_is_rejected_without_cache_or_original_fallback(self):
-    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
-      "APP_STORAGE_DIR": directory, "APP_ID": "7", "APP_SLUG": "social",
-    }):
-      import social_routes
+    with tempfile.TemporaryDirectory() as directory:
       store = CommonPublicStore(directory)
       original = store.board_media_path("deadbeef", "image/png")
       original.write_bytes(forged_png_header())
@@ -140,15 +135,6 @@ class PublicBoardIndexTests(unittest.TestCase):
       with TestClient(app) as client:
         response = client.get("/board/thumbnail/deadbeef")
       self.assertEqual(response.status_code, 400)
-      with patch.object(social_routes, "_public_store", store), patch.object(
-        social_routes, "_own_host", return_value="self.example",
-      ), patch.object(social_routes, "_serve_image") as serve:
-        with self.assertRaises(HTTPException) as raised:
-          asyncio.run(social_routes._serve_owner_board_media(
-            "self.example", "deadbeef", None, thumbnail=True,
-          ))
-        self.assertEqual(raised.exception.status_code, 400)
-        serve.assert_not_called()
 
   def test_board_images_get_small_reusable_timeline_thumbnails(self):
     with tempfile.TemporaryDirectory() as directory:

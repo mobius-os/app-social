@@ -1,4 +1,3 @@
-import { needsGlobalJoin } from './community.js'
 
 export const PARTICIPATION_INTENT_PATH = 'drafts/board-participation.json'
 
@@ -110,7 +109,7 @@ export async function clearParticipationIntent(storage, expectedIntent) {
 }
 
 export function participationStep(profile) {
-  if (profile?.joined && profile?.name && !needsGlobalJoin(profile)) return 'ready'
+  if (profile?.joined && profile?.name) return 'ready'
   if (profile?.connected) return 'join'
   return profile?.identity_app_id == null ? 'store' : 'identity'
 }

@@ -1,4 +1,4 @@
-"""Shared public directory/board service for personal and social hosts.
+"""The public directory and board served by the central Social community host.
 
 The on-disk schema is the existing Common schema rooted at
 ``<data_dir>/common``:
@@ -994,12 +994,12 @@ def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
   on_activity=None,
 ) -> tuple[APIRouter, None]:
-  """Build the exact public-host surface shared by both runtimes.
+  """Build the community host's public directory and board surface.
 
   ``on_activity(kind, author_host, actor_host, actor_handle, post_id)`` is an
-  optional awaitable the host calls after a genuine new like or reply, so it can
-  tell the post's author (locally or via federation) that their post got
-  activity. It never changes the peer-facing response.
+  optional awaitable the host calls after a genuine new like or reply by
+  someone other than the author, so it can tell the author's instance. It never
+  changes the peer-facing response.
   """
   router = APIRouter(prefix=prefix, tags=["common-public"])
 

@@ -70,13 +70,13 @@ from pydantic import BaseModel
 
 from common_protocol import (
   CLOCK_SKEW_S,
+  COMMUNITY_HOST,
   OUTBOUND_TIMEOUT_S,
   post_signed_envelope as _post_signed_envelope,
   peer_service_url as _peer_service_url,
   sign as _sign,
   valid_host as _valid_host,
 )
-from common_public import CommonPublicStore
 from common_transport import federation_request
 from service_runtime import (
   Principal, get_db, get_principal, get_settings,
@@ -89,7 +89,6 @@ from social_routes import (
   _verify_peer_envelope,
 )
 
-_public_store = CommonPublicStore(lambda: get_settings().data_dir)
 
 router = APIRouter(prefix="/objects", tags=["common-objects"])
 
@@ -587,30 +586,20 @@ async def _resolve_invitees(address: str) -> InviteRecipient:
       detail="That handle exists but does not have a reachable Möbius yet.",
     )
 
-  # Unlinked local owners retain the opt-in Common directory fallback.
-  from social_routes import _load_identity
-  identity = _load_identity()
-  community = identity.get("community_host") or _own_host()
-  entries = {}
-  if community == _own_host():
+  # Unlinked owners can still be found in the shared Social directory.
+  try:
+    response = await federation_request(
+      "GET", _peer_service_url(COMMUNITY_HOST, "directory"),
+      params={"q": raw}, timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
     entries = {
-      user["host"]: user
-      for user in _public_store.search_directory(raw)["users"]
+      u["host"]: u for u in response.json().get("users", []) if u.get("host")
     }
-  else:
-    try:
-      response = await federation_request(
-        "GET", _peer_service_url(community, "directory"),
-        params={"q": raw}, timeout_seconds=OUTBOUND_TIMEOUT_S,
-      )
-      response.raise_for_status()
-      entries = {
-        u["host"]: u for u in response.json().get("users", []) if u.get("host")
-      }
-    except Exception as exc:
-      raise HTTPException(
-        status_code=502, detail="The directory could not be reached."
-      ) from exc
+  except Exception as exc:
+    raise HTTPException(
+      status_code=502, detail="The directory could not be reached."
+    ) from exc
   matches = [
     host for host, entry in entries.items()
     if str(entry.get("handle") or "").lower() == raw
