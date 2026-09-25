@@ -58,6 +58,36 @@ class CommunityHostTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "Unsupported envelope type.")
 
+  def test_signed_board_flow_serves_reactions_and_media(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      peer = _peer(Path(data_dir), "peer.example")
+      post_id = str(uuid.uuid4())
+      with TestClient(community_host.create_app(data_dir)) as client:
+        created = client.post("/api/common/board", json=_signed(peer, {
+          "v": 0, "type": "board_post", "id": post_id,
+          "from": "peer.example", "text": "", "sent_at": time.time(),
+          "attachment": {
+            "mime": "image/png", "data_b64": base64.b64encode(b"image").decode(),
+            "w": 1, "h": 1,
+          },
+        }))
+        self.assertEqual(created.json(), {"status": "posted"})
+        legacy = client.post("/api/common/board/react", json=_signed(peer, {
+          "v": 0, "type": "board_react", "post_id": post_id,
+          "from": "peer.example", "sent_at": time.time(),
+        })).json()
+        self.assertEqual(set(legacy), {"status", "likes", "liked"})
+        self.assertEqual(legacy["likes"], 1)
+        emoji = client.post("/api/common/board/react", json=_signed(peer, {
+          "v": 0, "type": "board_react", "post_id": post_id, "emoji": "🎉",
+          "from": "peer.example", "sent_at": time.time(),
+        })).json()
+        self.assertEqual(emoji["reaction_counts"], {"❤️": 1, "🎉": 1})
+        self.assertEqual(emoji["reacted"], ["❤️", "🎉"])
+        media = client.get(f"/api/common/board/media/{post_id}")
+        self.assertEqual(media.headers["content-type"], "image/png")
+        self.assertEqual(media.content, b"image")
+
   def test_the_host_publishes_one_persistent_signing_key(self):
     with tempfile.TemporaryDirectory() as data_dir:
       with TestClient(community_host.create_app(data_dir)) as client:

@@ -1,4 +1,3 @@
-import { SHARED_COMMUNITY_HOST } from './community.js'
 
 // Social owns signing, delivery, persistence, and peer verification behind
 // the platform's reviewed app-service boundary.
@@ -29,7 +28,7 @@ async function call(path, options = {}, responseType = 'json') {
 
 export const getMe = ({ includeAvatar = true } = {}) =>
   call(`me?include_avatar=${includeAvatar ? 'true' : 'false'}`)
-export const getBootstrap = () => call(`bootstrap?community_host=${encodeURIComponent(SHARED_COMMUNITY_HOST)}`)
+export const getBootstrap = () => call('bootstrap')
 export const join = () => call('join', { method: 'POST', body: JSON.stringify({}) })
 export const saveMe = (settings) =>
   call('me', { method: 'PUT', body: JSON.stringify(settings) })
@@ -59,21 +58,17 @@ export const publishPost = (text, attachment, attachments, thumbnails) =>
       ...(thumbnails && thumbnails.length ? { thumbnails } : {}),
     }),
   })
-const browseQuery = `community_host=${encodeURIComponent(SHARED_COMMUNITY_HOST)}`
 export const BOARD_PAGE_SIZE = 30
 export const getFeed = (before = null) => {
-  const query = new URLSearchParams({
-    community_host: SHARED_COMMUNITY_HOST,
-    limit: String(BOARD_PAGE_SIZE),
-  })
+  const query = new URLSearchParams({ limit: String(BOARD_PAGE_SIZE) })
   if (before !== null && before !== undefined) query.set('before', String(before))
   return call(`feed?${query}`)
 }
 export const getBoardMedia = (postId, index, { thumbnail = false } = {}) =>
   call(
     index === undefined || index === null
-      ? `board-media/${encodeURIComponent(postId)}?${browseQuery}&thumbnail=${thumbnail ? 'true' : 'false'}`
-      : `board-media/${encodeURIComponent(postId)}/${index}?${browseQuery}&thumbnail=${thumbnail ? 'true' : 'false'}`,
+      ? `board-media/${encodeURIComponent(postId)}?thumbnail=${thumbnail ? 'true' : 'false'}`
+      : `board-media/${encodeURIComponent(postId)}/${index}?thumbnail=${thumbnail ? 'true' : 'false'}`,
     {}, 'blob',
   )
 export const reactToPost = (postId, emoji) =>
@@ -81,10 +76,10 @@ export const reactToPost = (postId, emoji) =>
 export const deletePost = (postId) =>
   call('delete', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
 export const getReplies = (postId) =>
-  call(`replies/${encodeURIComponent(postId)}?${browseQuery}`)
+  call(`replies/${encodeURIComponent(postId)}`)
 export const postReply = (postId, text) =>
   call('reply', { method: 'POST', body: JSON.stringify({ post_id: postId, text }) })
-export const searchPeople = (q, signal) => call(`people?q=${encodeURIComponent(q.trim().replace(/^@/, ''))}&${browseQuery}`, { signal })
+export const searchPeople = (q, signal) => call(`people?q=${encodeURIComponent(q.trim().replace(/^@/, ''))}`, { signal })
 export const getPeer = (host, signal) => call(`peer/${encodeURIComponent(host)}`, { signal })
 export async function getAppIcon(appId) {
   const response = await fetch(`/api/apps/${appId}/icon`, {

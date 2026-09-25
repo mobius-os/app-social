@@ -45,18 +45,13 @@ All Social data lives in this app's per-app storage
 (`conversations/<peer-host>/…`); incoming deliveries bump `state/version.json`,
 which the open app watches to refresh live.
 
-### Integration boundary for public browsing
+### The shared board
 
-This release requires the companion backend read-host contract. Feed, people,
-board media and `/api/services/social/replies/{post_id}` accept `community_host` for
-app-authenticated public reads. The app selects the one global host for every
-read without changing saved membership or registering the owner. Remote replies
-are fetched through the same DNS-pinned transport as other federation reads.
-
-Writes continue through the owner-authenticated publish/like/reply routes and
-the saved, explicitly joined community. Browsing never joins or submits an
-interaction. Activate this app only with the companion backend; older backends
-do not provide the reply proxy or explicit browse-host semantics.
+The board and People directory live only on the central community host,
+`www.mobius.you`. Each Möbius reads and writes them through its own Social
+service (`feed`, `people`, `replies`, board media, publish, like, reply), which
+talks to that host over the DNS-pinned federation transport. Browsing never
+joins or submits an interaction. A personal Möbius hosts no board of its own.
 
 ### Group conversations
 

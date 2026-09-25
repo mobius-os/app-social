@@ -1,9 +1,9 @@
 """Canonical ``common/0`` wire validation and peer-key verification.
 
 This module is deliberately independent of the owner database and identity
-keys.  The personal Social router and the public social host both use these
-exact canonical bytes and validation rules, so separating the public service
-does not create a second federation implementation.
+keys.  Every personal Social service and the central community host use these
+exact canonical bytes and validation rules, so there is one federation
+implementation.
 """
 
 from __future__ import annotations

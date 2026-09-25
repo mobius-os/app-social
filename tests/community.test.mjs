@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SHARED_COMMUNITY_HOST, joinGlobalCommunity } from '../community.js'
+import { joinGlobalCommunity } from '../community.js'
 
-const fresh = { host: 'fresh.example', community_host: 'fresh.example', joined: false }
+const fresh = { host: 'fresh.example', joined: false }
 
-test('all public browsing uses the canonical community host without membership writes', async () => {
+test('public browsing is read-only and names no board host', async () => {
   const api = await import('../api.js')
   const previous = globalThis.fetch
   const calls = []
@@ -22,7 +22,7 @@ test('all public browsing uses the canonical community host without membership w
       '/api/services/social/board-media/post-1',
     ])
     for (const { url, options } of calls) {
-      assert.equal(url.searchParams.get('community_host'), SHARED_COMMUNITY_HOST)
+      assert.equal(url.searchParams.get('community_host'), null)
       assert.equal(options.method || 'GET', 'GET')
       assert.equal(options.body, undefined)
     }
@@ -57,31 +57,16 @@ test('board paging preserves a zero legacy boundary in the network query', async
   } finally { globalThis.fetch = previous }
 })
 
-test('joining automatically sets the canonical community destination', async () => {
-  const calls = []
-  await joinGlobalCommunity(fresh, async value => {
-    calls.push(value)
-    return { directory: 'not_joined' }
-  }, async () => { calls.push('join'); return { directory: 'registered' } })
-  assert.deepEqual(calls, [{ community_host: SHARED_COMMUNITY_HOST }, 'join'])
-})
-
 test('a failed registration stays a retryable failure, never success', async () => {
-  const profile = { ...fresh, joined: true }
-  await assert.rejects(joinGlobalCommunity(profile, async () => ({ directory: 'unreachable' }), () => assert.fail()), /could not be reached/)
-  await assert.rejects(joinGlobalCommunity(profile, async () => ({ directory: 'verification_failed' }), () => assert.fail()), /could not verify/)
-  await assert.rejects(joinGlobalCommunity(profile, async () => ({ directory: 'rejected' }), () => assert.fail()), /rejected this profile/)
-  const registered = { ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }
-  assert.equal((await joinGlobalCommunity(registered, () => assert.fail(), async () => ({ directory: 'registered' }))).directory, 'registered')
-})
-
-test('a failed destination write prevents joining', async () => {
-  await assert.rejects(joinGlobalCommunity(fresh, async () => { throw new Error('offline') }, () => assert.fail('wrong audience')), /offline/)
+  await assert.rejects(joinGlobalCommunity(async () => ({ directory: 'unreachable' })), /could not be reached/)
+  await assert.rejects(joinGlobalCommunity(async () => ({ directory: 'verification_failed' })), /could not verify/)
+  await assert.rejects(joinGlobalCommunity(async () => ({ directory: 'rejected' })), /rejected this profile/)
+  assert.equal((await joinGlobalCommunity(async () => ({ directory: 'registered' }))).directory, 'registered')
 })
 
 test('reopening detects a saved join that never reached the directory', async () => {
   const { checkGlobalRegistration } = await import('../community.js')
-  const profile = { ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }
+  const profile = { ...fresh, joined: true }
   assert.equal(await checkGlobalRegistration(profile, async q => {
     assert.equal(q, profile.host)
     return { users: [{ host: 'not-fresh.example' }] }
@@ -91,7 +76,7 @@ test('reopening detects a saved join that never reached the directory', async ()
 
 test('directory outage is not misreported as missing membership', async () => {
   const { checkGlobalRegistration } = await import('../community.js')
-  assert.equal(await checkGlobalRegistration({ ...fresh, joined: true, community_host: SHARED_COMMUNITY_HOST }, async () => { throw Error('offline') }), 'unavailable')
+  assert.equal(await checkGlobalRegistration({ ...fresh, joined: true }, async () => { throw Error('offline') }), 'unavailable')
 })
 
 test('browsers do not check membership when unjoined', async () => {
