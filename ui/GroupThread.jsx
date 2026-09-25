@@ -18,7 +18,7 @@ import {
 } from '../message_ui_state.js'
 
 export default function GroupThread({
-  group, me, version, foreground = true, onBack, showToast, onOpenImage,
+  group, me, version, foreground, onBack, showToast, onOpenImage,
 }) {
   const [details, setDetails] = useState(false)
   const [currentGroup, setCurrentGroup] = useState(group)
@@ -83,16 +83,15 @@ export default function GroupThread({
     refresh({ replace: true })
     return () => { active = false; refreshRequest.current += 1 }
   }, [gid])
-  // Read only while visible, so a background pane keeps the unread badge.
+  // Messages are read only while this pane is actually visible to the owner.
   const isMember = requestStatus(currentGroup) === 'accepted'
   useEffect(() => {
     if (foreground && isMember) clearGroupUnread(gid).catch(() => {})
-  }, [gid, foreground, isMember])
+  }, [gid, version, foreground, isMember])
   useEffect(() => {
     if (version > 0 && version !== seenVersion.current) {
       seenVersion.current = version
       refresh()
-      if (foreground && isMember) clearGroupUnread(gid).catch(() => {})
     }
   }, [version])
   async function loadEarlier() {

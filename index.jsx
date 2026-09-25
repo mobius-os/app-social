@@ -113,15 +113,6 @@ function MainNavigation({ className = '', tab, unread, boardActivity, onSelect }
   )
 }
 
-const INTENT_RE = /^(dm|group):([A-Za-z0-9_.:-]{1,120})$/
-
-function parseSocialIntent(value) {
-  if (value === 'board') return { kind: 'board' }
-  const match = INTENT_RE.exec(String(value || ''))
-  if (!match) return null
-  return match[1] === 'dm' ? { kind: 'dm', peer: match[2] } : { kind: 'group', gid: match[2] }
-}
-
 export default function App({ appId, token }) {
   api.setToken(token)
 
@@ -156,8 +147,6 @@ export default function App({ appId, token }) {
   const navHandle = useRef(null)
   // The shell hides background panes without changing document visibility.
   const [foreground, setForeground] = useState(true)
-  const foregroundRef = useRef(true)
-  const [linkTarget, setLinkTarget] = useState(null)
   const onShellMessage = useRef(null)
   const toastTimer = useRef(null)
   const readySignalled = useRef(false)
@@ -381,7 +370,7 @@ export default function App({ appId, token }) {
       })
       .then?.((u) => { if (typeof u === 'function') unsubscribe = u })
     const poll = setInterval(() => {
-      if (document.visibilityState === 'visible' && foregroundRef.current) {
+      if (document.visibilityState === 'visible') {
         store.get('state/version.json').catch(() => null)
       }
     }, 5000)
@@ -430,49 +419,33 @@ export default function App({ appId, token }) {
     if (rose) setBoardActivity(true)
   }, [feed, tab, me, feedState])
 
-  // ── shell messages: notification deep links and pane visibility ───────────
-  // A notification tap arrives as an app intent: `dm:<host>`, `group:<gid>`,
-  // or `board`. Conversations reload first so a brand-new request resolves.
-  onShellMessage.current = (data) => {
-    if (data?.type === 'moebius:frame-visibility') {
-      const visible = data.visible !== false
-      foregroundRef.current = visible
-      setForeground(visible)
+  // ── shell messages: pane visibility and notification taps ────────────────
+  // A notification tap arrives as an app intent: dm:<host>, group:<gid>, board.
+  onShellMessage.current = async ({ type, visible, intent }) => {
+    if (type === 'moebius:frame-visibility') {
+      setForeground(visible !== false)
       return
     }
-    if (data?.type !== 'moebius:app-intent') return
-    const target = parseSocialIntent(data.intent)
-    if (!target) return
-    if (target.kind === 'board') {
+    if (type !== 'moebius:app-intent' || typeof intent !== 'string') return
+    const [kind, id] = intent.split(/:(.*)/)
+    if (kind === 'board') {
       if (thread) closeThread()
       setTab('board')
-      return
+    } else if (kind === 'dm') {
+      const convo = (await api.listConversations()).find((item) => item.peer === id)
+      openThread(id, convo?.peer_handle, api.requestStatus(convo) === 'pending')
+    } else if (kind === 'group') {
+      openGroup(await api.getGroup(id))
     }
-    loadConversations().finally(() => setLinkTarget(target))
   }
   useEffect(() => {
     const listener = (event) => {
-      if (event.source === window.parent) onShellMessage.current?.(event.data)
+      if (event.source !== window.parent || !event.data) return
+      onShellMessage.current(event.data).catch(() => setTab('messages'))
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
   }, [])
-
-  useEffect(() => {
-    if (!linkTarget) return
-    setLinkTarget(null)
-    if (linkTarget.kind === 'dm') {
-      const convo = conversations.find((item) => item.peer === linkTarget.peer)
-      openThread(
-        linkTarget.peer, convo?.peer_handle,
-        Boolean(convo) && api.requestStatus(convo) === 'pending',
-      )
-      return
-    }
-    const group = groups.find((item) => item.gid === linkTarget.gid)
-    if (group) openGroup(group)
-    else setTab('messages')
-  }, [linkTarget])
 
   // ── thread navigation with a real shell back target ───────────────────────
   function openAnyThread(next) {

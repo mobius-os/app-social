@@ -549,16 +549,6 @@ export const CSS = `
   display: block; white-space: pre-wrap; overflow-wrap: anywhere;
   user-select: text; -webkit-user-select: text; cursor: text;
 }
-.cn-bubble-copy.is-folded {
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 12;
-  line-clamp: 12; overflow: hidden;
-}
-.cn-bubble-more {
-  display: block; margin: 4px 0 0; padding: 4px 0; min-height: 32px; border: 0;
-  background: none; color: inherit; font: inherit; font-weight: 650;
-  text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
-}
-.cn-bubble.has-attachment .cn-bubble-more { padding: 4px 8px; }
 .cn-bubble.has-attachment {
   width: min(68vw, 340px); padding: 4px; overflow: hidden;
 }
@@ -602,21 +592,14 @@ export const CSS = `
   display: flex; gap: 9px; align-items: flex-end;
   background: transparent;
 }
-.cn-compose-field { position: relative; min-width: 0; flex: 1; display: flex; }
-.cn-compose-field textarea {
-  display: block; width: 100%; min-height: 46px; max-height: 168px; resize: none;
+.cn-compose-bar textarea {
+  min-height: 46px; max-height: 168px; resize: none; overflow-y: auto;
   border-radius: 23px; border: 1px solid var(--border);
-  background: var(--surface); padding: 12px 16px; outline: 0; overflow-y: auto;
+  background: var(--surface); padding: 12px 16px; min-width: 0; flex: 1; outline: 0;
   font-size: 16px; line-height: 20px; color: var(--text); font-family: var(--font);
   transition: border-color 0.15s ease;
 }
-.cn-compose-field textarea:focus { border-color: var(--accent); }
-.cn-compose-field:has(.cn-compose-count) textarea { padding-bottom: 26px; }
-.cn-compose-count {
-  position: absolute; right: 16px; bottom: 7px; pointer-events: none;
-  font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums;
-}
-.cn-compose-count.is-full { color: var(--danger, #e5484d); font-weight: 600; }
+.cn-compose-bar textarea:focus { border-color: var(--accent); }
 .cn-send {
   width: 46px; height: 46px; border-radius: 50%; border: 0; flex: 0 0 auto;
   background: var(--accent);

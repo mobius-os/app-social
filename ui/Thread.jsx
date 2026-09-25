@@ -16,7 +16,7 @@ import {
 } from '../message_ui_state.js'
 
 export default function Thread({
-  peer, peerHandle, me, version, foreground = true, request, onBack, showToast, onOpenImage,
+  peer, peerHandle, me, version, foreground, request, onBack, showToast, onOpenImage,
 }) {
   const [messages, setMessages] = useState(null)
   const [nextCursor, setNextCursor] = useState(null)
@@ -84,11 +84,10 @@ export default function Thread({
     return () => { active = false; refreshRequest.current += 1 }
   }, [peer])
 
-  // A thread left open in a background pane must not swallow unread state;
-  // it is read only while the owner can actually see it.
+  // Messages are read only while this pane is actually visible to the owner.
   useEffect(() => {
     if (foreground && !requestPending) clearUnread(peer).catch(() => {})
-  }, [peer, foreground, requestPending])
+  }, [peer, version, foreground, requestPending])
 
   useEffect(() => {
     let active = true
@@ -104,7 +103,6 @@ export default function Thread({
     if (version > 0 && version !== seenVersion.current) {
       seenVersion.current = version
       refresh()
-      if (foreground && !requestPending) clearUnread(peer).catch(() => {})
     }
   }, [version])
 

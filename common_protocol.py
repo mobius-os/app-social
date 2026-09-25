@@ -25,13 +25,10 @@ from service_io import atomic_write, read_capped_body
 
 PROTOCOL = "common/0"
 PUBLIC_SERVICE_PATH = "/api/app-services/social"
-# Private messages match mainstream chat apps (Slack's hard cap is 40,000
-# characters; WhatsApp's is 65,536). Board posts stay short because one feed
-# page carries many of them through the bounded community-host transport.
+# Messages match Slack's 40,000-character cap. Board posts stay short because a
+# feed page carries many of them through the bounded community-host transport.
 MAX_MESSAGE_TEXT_CHARS = 40_000
 MAX_POST_TEXT_CHARS = 4000
-# A peer card without ``limits`` predates long messages; it accepts only this.
-LEGACY_MESSAGE_TEXT_CHARS = 4000
 MAX_REPLY_TEXT_CHARS = 1000
 MAX_NAME_CHARS = 80
 MAX_BIO_CHARS = 400
@@ -223,7 +220,7 @@ def validate_reply_to(value: Any) -> dict | None:
 
 def validate_text_or_attachment(
   text: Any, attachment: tuple[dict, bytes] | None, detail: str,
-  *, max_chars: int,
+  max_chars: int = MAX_MESSAGE_TEXT_CHARS,
 ) -> None:
   if (
     not isinstance(text, str)
@@ -242,8 +239,8 @@ async def read_envelope(request: Request) -> dict:
     raise HTTPException(status_code=400, detail="Envelope is not JSON.") from exc
   if not isinstance(envelope, dict):
     raise HTTPException(status_code=400, detail="Envelope is not an object.")
-  # Content envelopes carry long text, images, or ciphertext; their fields are
-  # validated individually after this bounded read. Control envelopes stay small.
+  # Content envelopes may carry long text, images, or ciphertext; their fields
+  # are validated individually. Control envelopes stay small.
   if (
     len(body) > MAX_ENVELOPE_BYTES
     and envelope.get("type") not in _CONTENT_ENVELOPE_TYPES
@@ -286,15 +283,6 @@ def _validate_actor_card(actor: Any, host: str) -> dict:
   ):
     raise HTTPException(status_code=502, detail="Peer returned an invalid actor card.")
   return actor
-
-
-def message_text_limit(actor: dict) -> int:
-  """Return the longest private message text a peer's card says it accepts."""
-  limits = actor.get("limits")
-  value = limits.get("message_text_chars") if isinstance(limits, dict) else None
-  if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-    return value
-  return LEGACY_MESSAGE_TEXT_CHARS
 
 
 class ActorVerifier:
@@ -364,19 +352,6 @@ class ActorVerifier:
         )
     return actor
 
-  async def message_text_overflow(self, host: str, length: int) -> int | None:
-    """Return the peer's limit when a message of ``length`` exceeds it.
-
-    A cached card can predate the peer's Social update, so a refusal is
-    confirmed against a fresh card before the sender is told to wait.
-    """
-    if length <= LEGACY_MESSAGE_TEXT_CHARS:
-      return None
-    limit = message_text_limit(await self.fetch_actor(host))
-    if length > limit:
-      limit = message_text_limit(await self.fetch_actor(host, force=True))
-    return limit if length > limit else None
-
   async def verify_envelope(self, envelope: dict) -> dict:
     sender = envelope.get("from")
     signature = envelope.get("sig")
@@ -417,14 +392,13 @@ __all__ = [
   "MAX_BOARD_ATTACHMENTS", "validate_attachments",
   "MAX_ENVELOPE_BYTES", "MAX_NAME_CHARS", "MAX_REPLY_TEXT_CHARS",
   "MAX_MESSAGE_TEXT_CHARS", "MAX_POST_TEXT_CHARS",
-  "LEGACY_MESSAGE_TEXT_CHARS", "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
+  "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
   "PROTOCOL", "PUBLIC_SERVICE_PATH",
   "canonical", "peer_base_url", "peer_service_url", "post_signed_envelope",
   "read_envelope", "sign",
   "valid_host", "valid_id",
   "validate_attachment", "validate_attachment_envelope_size",
   "validate_reply_to", "validate_text_or_attachment",
-  "message_text_limit",
   "wire_json_size",
   "verify",
 ]

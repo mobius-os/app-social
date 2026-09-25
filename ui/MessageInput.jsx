@@ -1,51 +1,28 @@
 import { useLayoutEffect } from 'react'
 
-// Matches the server's private-message limit (Slack's hard cap is 40,000).
-export const MAX_MESSAGE_CHARS = 40000
-const COUNTER_FROM = MAX_MESSAGE_CHARS - 1000
-const MAX_INPUT_HEIGHT = 168
+// Matches the service limit for direct and group messages.
+const MAX_MESSAGE_CHARS = 40000
 
-// Chat-app convention: on a keyboard, Enter sends and Shift+Enter adds a line.
-// Touch keyboards keep Enter as a newline and send with the button.
-function enterSends() {
-  return !window.matchMedia?.('(pointer: coarse)').matches
-}
-
+// A multi-line message box that grows with its text. On a physical keyboard
+// Enter sends and Shift+Enter adds a line; touch keyboards keep Enter as a
+// newline and send with the button.
 export default function MessageInput({ inputRef, value, onChange, disabled }) {
   useLayoutEffect(() => {
     const el = inputRef.current
-    if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_HEIGHT)}px`
+    el.style.height = `${el.scrollHeight}px`
   }, [value, inputRef])
 
   function onKeyDown(event) {
     if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
-    if (!enterSends()) return
+    if (window.matchMedia('(pointer: coarse)').matches) return
     event.preventDefault()
-    event.currentTarget.form?.requestSubmit()
+    event.currentTarget.form.requestSubmit()
   }
 
-  const remaining = MAX_MESSAGE_CHARS - value.length
   return (
-    <div className="cn-compose-field">
-      <textarea
-        ref={inputRef}
-        rows={1}
-        value={value}
-        maxLength={MAX_MESSAGE_CHARS}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={onKeyDown}
-        disabled={disabled}
-        placeholder="Message"
-        autoComplete="off"
-        aria-label="Message"
-      />
-      {value.length > COUNTER_FROM && (
-        <span className={`cn-compose-count${remaining === 0 ? ' is-full' : ''}`} aria-live="polite">
-          {remaining === 0 ? 'Limit reached' : `${remaining.toLocaleString()} left`}
-        </span>
-      )}
-    </div>
+    <textarea ref={inputRef} rows={1} value={value} maxLength={MAX_MESSAGE_CHARS}
+              onChange={(event) => onChange(event.target.value)} onKeyDown={onKeyDown}
+              disabled={disabled} placeholder="Message" autoComplete="off" aria-label="Message" />
   )
 }

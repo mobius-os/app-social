@@ -1105,7 +1105,7 @@ def create_public_router(
     text = envelope.get("text")
     first = attachment or (attachments[0] if attachments else None)
     validate_text_or_attachment(
-      text, first, "Post text is invalid.", max_chars=MAX_POST_TEXT_CHARS,
+      text, first, "Post text is invalid.", MAX_POST_TEXT_CHARS,
     )
     post_id = envelope.get("id")
     if not valid_id(post_id):

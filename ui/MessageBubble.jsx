@@ -1,4 +1,3 @@
-import { useLayoutEffect, useRef, useState } from 'react'
 import { Reply, X } from '@openai/apps-sdk-ui/components/Icon'
 import { MessageImage } from './Media.jsx'
 
@@ -41,34 +40,6 @@ function Quote({ reply }) {
   )
 }
 
-// Long messages open folded to 12 lines, like chat apps do, so one essay
-// cannot bury the rest of the conversation. Short text skips the measurement.
-const FOLD_CANDIDATE_CHARS = 600
-const FOLD_CANDIDATE_LINES = 12
-
-function MessageText({ text }) {
-  const copyRef = useRef(null)
-  const [expanded, setExpanded] = useState(false)
-  const [clipped, setClipped] = useState(false)
-  const foldable = !expanded && (
-    text.length > FOLD_CANDIDATE_CHARS || text.split('\n').length > FOLD_CANDIDATE_LINES
-  )
-  useLayoutEffect(() => {
-    const el = copyRef.current
-    setClipped(Boolean(foldable && el && el.scrollHeight > el.clientHeight + 1))
-  }, [foldable, text])
-  return (
-    <>
-      <span ref={copyRef} className={`cn-bubble-copy${foldable ? ' is-folded' : ''}`}>{text}</span>
-      {clipped && (
-        <button type="button" className="cn-bubble-more" onClick={() => setExpanded(true)}>
-          Read more
-        </button>
-      )}
-    </>
-  )
-}
-
 export default function MessageBubble({
   message, mine, tick, avatar, indent, conversationPath, onOpenImage, onImageUnavailable, onReply,
 }) {
@@ -90,7 +61,7 @@ export default function MessageBubble({
         <Quote reply={message.reply_to} />
         <MessageImage attachment={message.attachment} conversationPath={conversationPath}
                       onOpen={onOpenImage} onUnavailable={onImageUnavailable} />
-        {message.text && <MessageText text={message.text} />}
+        {message.text && <span className="cn-bubble-copy">{message.text}</span>}
         <span className="cn-bubble-time">{message.time}{tick}</span>
       </div>
       {!mine && replyButton}
