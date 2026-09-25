@@ -20,6 +20,8 @@ def verify(base: str, expected_sha: str, opener=urllib.request.urlopen) -> None:
   status, board = read("/api/common/board?limit=1")
   assert status == 200 and isinstance(board, dict)
   assert isinstance(board.get("posts"), list)
+  status, actor = read("/api/common/actor")
+  assert status == 200 and actor["public_key"]["alg"] == "ed25519"
 
   request = urllib.request.Request(
     base + "/api/common/board/delete",

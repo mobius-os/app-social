@@ -71,12 +71,13 @@ from pydantic import BaseModel
 from common_protocol import (
   ATTACHMENT_MIME_EXT as _ATTACHMENT_MIME_EXT,
   MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
-  MAX_BOARD_ATTACHMENTS as _MAX_BOARD_ATTACHMENTS,
+  COMMUNITY_HOST, MAX_BOARD_ATTACHMENTS as _MAX_BOARD_ATTACHMENTS,
   MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_POST_TEXT_CHARS, MAX_REPLY_TEXT_CHARS,
   OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
   canonical as _canonical, peer_service_url as _peer_service_url,
   post_signed_envelope as _post_signed_envelope,
-  read_envelope as _read_envelope, sign as _sign,
+  new_signing_key, read_envelope as _read_envelope, sign as _sign,
+  signing_public_key,
   valid_host as _valid_host, valid_id as _valid_id,
   validate_attachment as _validate_attachment,
   validate_attachment_envelope_size as _validate_attachment_envelope_size,
@@ -87,6 +88,7 @@ from common_protocol import (
 from common_public import (
   BOARD_REACTION_EMOJIS, CommonPublicStore,
   create_public_router, image_thumbnail_bytes, read_board_page,
+  send_board_activity,
 )
 from common_transport import FederationTransportError, federation_request
 from service_io import atomic_write
@@ -280,7 +282,6 @@ def _peer_board_media_name(host: str, post_id: str) -> str:
   return f"{safe_host}-{post_id}"
 
 
-COMMUNITY_HOST = "www.mobius.you"
 DEFAULT_COMMUNITY_HOST = COMMUNITY_HOST
 
 
@@ -455,21 +456,6 @@ def _new_encryption_keypair() -> tuple[str, str]:
   return private_b64, public_b64
 
 
-def _signing_public_key(private_key_b64: str) -> str:
-  """Derive the advertised Ed25519 key from the key that signs messages."""
-  from cryptography.hazmat.primitives import serialization
-  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-  key = Ed25519PrivateKey.from_private_bytes(
-    base64.b64decode(private_key_b64, validate=True)
-  )
-  return base64.b64encode(
-    key.public_key().public_bytes(
-      encoding=serialization.Encoding.Raw,
-      format=serialization.PublicFormat.Raw,
-    )
-  ).decode()
-
-
 def _encryption_public_key(private_key_b64: str) -> str:
   """Derive the advertised X25519 key from the key that decrypts messages."""
   from cryptography.hazmat.primitives import serialization
@@ -496,22 +482,8 @@ def _load_identity() -> dict:
       identity["enc_public_key_b64"] = public_b64
       _save_identity(identity)
     return identity
-  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-  from cryptography.hazmat.primitives import serialization
-  key = Ed25519PrivateKey.generate()
-  private_b64 = base64.b64encode(
-    key.private_bytes(
-      encoding=serialization.Encoding.Raw,
-      format=serialization.PrivateFormat.Raw,
-      encryption_algorithm=serialization.NoEncryption(),
-    )
-  ).decode()
-  public_b64 = base64.b64encode(
-    key.public_key().public_bytes(
-      encoding=serialization.Encoding.Raw,
-      format=serialization.PublicFormat.Raw,
-    )
-  ).decode()
+  private_b64 = new_signing_key()
+  public_b64 = signing_public_key(private_b64)
   enc_private_b64, enc_public_b64 = _new_encryption_keypair()
   identity = {
     "private_key_b64": private_b64,
@@ -541,7 +513,7 @@ def _key_actor_doc(identity: dict) -> dict:
     "host": _own_host(),
     "public_key": {
       "alg": "ed25519",
-      "key_b64": _signing_public_key(identity["private_key_b64"]),
+      "key_b64": signing_public_key(identity["private_key_b64"]),
     },
     "encryption_key": {
       "alg": "x25519",
@@ -1126,28 +1098,11 @@ async def _relay_board_activity(
       "board",
     )
     return
-  identity = _load_identity()
-  envelope = {
-    "v": 0,
-    "type": "board_activity",
-    "post_id": post_id,
-    "kind": kind,
-    "actor": actor_host,
-    "actor_handle": actor_handle,
-    "from": _own_host(),
-    "to": author_host,
-    "sent_at": time.time(),
-  }
-  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-  try:
-    response = await federation_request(
-      "POST", _peer_service_url(author_host, "activity"), json=envelope,
-      max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=min(OUTBOUND_TIMEOUT_S, 5.0),
-    )
-    response.raise_for_status()
-  except Exception:
-    pass
+  await send_board_activity(
+    _load_identity()["private_key_b64"], _own_host(), kind=kind,
+    author_host=author_host, actor_host=actor_host, actor_handle=actor_handle,
+    post_id=post_id,
+  )
 
 
 @router.post("/activity")

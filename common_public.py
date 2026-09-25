@@ -22,6 +22,7 @@ import hashlib
 import io
 import json
 import fcntl
+import logging
 import math
 import sqlite3
 import threading
@@ -39,18 +40,23 @@ from common_protocol import (
   CLOCK_SKEW_S,
   MAX_BOARD_ATTACHMENTS,
   MAX_BIO_CHARS,
+  MAX_ENVELOPE_BYTES,
   MAX_NAME_CHARS,
   MAX_POST_TEXT_CHARS,
   MAX_REPLY_TEXT_CHARS,
+  OUTBOUND_TIMEOUT_S,
   ActorVerifier,
   canonical,
+  peer_service_url,
   read_envelope,
+  sign,
   valid_host,
   valid_id,
   validate_attachment,
   validate_attachments,
   validate_text_or_attachment,
 )
+from common_transport import federation_request
 from service_io import atomic_write
 
 BOARD_PAGE_LIMIT = 50
@@ -952,6 +958,38 @@ def read_board_page(
   }
 
 
+async def send_board_activity(
+  private_key_b64: str, board_host: str, *,
+  kind: str, author_host: str, actor_host: str, actor_handle: str, post_id: str,
+) -> None:
+  """Tell a post's author host about a new like or reply, signed by the board host.
+
+  The board host is the authority for activity on the posts it stores. Delivery
+  is best-effort: a failed notice never affects the stored like or reply.
+  """
+  envelope = {
+    "v": 0,
+    "type": "board_activity",
+    "post_id": post_id,
+    "kind": kind,
+    "actor": actor_host,
+    "actor_handle": actor_handle,
+    "from": board_host,
+    "to": author_host,
+    "sent_at": time.time(),
+  }
+  envelope["sig"] = sign(envelope, private_key_b64)
+  try:
+    response = await federation_request(
+      "POST", peer_service_url(author_host, "activity"), json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=min(OUTBOUND_TIMEOUT_S, 5.0),
+    )
+    response.raise_for_status()
+  except Exception as exc:
+    logging.getLogger("social").warning("Board activity not delivered: %s", exc)
+
+
 def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
   on_activity=None,
@@ -1045,7 +1083,8 @@ def create_public_router(
       )
     )
     author_host = result.pop("author_host", None)
-    if on_activity and result.pop("activity", False) and author_host:
+    activity = result.pop("activity", False)
+    if on_activity and activity and author_host not in (None, envelope["from"]):
       await on_activity(
         "like", author_host, envelope["from"], actor.get("handle") or "", post_id,
       )
@@ -1074,7 +1113,8 @@ def create_public_router(
       text, envelope["sent_at"],
     )
     author_host = result.pop("author_host", None)
-    if on_activity and result.pop("activity", False) and author_host:
+    activity = result.pop("activity", False)
+    if on_activity and activity and author_host not in (None, envelope["from"]):
       await on_activity(
         "reply", author_host, envelope["from"], actor.get("handle") or "", post_id,
       )

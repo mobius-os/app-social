@@ -25,6 +25,8 @@ from service_io import atomic_write, read_capped_body
 
 PROTOCOL = "common/0"
 PUBLIC_SERVICE_PATH = "/api/app-services/social"
+# The one shared board and directory host every Möbius browses.
+COMMUNITY_HOST = "www.mobius.you"
 # Messages match Slack's 40,000-character cap. Board posts stay short because a
 # feed page carries many of them through the bounded community-host transport.
 MAX_MESSAGE_TEXT_CHARS = 40_000
@@ -115,6 +117,30 @@ def validate_attachment_envelope_size(payload: dict) -> None:
       status_code=413,
       detail="Attachments are too large to send together.",
     )
+
+
+def new_signing_key() -> str:
+  """Return a fresh raw Ed25519 private key, base64-encoded."""
+  from cryptography.hazmat.primitives import serialization
+  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+  return base64.b64encode(Ed25519PrivateKey.generate().private_bytes(
+    encoding=serialization.Encoding.Raw,
+    format=serialization.PrivateFormat.Raw,
+    encryption_algorithm=serialization.NoEncryption(),
+  )).decode()
+
+
+def signing_public_key(private_key_b64: str) -> str:
+  """Derive the advertised Ed25519 key from the key that signs envelopes."""
+  from cryptography.hazmat.primitives import serialization
+  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+  key = Ed25519PrivateKey.from_private_bytes(
+    base64.b64decode(private_key_b64, validate=True)
+  )
+  return base64.b64encode(key.public_key().public_bytes(
+    encoding=serialization.Encoding.Raw,
+    format=serialization.PublicFormat.Raw,
+  )).decode()
 
 
 def sign(payload: dict, private_key_b64: str) -> str:
@@ -393,7 +419,8 @@ __all__ = [
   "MAX_ENVELOPE_BYTES", "MAX_NAME_CHARS", "MAX_REPLY_TEXT_CHARS",
   "MAX_MESSAGE_TEXT_CHARS", "MAX_POST_TEXT_CHARS",
   "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
-  "PROTOCOL", "PUBLIC_SERVICE_PATH",
+  "COMMUNITY_HOST", "PROTOCOL", "PUBLIC_SERVICE_PATH",
+  "new_signing_key", "signing_public_key",
   "canonical", "peer_base_url", "peer_service_url", "post_signed_envelope",
   "read_envelope", "sign",
   "valid_host", "valid_id",
