@@ -1,7 +1,7 @@
 import { getPeerAvatars } from './api.js'
 import { avatarDigest, onAvatarDigestChange } from './avatarHints.js'
 import {
-  AVATAR_NOT_FOUND_RETRY_MS, AVATAR_SUCCESS_RETRY_MS, avatarBlob,
+  AVATAR_FAILURE_RETRY_MS, AVATAR_NOT_FOUND_RETRY_MS, AVATAR_SUCCESS_RETRY_MS, avatarBlob,
   avatarCacheIsFresh, avatarFailureState,
 } from './profile.js'
 
@@ -15,6 +15,7 @@ const queue = []
 // screen never holds up a face the owner is still waiting for.
 const flushing = { foreground: false, background: false }
 let accessSequence = 0
+let recoveryTimer = null
 
 const hostKey = (host) => String(host || '').trim().toLowerCase()
 
@@ -75,6 +76,29 @@ function newRecord() {
 function touch(record) {
   record.lastUsed = ++accessSequence
 }
+
+// Freshness checks on mount alone strand a subscribed blank after a transient
+// failure. The cache owns one deadline for those gaps, not a poll per picture.
+function scheduleAvatarRecovery() {
+  if (recoveryTimer !== null) clearTimeout(recoveryTimer)
+  recoveryTimer = null
+  if (globalThis.document?.visibilityState === 'hidden') return
+  const waiting = [...cache.entries()].filter(([, record]) => (
+    record.listeners.size && !record.url && !record.promise && record.failedAt !== null
+  ))
+  if (!waiting.length) return
+  const deadline = Math.min(...waiting.map(([, record]) => record.failedAt + AVATAR_FAILURE_RETRY_MS))
+  recoveryTimer = setTimeout(() => {
+    recoveryTimer = null
+    for (const [key, record] of waiting) {
+      if (record.listeners.size && !record.url && !isCurrent(record, key, Date.now())) cachedAvatar(key)
+    }
+    scheduleAvatarRecovery()
+  }, Math.max(0, deadline - Date.now()))
+  recoveryTimer?.unref?.()
+}
+
+globalThis.document?.addEventListener('visibilitychange', scheduleAvatarRecovery)
 
 function pruneIdleAvatars() {
   if (cache.size <= MAX_IDLE_AVATARS) return
@@ -164,6 +188,7 @@ async function resolveBatch(jobs, lane) {
     job.resolve()
   }
   pruneIdleAvatars()
+  scheduleAvatarRecovery()
 }
 
 function scheduleFlush() {
@@ -219,7 +244,8 @@ function answerIsCurrent(record, key, now) {
 onAvatarDigestChange((hosts) => {
   for (const key of hosts) {
     const record = cache.get(key)
-    if (record?.url && record.listeners.size && !isCurrent(record, key, Date.now())) {
+    if (record?.listeners.size && (record.url || record.failedAt !== null)
+        && !isCurrent(record, key, Date.now())) {
       cachedAvatar(key)
     }
   }
@@ -281,19 +307,23 @@ export function primeAvatar(host, wire) {
     if (oldUrl) URL.revokeObjectURL(oldUrl)
     cache.set(key, record)
     pruneIdleAvatars()
+    scheduleAvatarRecovery()
     return
   }
   updateRecord(record, wire, { status: 404 })
   cache.set(key, record)
   pruneIdleAvatars()
+  scheduleAvatarRecovery()
 }
 
 export function subscribeAvatar(record, listener) {
   touch(record)
   record.listeners.add(listener)
+  scheduleAvatarRecovery()
   return () => {
     record.listeners.delete(listener)
     pruneIdleAvatars()
+    scheduleAvatarRecovery()
   }
 }
 
@@ -304,9 +334,12 @@ export function discardAvatar(host, url) {
   URL.revokeObjectURL(record.url)
   record.url = null
   record.fetchedAt = null
+  record.failedAt = Date.now()
+  record.notFoundAt = null
   record.generation += 1
   for (const listener of record.listeners) listener(null)
   // An undecodable saved copy must not come back on the next launch.
   forgetSavedAvatar(key)
   pruneIdleAvatars()
+  scheduleAvatarRecovery()
 }
