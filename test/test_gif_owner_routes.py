@@ -3,6 +3,7 @@ import asyncio
 import base64
 import gc
 import io
+import json
 import os
 import random
 import subprocess
@@ -11,9 +12,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import httpx
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
 from PIL import Image
 
@@ -21,6 +22,7 @@ os.environ.setdefault("APP_STORAGE_DIR", "/tmp/social-gif-owner-tests")
 os.environ.setdefault("APP_ID", "7")
 os.environ.setdefault("APP_SLUG", "social")
 import social_routes as routes
+import common_protocol
 import service_runtime
 
 
@@ -54,6 +56,149 @@ class GifOwnerRoutes(unittest.IsolatedAsyncioTestCase):
     gif = small[:-1] + b"\x21\xfe" + comment + b"\x00;"
     self.assertEqual(len(gif), target_size)
     return gif
+
+  def ingress_request(self, chunks, *, headers=(), limit=None, path="/activity"):
+    receive = AsyncMock(side_effect=[
+      {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+      for index, chunk in enumerate(chunks)
+    ])
+    state = {} if limit is None else {"common_envelope_max_bytes": limit}
+    return Request({"type": "http", "method": "POST", "path": path,
+                    "headers": list(headers), "state": state}, receive), receive
+
+  async def assert_activity_predecode_rejected(self, chunks, **kwargs):
+    request, receive = self.ingress_request(chunks, **kwargs)
+    copied = Mock()
+    class ObservedBody(bytearray):
+      def extend(self, chunk):
+        copied(len(chunk))
+        super().extend(chunk)
+    with (
+      patch.object(common_protocol, "bytearray", ObservedBody, create=True),
+      patch.object(common_protocol.json, "detect_encoding", wraps=json.detect_encoding) as encoding,
+      patch.object(common_protocol, "_preflight_envelope_structure", wraps=common_protocol._preflight_envelope_structure) as structure,
+      patch.object(common_protocol.json, "loads", wraps=json.loads) as decoded,
+      patch.object(routes, "_verify_peer_envelope", new=AsyncMock()) as auth,
+    ):
+      with self.assertRaises(HTTPException) as caught:
+        await routes.receive_board_activity(request)
+      self.assertEqual((caught.exception.status_code, caught.exception.detail),
+                       (413, "Request body is too large."))
+      encoding.assert_not_called()
+      structure.assert_not_called()
+      decoded.assert_not_called()
+      auth.assert_not_awaited()
+    # The offending chunk must not enter the buffer, or trigger another read.
+    admitted = sum(call.args[0] for call in copied.call_args_list)
+    self.assertLessEqual(admitted, common_protocol.MAX_ENVELOPE_BYTES)
+    self.assertEqual(receive.await_count, copied.call_count + 1)
+    return admitted
+
+  async def test_activity_rejects_reported_megabyte_before_copy_decode_or_auth(self):
+    raw = json.dumps({"type": "board_activity", "extra": "x" * (1024 * 1024)}).encode()
+    raw += b" " * (1_048_618 - len(raw))
+    self.assertEqual(len(raw), 1_048_618)
+    self.assertEqual(await self.assert_activity_predecode_rejected([raw]), 0)
+
+  async def test_activity_route_cap_ignores_claimed_content_type_and_length(self):
+    for claimed_type in ("board_activity", "message", "board_post", "board_reply"):
+      raw = json.dumps({"type": claimed_type, "extra": "x" * 32768}).encode()
+      for headers in ((), ((b"content-length", b"1"),),
+                      ((b"content-length", str(len(raw)).encode()),),
+                      ((b"transfer-encoding", b"chunked"),)):
+        for limit in (None, common_protocol.MAX_ATTACHMENT_ENVELOPE_BYTES * 2):
+          with self.subTest(type=claimed_type, headers=headers, limit=limit):
+            self.assertEqual(await self.assert_activity_predecode_rejected(
+              [raw], headers=headers, limit=limit), 0)
+
+  async def test_activity_chunked_total_rejects_boundary_plus_one_without_copying_overrun(self):
+    cap = common_protocol.MAX_ENVELOPE_BYTES
+    for chunks in ([b" " * cap, b"x", b"unread"],
+                   [b" " * (cap - 1), b"xy", b"unread"]):
+      with self.subTest(first=len(chunks[0])):
+        self.assertEqual(await self.assert_activity_predecode_rejected(
+          chunks, headers=((b"content-length", b"0"),)), len(chunks[0]))
+
+  async def test_activity_exact_boundary_authenticates_with_stdlib_unicode_encodings(self):
+    value = {"v": 0, "type": "board_activity", "to": "owner.example",
+             "from": routes.COMMUNITY_HOST, "post_id": "abcdef12", "kind": "like",
+             "actor": "owner.example", "actor_handle": "é🪐", "extra": "{}[]:,\\\""}
+    for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+                     "utf-32", "utf-32-le", "utf-32-be"):
+      raw = json.dumps(value, ensure_ascii=False).encode(encoding)
+      space = " ".encode(encoding)
+      space = space[{"utf-8-sig": 3, "utf-16": 2, "utf-32": 4}.get(encoding, 0):]
+      raw += space * ((common_protocol.MAX_ENVELOPE_BYTES - len(raw)) // len(space))
+      self.assertEqual(len(raw), common_protocol.MAX_ENVELOPE_BYTES)
+      request, _ = self.ingress_request([raw[:23], raw[23:]])
+      with self.subTest(encoding=encoding), \
+           patch.object(common_protocol.json, "loads", wraps=json.loads) as decoded, \
+           patch.object(routes, "_verify_peer_envelope", new=AsyncMock()) as auth:
+        self.assertEqual(await routes.receive_board_activity(request), {"status": "ok"})
+        decoded.assert_called_once()
+        auth.assert_awaited_once_with(value)
+
+  async def test_activity_small_malformed_json_and_wrong_type_keep_400_semantics(self):
+    for raw, detail in ((b'{"type":', "Envelope is not JSON."),
+                        (b'[]', "Envelope is not an object."),
+                        (b'{"v":0,"type":"message"}', "Unsupported envelope type.")):
+      request, _ = self.ingress_request([raw])
+      with self.subTest(raw=raw), patch.object(routes, "_verify_peer_envelope", new=AsyncMock()) as auth:
+        with self.assertRaises(HTTPException) as caught:
+          await routes.receive_board_activity(request)
+        self.assertEqual((caught.exception.status_code, caught.exception.detail), (400, detail))
+        auth.assert_not_awaited()
+
+  async def test_route_cap_and_public_control_state_can_only_narrow_receive_allowance(self):
+    raw = b'{"type":"message","extra":"' + b'x' * 100 + b'"}'
+    request, _ = self.ingress_request([raw], limit=32)
+    with patch.object(common_protocol.json, "loads") as decoded:
+      with self.assertRaises(HTTPException) as caught:
+        await common_protocol.read_envelope(request, max_bytes=common_protocol.MAX_ENVELOPE_BYTES)
+      self.assertEqual(caught.exception.status_code, 413)
+      decoded.assert_not_called()
+    request, _ = self.ingress_request([raw], limit=common_protocol.MAX_ENVELOPE_BYTES)
+    with patch.object(common_protocol.json, "loads") as decoded:
+      with self.assertRaises(HTTPException) as caught:
+        await common_protocol.read_envelope(request, max_bytes=32)
+      self.assertEqual(caught.exception.status_code, 413)
+      decoded.assert_not_called()
+
+  async def test_actual_inbox_keeps_60_mib_receive_boundary(self):
+    prefix, suffix = b'{"v":0,"type":"message","to":"owner.example","id":"abcdef12","enc":{"ciphertext":"', b'"}}'
+    raw = prefix + b'x' * (common_protocol.MAX_ATTACHMENT_ENVELOPE_BYTES - len(prefix) - len(suffix)) + suffix
+    self.assertEqual(len(raw), 60 * 1024 * 1024)
+    with patch.object(routes, "_joined_for_federation", return_value=True), \
+         patch.object(routes, "_verify_peer_envelope", new=AsyncMock(side_effect=HTTPException(401, "fixture auth"))) as auth:
+      request, _ = self.ingress_request([raw], path="/inbox")
+      with self.assertRaises(HTTPException) as caught:
+        await routes.receive_message(request, db=None)
+      self.assertEqual((caught.exception.status_code, caught.exception.detail), (401, "fixture auth"))
+      auth.assert_awaited_once()
+      auth.reset_mock()
+      request, _ = self.ingress_request([raw, b" "], path="/inbox")
+      with patch.object(common_protocol.json, "loads") as decoded:
+        with self.assertRaises(HTTPException) as caught:
+          await routes.receive_message(request, db=None)
+        self.assertEqual(caught.exception.status_code, 413)
+        decoded.assert_not_called()
+        auth.assert_not_awaited()
+
+  async def test_actual_inbox_preserves_20_mib_gif_original(self):
+    original = self.full_size_gif()
+    attachment = {**self.attachment, "data_b64": base64.b64encode(original).decode()}
+    value = {"v": 0, "type": "message", "to": "owner.example", "from": "peer.example",
+             "id": "abcdef12", "sent_at": 1, "text": "caption", "attachment": attachment}
+    raw = json.dumps(value).encode()
+    request, _ = self.ingress_request([raw], path="/inbox")
+    with patch.object(routes, "_joined_for_federation", return_value=True), \
+         patch.object(routes, "_verify_peer_envelope", new=AsyncMock(return_value={"handle": "peer"})), \
+         patch.object(routes, "_common_app", return_value=object()), \
+         patch.object(routes, "_store_message", new=AsyncMock(return_value=(False, "accepted", False))) as store, \
+         patch.object(routes, "notify", new=AsyncMock()) as notify:
+      self.assertEqual(await routes.receive_message(request, db=None), {"status": "duplicate"})
+      self.assertEqual(store.await_args.args[-1][1], original)
+      notify.assert_not_awaited()
 
   async def send_asgi(self, response, send=None, *, headers=(), extensions=None):
     messages = []

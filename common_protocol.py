@@ -433,13 +433,15 @@ def _preflight_envelope_structure(document: str) -> None:
       raise HTTPException(status_code=413, detail="Envelope JSON is too complex.")
 
 
-async def read_envelope(request: Request) -> dict:
-  """Read one bounded envelope without letting Starlette buffer it first."""
+async def read_envelope(
+  request: Request, *, max_bytes: int = MAX_ATTACHMENT_ENVELOPE_BYTES,
+) -> dict:
+  """Read within the route's wire cap, narrowed by any public reservation."""
   # The public router reserves this allowance for the complete request lifetime.
   # Its route-owned state also caps control streams before JSON materialization;
   # neither an untrusted Content-Length nor the document's type grants room.
   state = getattr(request, "state", None)
-  limit = getattr(state, "common_envelope_max_bytes", MAX_ATTACHMENT_ENVELOPE_BYTES)
+  limit = min(max_bytes, getattr(state, "common_envelope_max_bytes", max_bytes))
   body = bytearray()
   receive_budget = asyncio.timeout(MAX_ENVELOPE_RECEIVE_SECONDS)
   try:

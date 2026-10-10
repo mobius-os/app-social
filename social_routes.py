@@ -1283,7 +1283,7 @@ def _finish_activity(token: str, claim: str, delivered: bool) -> None:
 @router.post("/activity")
 async def receive_board_activity(request: Request):
   """Accept a signed notice that one of the owner's posts got a like or reply."""
-  envelope = await _read_envelope(request)
+  envelope = await _read_envelope(request, max_bytes=MAX_ENVELOPE_BYTES)
   if envelope.get("v") != 0 or envelope.get("type") != "board_activity":
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   if envelope.get("to") != _own_host():
