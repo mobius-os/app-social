@@ -120,6 +120,7 @@ PEER_AVATAR_BATCH_TIMEOUT_S = 12
 # Capability discovery and a signed Community write share one budget, leaving room for
 # service startup and a useful error before the 15-second process ceiling.
 COMMUNITY_WRITE_TIMEOUT_S = 13
+DIRECT_DELIVERY_TIMEOUT_S = 12.5
 # Peer avatars are re-encoded to a small validated raster before caching, so a
 # malicious raster never reaches the browser and cached blobs stay tiny.
 AVATAR_MAX_SIDE = 128
@@ -903,63 +904,72 @@ async def _attempt_direct_delivery(app, peer_host: str, message_id: str) -> dict
   encrypted = bool(record.get("encrypted"))
   status = "failed"
   detail = "The peer could not be reached."
+  phase = "discovery"
   try:
-    attachment = _stored_attachment(app, peer_host, record)
-    actor = await _fetch_actor(peer_host)
-    identity = _load_identity()
-    envelope = {
-      "v": 0,
-      "type": "message",
-      "id": message_id,
-      "from": _own_host(),
-      "to": peer_host,
-      "text": record.get("text") or "",
-      # Transport signatures expire; renew this timestamp on every attempt
-      # while preserving the authored message id and local creation time.
-      "sent_at": time.time(),
-    }
-    encryption_key = actor.get("encryption_key")
-    peer_encrypts = (
-      isinstance(encryption_key, dict)
-      and encryption_key.get("alg") == "x25519"
-    )
-    if encrypted and not peer_encrypts:
-      raise ValueError("The peer no longer publishes its encryption key.")
-    if peer_encrypts:
-      recipient_key_b64 = encryption_key.get("key_b64")
-      if not isinstance(recipient_key_b64, str) or not recipient_key_b64:
-        raise ValueError("The peer published no valid encryption key.")
-      # Once an attempt selects encryption, persist that policy before the
-      # network side effect. A process exit after the peer accepts the message
-      # must never let an expired-lease retry downgrade it to plaintext.
-      record = await _require_encrypted_delivery(
-        app, peer_host, message_id, attempt_id,
+    # The platform allows 15 seconds for the whole service call. Discovery
+    # and signed write share one budget, leaving time to persist the outcome.
+    async with asyncio.timeout(DIRECT_DELIVERY_TIMEOUT_S):
+      attachment = _stored_attachment(app, peer_host, record)
+      actor = await _fetch_actor(peer_host)
+      identity = _load_identity()
+      envelope = {
+        "v": 0,
+        "type": "message",
+        "id": message_id,
+        "from": _own_host(),
+        "to": peer_host,
+        "text": record.get("text") or "",
+        # Transport signatures expire; renew this timestamp on every attempt
+        # while preserving the authored message id and local creation time.
+        "sent_at": time.time(),
+      }
+      encryption_key = actor.get("encryption_key")
+      peer_encrypts = (
+        isinstance(encryption_key, dict)
+        and encryption_key.get("alg") == "x25519"
       )
-      encrypted = True
-      envelope["enc"] = _seal_dm(
-        message_id, recipient_key_b64, text=envelope["text"],
-        attachment=attachment[0] if attachment is not None else None,
-        reply_to=record.get("reply_to"),
+      if encrypted and not peer_encrypts:
+        raise ValueError("The peer no longer publishes its encryption key.")
+      if peer_encrypts:
+        recipient_key_b64 = encryption_key.get("key_b64")
+        if not isinstance(recipient_key_b64, str) or not recipient_key_b64:
+          raise ValueError("The peer published no valid encryption key.")
+        # Once an attempt selects encryption, persist that policy before the
+        # network side effect. A process exit after the peer accepts the message
+        # must never let an expired-lease retry downgrade it to plaintext.
+        record = await _require_encrypted_delivery(
+          app, peer_host, message_id, attempt_id,
+        )
+        encrypted = True
+        envelope["enc"] = _seal_dm(
+          message_id, recipient_key_b64, text=envelope["text"],
+          attachment=attachment[0] if attachment is not None else None,
+          reply_to=record.get("reply_to"),
+        )
+        envelope["text"] = ""
+        encrypted = True
+      else:
+        if attachment is not None:
+          envelope["attachment"] = attachment[0]
+        if record.get("reply_to") is not None:
+          envelope["reply_to"] = record["reply_to"]
+      envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+      phase = "write"
+      response = await _post_signed_envelope(
+        _peer_service_url(peer_host, "inbox"), envelope,
+        max_response_bytes=MAX_ENVELOPE_BYTES,
       )
-      envelope["text"] = ""
-      encrypted = True
-    else:
-      if attachment is not None:
-        envelope["attachment"] = attachment[0]
-      if record.get("reply_to") is not None:
-        envelope["reply_to"] = record["reply_to"]
-    envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-    response = await _post_signed_envelope(
-      _peer_service_url(peer_host, "inbox"), envelope,
-      max_response_bytes=MAX_ENVELOPE_BYTES,
-    )
-    response.raise_for_status()
-    status = "delivered"
-    detail = None
+      response.raise_for_status()
+      status = "delivered"
+      detail = None
   except httpx.HTTPStatusError as exc:
     detail = f"The peer rejected the message ({exc.response.status_code})."
-  except httpx.TimeoutException:
-    detail = "The peer took too long to respond."
+  except (TimeoutError, httpx.TimeoutException):
+    detail = ("The peer’s actor could not be discovered in time." if phase == "discovery"
+              else "The peer took too long to confirm delivery; it may have arrived.")
+  except HTTPException as exc:
+    if phase == "discovery" and isinstance(exc.__cause__, httpx.TimeoutException):
+      detail = "The peer’s actor could not be discovered in time."
   except Exception:
     detail = "The peer could not be reached."
   return await _finish_delivery_attempt(

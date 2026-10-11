@@ -69,7 +69,15 @@ export function settleMessage(messages, messageId, result) {
   })
 }
 
+// A lost response is not proof of rejection: keep the same retryable identity
+// until a server record or a later retry establishes the delivery outcome.
+export function markDeliveryUnknown(messages, messageId, reason) {
+  return (messages || []).map((message) => message.id === messageId && message.status !== 'delivered'
+    ? { ...message, status: 'sending', failure: reason, _client_unconfirmed_history: true }
+    : message)
+}
+
 // Screen readers hear what the delivery tick means, not a raw status word.
 export function deliveryLabel(status) {
-  return status === 'sending' ? 'Sending' : status === 'failed' ? 'Not delivered' : 'Delivered'
+  return status === 'sending' ? 'Sending' : status === 'failed' ? 'Delivery failed' : 'Delivered'
 }

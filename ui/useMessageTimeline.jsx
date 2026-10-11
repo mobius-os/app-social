@@ -6,7 +6,7 @@ import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import { prependedScrollTop } from './interactionRules.js'
 import { reachedEarlierHistory } from './historyScroll.js'
 import {
-  addUnseenMessages, deliveryLabel, isDefinitePrecommitRejection, reconcileLatestPage,
+  addUnseenMessages, deliveryLabel, isDefinitePrecommitRejection, markDeliveryUnknown, reconcileLatestPage,
   reconcileOlderPage, settleMessage,
 } from '../message_ui_state.js'
 
@@ -232,7 +232,6 @@ export function useMessageTimeline({
       // refresh is offline; never leave a delivered message looking retryable.
       updateMessages((prior) => settleMessage(prior, messageId, result))
       onSent(result)
-      await refresh()
     } catch (error) {
       window.mobius?.signal?.('error', { message: error.message, source: signals.error })
       if (isDefinitePrecommitRejection(error)) {
@@ -247,13 +246,16 @@ export function useMessageTimeline({
           'error',
         )
       } else {
+        updateMessages((prior) => markDeliveryUnknown(
+          prior, messageId, 'Confirmation was interrupted; this message may have arrived.',
+        ))
         showToast('Delivery was interrupted. Retry the saved message below.', 'error')
       }
-      await refresh()
     } finally {
       setSending(false)
       inputRef.current?.focus()
     }
+    await refresh()
   }
 
   async function retry(message) {
@@ -280,13 +282,17 @@ export function useMessageTimeline({
       } else {
         showToast(result.detail || retryFailedText, 'error')
       }
-      await refresh()
     } catch (error) {
+      if (!isDefinitePrecommitRejection(error)) {
+        updateMessages((prior) => markDeliveryUnknown(
+          prior, messageId, 'Retry confirmation was interrupted; this message may have arrived.',
+        ))
+      }
       showToast(error.message || 'Delivery couldn’t be retried yet.', 'error')
-      await refresh()
     } finally {
       setRetrying('')
     }
+    await refresh()
   }
 
   return {
@@ -312,12 +318,15 @@ export function DeliveryNote({ message, timeline }) {
   if (message.status !== 'failed' && (message.status !== 'sending' || sending)) return null
   const failed = message.status === 'failed'
   return (
-    <button className="cn-failed-note" type="button" disabled={!!retrying}
-            onClick={() => retry(message)}>
-      <Warning aria-hidden="true" />
-      {retrying === message.id ? 'Retrying…' : failed
-        ? 'Not delivered · Retry' : 'Delivery interrupted · Retry'}
-    </button>
+    <span className="cn-delivery-note">
+      <button className="cn-failed-note" type="button" disabled={!!retrying}
+              onClick={() => retry(message)}>
+        <Warning aria-hidden="true" />
+        {retrying === message.id ? 'Retrying…' : failed
+          ? 'Delivery failed · Retry' : 'Delivery interrupted · Retry'}
+      </button>
+      {message.failure && <span className="cn-delivery-reason">{message.failure}</span>}
+    </span>
   )
 }
 

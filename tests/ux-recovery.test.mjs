@@ -129,7 +129,7 @@ test('Community success actions stay quiet and image previews expose real zoom c
   const media = readFileSync(new URL('../ui/Media.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(board, /Message sent|Post deleted/)
   assert.match(media, /className="cn-lightbox-controls"/)
-  assert.match(media, /if \(event\.target === event\.currentTarget\) onClose\(\)/)
+  assert.match(media, /if \(event\.target === event\.currentTarget && startedOnBackdrop\.current\) onClose\(\)/)
   assert.match(media, /aria-label="Zoom out"/)
   assert.match(media, /aria-label="Reset zoom"/)
   assert.match(media, /aria-label="Zoom in"/)

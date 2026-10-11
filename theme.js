@@ -591,6 +591,9 @@ export const CSS = `
 }
 .cn-failed-note svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--danger); }
 .cn-failed-note:disabled { cursor: default; opacity: 0.65; }
+.cn-delivery-note { display: flex; flex-direction: column; align-items: flex-end; align-self: flex-end; max-width: min(100%, 440px); }
+.cn-delivery-note .cn-failed-note { margin: 0; }
+.cn-delivery-reason { color: var(--muted); font-size: 14px; line-height: 1.45; padding: 0 8px 6px; text-align: right; overflow-wrap: anywhere; }
 .cn-message-line {
   width: 92%; display: flex; align-items: flex-end; gap: 6px; align-self: flex-start;
 }
@@ -924,6 +927,23 @@ export const CSS = `
 .cn-lightbox-controls button:disabled { opacity: .35; cursor: default; }
 .cn-lightbox-controls svg { width: 19px; height: 19px; }
 .cn-lightbox-reset { min-width: 58px !important; font-variant-numeric: tabular-nums; }
+.cn-lightbox-gallery {
+  position: absolute; z-index: 2; top: max(12px, var(--mobius-safe-top, 0px)); left: 12px;
+  display: flex; align-items: center; gap: 4px; padding: 2px;
+  border: 1px solid rgba(255,255,255,.2); border-radius: 25px;
+  background: rgba(18,18,22,.9); color: #fff;
+}
+.cn-lightbox-gallery button, .cn-lightbox-status button {
+  min-width: 44px; min-height: 44px; border: 0; border-radius: 22px;
+  background: transparent; color: inherit; cursor: pointer;
+}
+.cn-lightbox-gallery button:hover, .cn-lightbox-status button:hover { background: rgba(255,255,255,.1); }
+.cn-lightbox-gallery button:disabled { opacity: .35; cursor: default; }
+.cn-lightbox-gallery svg { width: 22px; height: 22px; }
+.cn-lightbox-gallery span { min-width: 44px; text-align: center; font: 650 14px var(--font); font-variant-numeric: tabular-nums; }
+.cn-lightbox-status { display: grid; gap: 12px; text-align: center; color: #fff; font-size: 16px; }
+.cn-lightbox-status button { padding: 0 16px; border: 1px solid rgba(255,255,255,.3); font: inherit; }
+.cn-lightbox button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 @keyframes cn-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes cn-lightbox-image-in { from { opacity: .7; } to { opacity: 1; } }
 

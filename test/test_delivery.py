@@ -118,6 +118,57 @@ class DirectDeliveryTests(unittest.IsolatedAsyncioTestCase):
     ])
     self.assertGreater(envelopes[1]["sent_at"], envelopes[0]["sent_at"])
 
+  async def test_discovery_and_write_share_budget_then_settle_failed_record(self):
+    message_id = "66666666-6666-4666-8666-666666666666"
+    await social_routes._persist_outgoing_message(None, self.app, "peer.example", {
+      "id": message_id, "dir": "out", "peer": "peer.example",
+      "text": "Keep one id", "sent_at": 1.0, "status": "sending",
+    }, None)
+
+    async def slow_discovery(_host):
+      await asyncio.sleep(0.04)
+      return {}
+
+    cancelled = asyncio.Event()
+    async def slow_write(*_args, **_kwargs):
+      try:
+        await asyncio.sleep(0.06)
+      except asyncio.CancelledError:
+        cancelled.set()
+        raise
+
+    with (
+      patch.object(social_routes, "DIRECT_DELIVERY_TIMEOUT_S", 0.07),
+      patch.object(social_routes, "_fetch_actor", new=slow_discovery),
+      patch.object(social_routes, "_load_identity", return_value={"private_key_b64": "unused"}),
+      patch.object(social_routes, "_sign", return_value="signature"),
+      patch.object(social_routes, "_post_signed_envelope", new=slow_write),
+    ):
+      result = await social_routes._attempt_direct_delivery(self.app, "peer.example", message_id)
+    self.assertTrue(cancelled.is_set())
+    self.assertEqual(result["status"], "failed")
+    self.assertIn("may have arrived", result["failure"])
+    self.assertEqual(result["id"], message_id)
+
+  async def test_discovery_budget_timeout_does_not_start_signed_write(self):
+    message_id = "77777777-7777-4777-8777-777777777777"
+    await social_routes._persist_outgoing_message(None, self.app, "peer.example", {
+      "id": message_id, "dir": "out", "peer": "peer.example",
+      "text": "Keep one id", "sent_at": 1.0, "status": "sending",
+    }, None)
+    async def slow_discovery(_host):
+      await asyncio.sleep(0.06)
+      return {}
+    with (
+      patch.object(social_routes, "DIRECT_DELIVERY_TIMEOUT_S", 0.03),
+      patch.object(social_routes, "_fetch_actor", new=slow_discovery),
+      patch.object(social_routes, "_post_signed_envelope", new=AsyncMock()) as write,
+    ):
+      result = await social_routes._attempt_direct_delivery(self.app, "peer.example", message_id)
+    self.assertEqual(result["status"], "failed")
+    self.assertIn("actor could not be discovered", result["failure"])
+    write.assert_not_awaited()
+
   async def test_exact_repeat_of_a_delivered_send_does_not_deliver_twice(self):
     message_id = "33333333-3333-4333-8333-333333333333"
     response = httpx.Response(
