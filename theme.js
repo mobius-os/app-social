@@ -9,8 +9,6 @@ export const CSS = `
   -webkit-font-smoothing: antialiased;
 }
 .cn-root ::selection { background: color-mix(in srgb, var(--accent) 48%, transparent); color: var(--text); }
-/* Own bubbles are filled with the accent, so an accent tint would vanish there. */
-.cn-root .cn-bubble.is-mine ::selection { background: var(--accent-fg); color: var(--accent); }
 .cn-root :where(input, textarea) { caret-color: var(--accent); }
 .cn-scroll {
   flex: 1; min-height: 0;
@@ -563,6 +561,9 @@ export const CSS = `
   color: var(--accent-fg); border-color: transparent;
   align-self: flex-end; border-bottom-right-radius: 7px;
 }
+/* Own bubbles are filled with the accent, so an accent-tinted selection would
+   vanish there: invert it instead. */
+.cn-root .cn-bubble.is-mine ::selection { background: var(--accent-fg); color: var(--accent); }
 .cn-bubble.is-theirs { border-bottom-left-radius: 7px; }
 .cn-bubble-time { display: block; margin-top: 3px; font-size: 10.5px; opacity: 0.62; text-align: right; }
 .cn-bubble.is-failed { border-color: var(--danger); }
