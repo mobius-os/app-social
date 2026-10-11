@@ -13,6 +13,7 @@ import tracemalloc
 import unittest
 import uuid
 import weakref
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -23,8 +24,9 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import common_protocol
+import common_public
 import community_host
-from common_public import CommonPublicStore, image_thumbnail_bytes, validate_reply_original_bytes, validate_thumbnail_bytes
+from common_public import CommonPublicStore, check_reply_original, image_thumbnail_bytes, validate_thumbnail_bytes
 from test_community_host import _peer, _signed
 
 
@@ -940,7 +942,7 @@ class CanonicalGifTests(unittest.TestCase):
     validated, original = common_protocol.validate_attachment(value)
     self.assertIs(validated, value)
     self.assertEqual(original, data)
-    validate_reply_original_bytes(value, data)
+    self.assertEqual(check_reply_original((value, data)), (value, data))
     self.assertEqual(common_protocol.ATTACHMENT_MIME_EXT["image/gif"], "gif")
     for mime in ("image/jpeg", "image/png", "image/webp"):
       legacy = {**value, "mime": mime, "data_b64": base64.b64encode(b"legacy original").decode()}
@@ -1210,6 +1212,182 @@ class GifMetadataBudgetTests(unittest.TestCase):
       with self.subTest(prefix=end), self.assertRaises(HTTPException) as caught:
         common_protocol.validate_attachment(wire(data[:end], (1, 1)))
       self.assertEqual(caught.exception.status_code, 400)
+
+
+class MediaWorkLedger(ExitStack):
+  """Record every GIF walk and poster render, and whether the board lock was held."""
+
+  def __enter__(self):
+    super().__enter__()
+    self.held, self.walks, self.renders = 0, [], []
+    lock, walk = CommonPublicStore._mutation_lock, common_protocol.validate_gif_bytes
+    render = common_public.image_thumbnail_bytes
+
+    @contextmanager
+    def held_lock(store, local_lock, name):
+      with lock(store, local_lock, name):
+        self.held += 1
+        try:
+          yield
+        finally:
+          self.held -= 1
+
+    def counted_walk(wire, data):
+      self.walks.append((bytes(data[:64]), len(data), bool(self.held)))
+      return walk(wire, data)
+
+    def counted_render(source, *args, **kwargs):
+      self.renders.append(bool(self.held))
+      return render(source, *args, **kwargs)
+
+    self.enter_context(patch.object(CommonPublicStore, "_mutation_lock", held_lock))
+    self.enter_context(patch("common_protocol.validate_gif_bytes", counted_walk))
+    self.enter_context(patch("common_public.validate_gif_bytes", counted_walk))
+    self.enter_context(patch("common_public.image_thumbnail_bytes", counted_render))
+    return self
+
+  def assert_outside_lock(self, case):
+    case.assertFalse(any(locked for *_, locked in self.walks), "a GIF walk ran under the board lock")
+    case.assertFalse(any(self.renders), "a poster rendered under the board lock")
+
+
+def distinct_gifs():
+  """Four different valid originals, each with its declared canvas."""
+  return [(animation(), (24, 16)), (tiny_container(frames=2), (1, 1)),
+          (tiny_container((3, 2), frames=3), (3, 2)),
+          (with_metadata(tiny_container(), control(0x04, 3) * 3 + PLAIN_TEXT), (1, 1))]
+
+
+class GifValidationOwnershipTests(unittest.TestCase):
+  """Each distinct original is walked once, before the board lock, per request."""
+
+  def member_client(self, root):
+    store = CommonPublicStore(root)
+    store.register("member.example", "member", "")
+    key = _peer(Path(root), "member.example")
+    client = self.enterContext(TestClient(community_host.create_app(root)))
+    body = {"v": 0, "from": "member.example", "sent_at": time.time()}
+    return store, key, client, body
+
+  def test_public_gallery_walks_each_distinct_original_once_outside_the_lock(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store, key, client, body = self.member_client(root)
+    gifs = distinct_gifs()
+    gallery = [wire(data, size) for data, size in gifs]
+    post_id = str(uuid.uuid4())
+    post = {**body, "id": post_id, "type": "board_post", "text": "Gallery",
+            "attachments": gallery, "attachment": gallery[0]}
+    with MediaWorkLedger() as ledger:
+      response = client.post("/api/common/board", json=_signed(key, post))
+    self.assertEqual(response.status_code, 200, response.text)
+    # Previously 13: the compatibility copy, the gallery, the store and posters.
+    self.assertEqual(sorted(walk[:2] for walk in ledger.walks),
+                     sorted((data[:64], len(data)) for data, _ in gifs))
+    self.assertEqual(len(ledger.renders), 4)
+    ledger.assert_outside_lock(self)
+    for index, (data, _) in enumerate(gifs):
+      self.assertEqual(store.board_image(post_id, index)[0].read_bytes(), data)
+      poster = store.board_thumbnail_dir() / f"{post_id}-{index}.webp"
+      self.assertEqual(poster.read_bytes(), image_thumbnail_bytes(data)[1])
+    with MediaWorkLedger() as ledger:
+      retried = client.post("/api/common/board", json=_signed(key, post))
+    self.assertEqual(retried.status_code, 200, retried.text)
+    self.assertEqual((len(ledger.walks), ledger.renders), (4, []))  # Checked, never re-rendered.
+    ledger.assert_outside_lock(self)
+
+  def test_public_reply_walks_once_and_retries_settle_before_media_work(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store, key, client, body = self.member_client(root)
+    post_id, reply_id = str(uuid.uuid4()), str(uuid.uuid4())
+    store.store_post({"id": post_id, "host": "member.example", "text": "Post",
+                      "created_at": 1, "replies": []})
+    data = animation()
+    reply = {**body, "id": reply_id, "post_id": post_id, "type": "board_reply",
+             "text": "Reply", "attachment": wire(data)}
+    with MediaWorkLedger() as ledger:
+      response = client.post("/api/common/board/reply", json=_signed(key, reply))
+    self.assertEqual(response.status_code, 200, response.text)
+    self.assertEqual((len(ledger.walks), len(ledger.renders)), (1, 1))  # Previously 3 walks.
+    ledger.assert_outside_lock(self)
+    poster = store.reply_image(post_id, reply_id, thumbnail=True)[0]
+    self.assertEqual(poster.read_bytes(), image_thumbnail_bytes(data)[1])
+    self.assertEqual(store.reply_image(post_id, reply_id)[0].read_bytes(), data)
+    with MediaWorkLedger() as ledger:
+      retried = client.post("/api/common/board/reply", json=_signed(key, reply))
+      changed = client.post("/api/common/board/reply", json=_signed(key, {**reply, "text": "Other"}))
+    self.assertEqual((retried.status_code, retried.json()["reply_count"], changed.status_code), (200, 1, 409))
+    # Only the wire check of each request; neither retry nor conflict renders.
+    self.assertEqual((len(ledger.walks), ledger.renders), (2, []))
+
+  def test_direct_store_callers_get_one_full_check_per_original(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store = CommonPublicStore(root)
+    gifs = distinct_gifs()
+    plain = [(wire(data, size), data) for data, size in gifs]
+    with MediaWorkLedger() as ledger:
+      self.assertTrue(store.store_post({"id": "abcdef12", "host": "member.example", "text": "",
+                                        "created_at": 1, "replies": []}, attachments=plain))
+      store.add_reply("abcdef12", "abcdef34", "member.example", "member", "Reply", 2, plain[0])
+    self.assertEqual(len(ledger.walks), 5)  # Previously 8 + 2: check, then poster.
+    ledger.assert_outside_lock(self)
+    self.assertEqual([store.board_image("abcdef12", i)[0].read_bytes() for i in range(4)],
+                     [data for data, _ in gifs])
+    self.assertEqual(store.reply_image("abcdef12", "abcdef34")[0].read_bytes(), gifs[0][0])
+
+  def test_a_check_is_reused_only_for_the_unchanged_wire_it_proved(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store = CommonPublicStore(root)
+    data = animation()
+    checked = common_protocol.validate_attachment(wire(data))
+    self.assertIsInstance(checked, tuple)
+    self.assertEqual(checked, (checked[0], data))
+    with self.assertRaises(HTTPException):  # Constructing one is the check.
+      common_protocol.CheckedAttachment(wire(data[:-1]), data[:-1])
+    store.store_post({"id": "abcdef20", "host": "member.example", "text": "Post",
+                      "created_at": 1, "replies": []})
+    checked[0]["w"] = 23  # Edited after its check: checked again, and rejected.
+    for store_media in (
+      lambda: store.store_post({"id": "abcdef12", "host": "member.example", "text": "",
+                                "created_at": 1, "replies": []}, checked),
+      lambda: store.add_reply("abcdef20", "abcdef34", "member.example", "member", "R", 2, checked),
+    ):
+      with self.assertRaises(HTTPException) as caught:
+        store_media()
+      self.assertEqual(caught.exception.status_code, 400)
+    self.assertEqual(list(store.board_media_dir().iterdir()), [])
+    self.assertFalse((store.board_dir() / "abcdef12.json").exists())
+    self.assertEqual(store.get_replies("abcdef20")["replies"], [])
+    self.assertFalse((store.reply_media_dir() / "abcdef20").exists())
+    # False static MIME still meets the GIF check, reused or not.
+    with self.assertRaises(HTTPException):
+      store.store_post({"id": "abcdef13", "host": "member.example", "text": "",
+                        "created_at": 1, "replies": []}, ({**wire(data), "mime": "image/png"}, data))
+
+  def test_standalone_backfill_still_fully_checks_stored_bytes(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store = CommonPublicStore(root)
+    data = animation()
+    store.store_post({"id": "abcdef12", "host": "member.example", "text": "",
+                      "created_at": 1, "replies": []}, common_protocol.validate_attachment(wire(data)))
+    poster = store.board_thumbnail_dir() / "abcdef12-0.webp"
+    expected = poster.read_bytes()
+    poster.unlink()
+    with MediaWorkLedger() as ledger:
+      self.assertEqual(store.board_thumbnail("abcdef12")[0].read_bytes(), expected)
+    self.assertEqual(len(ledger.walks), 1)
+
+  def test_mismatched_compatibility_copy_is_rejected_without_media_or_records(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store, key, client, body = self.member_client(root)
+    gifs = distinct_gifs()
+    gallery = [wire(data, size) for data, size in gifs[:2]]
+    post = {**body, "id": str(uuid.uuid4()), "type": "board_post", "text": "",
+            "attachments": gallery, "attachment": gallery[1]}
+    response = client.post("/api/common/board", json=_signed(key, post))
+    self.assertEqual((response.status_code, response.json()["detail"]),
+                     (400, "First post image does not match its gallery copy."))
+    self.assertEqual(list(store.board_media_dir().iterdir()), [])
+    self.assertEqual(list(store.board_dir().glob("*.json")), [])
 
 
 class CommunityGifTests(unittest.TestCase):

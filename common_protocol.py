@@ -253,7 +253,8 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
     # Non-GCE extension metadata may be large but cannot alter LZW rasters.
     # Validate its framing while excluding it from Pillow's slower metadata
     # aggregation; the original bytes remain untouched for storage.
-    decoded_parts = [data[:position]]
+    # Spans of kept blocks, copied into one view only after every cap passes.
+    decoded_spans = [(0, position)]
     # GIF89a allows one graphic control per rendering block, but decoders
     # tolerate a run of them. Pillow folds a run before one image: the last
     # delay, the last transparency index and the last non-zero disposal win.
@@ -268,7 +269,7 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
         if not frames or position != len(data):
           raise ValueError("GIF trailer is invalid.")
         # Controls after the last image precede no raster.
-        decoded_parts.append(b";")
+        decoded_spans.append((block_start, position))
         break
       blocks += 1
       if blocks > MAX_GIF_BLOCKS:
@@ -297,7 +298,7 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
         continue
       if marker != 0x2c:
         raise ValueError("GIF block is invalid.")
-      decoded_parts.extend(data[start:end] for start, end in sorted(set(controls.values())))
+      decoded_spans.extend(sorted(set(controls.values())))
       controls.clear()
       descriptor = take(9)
       left, top, frame_width, frame_height = (
@@ -317,9 +318,13 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
       if not 2 <= take(1)[0] <= 8:
         raise ValueError("GIF LZW code size is invalid.")
       position, blocks = _skip_gif_subblocks(data, position, blocks)
-      decoded_parts.append(data[block_start:position])
+      decoded_spans.append((block_start, position))
     # No Pillow seek/load happens until the complete container fits every cap.
-    decode_view = b"".join(decoded_parts)
+    if sum(end - start for start, end in decoded_spans) == len(data):
+      decode_view = data  # Nothing was omitted, so the view is the original.
+    else:
+      source = memoryview(data)
+      decode_view = b"".join(source[start:end] for start, end in decoded_spans)
     with Image.open(io.BytesIO(decode_view)) as image:
       if image.format != "GIF" or image.size != (width, height):
         raise ValueError("GIF header is invalid.")
@@ -337,9 +342,49 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
     raise HTTPException(status_code=400, detail="GIF attachment is invalid.") from exc
 
 
+class CheckedAttachment(tuple):
+  """A decoded ``(wire, data)`` original whose bytes passed the media check.
+
+  It unpacks, indexes and compares exactly like the plain pair every caller
+  already uses. Constructing one runs the check (GIF framing, budgets and
+  every raster, including bytes behind a false static MIME), and a checked GIF
+  keeps the bounded decode view that check produced. Storage can then render
+  a poster without walking the same original again. Static rasters are only
+  identified here; their header and decode checks stay with each consumer.
+  """
+
+  def __new__(cls, wire: dict, data: bytes):
+    gif_view = None
+    if wire["mime"] == "image/gif" or data[:6] in (b"GIF87a", b"GIF89a"):
+      gif_view = validate_gif_bytes(wire, data)
+    checked = super().__new__(cls, (wire, data))
+    checked._checked_shape = (wire["mime"], wire["w"], wire["h"])
+    checked._gif_view = gif_view
+    return checked
+
+  @classmethod
+  def of(cls, item: tuple[dict, bytes]) -> CheckedAttachment:
+    """Reuse an earlier check of this exact item, or check a plain pair now.
+
+    A wire edited after its check is checked again. Only an instance whose
+    own check proved this unchanged wire skips the walk; no flag can.
+    """
+    if isinstance(item, cls):
+      wire = item[0]
+      if (wire.get("mime"), wire.get("w"), wire.get("h")) == getattr(item, "_checked_shape", None):
+        return item
+    wire, data = item
+    return cls(wire, data)
+
+  @property
+  def gif_view(self) -> bytes | None:
+    """The checked GIF's metadata-free decode view, or None for a static image."""
+    return getattr(self, "_gif_view", None)
+
+
 def validate_attachment(
   value: Any, *, thumbnail: bool = False,
-) -> tuple[dict, bytes] | None:
+) -> CheckedAttachment | None:
   """Validate and decode the protocol's one supported attachment shape."""
   if value is None:
     return None
@@ -374,17 +419,15 @@ def validate_attachment(
   if not data:
     raise HTTPException(status_code=400, detail="Attachment data is empty.")
   # A false static MIME must not bypass animation budgets or capability gates.
-  if mime == "image/gif" or data[:6] in (b"GIF87a", b"GIF89a"):
-    if thumbnail:
-      raise HTTPException(status_code=400, detail="Thumbnail must be static.")
-    validate_gif_bytes(value, data)
-  return value, data
+  if thumbnail and (mime == "image/gif" or data[:6] in (b"GIF87a", b"GIF89a")):
+    raise HTTPException(status_code=400, detail="Thumbnail must be static.")
+  return CheckedAttachment(value, data)
 
 
 def validate_attachments(
   value: Any, *, max_count: int = MAX_BOARD_ATTACHMENTS,
   thumbnail: bool = False,
-) -> list[tuple[dict, bytes]] | None:
+) -> list[CheckedAttachment] | None:
   """Validate the multi-image shape: a bounded list of single attachments.
 
   The gallery's original bytes have a separate combined limit. Thumbnails
@@ -398,7 +441,7 @@ def validate_attachments(
     raise HTTPException(
       status_code=400, detail=f"At most {max_count} images are allowed.",
     )
-  decoded: list[tuple[dict, bytes]] = []
+  decoded: list[CheckedAttachment] = []
   for item in value:
     one = validate_attachment(item, thumbnail=thumbnail)
     if one is None:
@@ -692,7 +735,7 @@ __all__ = [
   "read_envelope", "sign",
   "valid_host", "valid_id",
   "validate_attachment", "validate_attachment_envelope_size",
-  "validate_gif_bytes",
+  "validate_gif_bytes", "CheckedAttachment",
   "validate_reply_to", "validate_text_or_attachment",
   "wire_json_size",
   "verify",
