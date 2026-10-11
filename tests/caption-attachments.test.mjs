@@ -12,7 +12,7 @@ test('every message surface sends its caption and photo in the same request', as
   }
   try {
     await sendMessage('stable-dm', 'peer.example', 'Caption', null, photo)
-    await sendGroupMessage('group-id', 'Caption', photo)
+    await sendGroupMessage('stable-group', 'group-id', 'Caption', photo)
     await publishPost('Caption', null, [photo], [thumbnail])
     await postReply('post-id', 'Caption', { id: 'stable-reply', attachment: photo, thumbnail })
     assert.equal(sent.length, 4)
@@ -20,6 +20,8 @@ test('every message surface sends its caption and photo in the same request', as
       assert.equal(body.text, 'Caption')
       assert.deepEqual(body.attachment || body.attachments[0], photo)
     }
+    assert.equal(sent[1].url, '/api/services/social/groups/group-id/send')
+    assert.equal(sent[1].body.id, 'stable-group')
     assert.deepEqual(sent[3].body, {
       post_id: 'post-id', text: 'Caption', id: 'stable-reply', attachment: photo, thumbnail,
     })

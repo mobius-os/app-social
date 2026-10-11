@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import re
 import time
@@ -74,6 +75,7 @@ from social_routes import (
   _own_host,
   _joined_for_federation,
   _require_member,
+  _same_outgoing_intent,
   _verify_peer_envelope,
   _write_app_attachment,
 )
@@ -715,6 +717,8 @@ class CreateGroup(BaseModel):
 
 
 class GroupSend(BaseModel):
+  # A client-minted id lets an interrupted send be retried without a duplicate.
+  id: str | None = None
   text: str
   attachment: Any = None
   reply_to: Any = None
@@ -923,6 +927,49 @@ async def decline_group_invitation(
   return {"status": "declined", "host_notified": notified}
 
 
+def _own_group_message(
+  app, gid: str, message_id: str, *, text: str, reply_to: dict | None,
+  attachment: tuple[dict, bytes] | None,
+) -> dict | None:
+  """Return this owner's saved post for an exact retry; reject id reuse."""
+  path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
+  if not path.is_file():
+    return None
+  existing = json.loads(path.read_text())
+  proposed = {"id": message_id, "dir": "out", "text": text}
+  if reply_to is not None:
+    proposed["reply_to"] = reply_to
+  if attachment is not None:
+    wire, data = attachment
+    proposed["attachment"] = {
+      "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
+      "sha256": hashlib.sha256(data).hexdigest(),
+    }
+  if existing.get("author") != _own_host() or not _same_outgoing_intent(existing, proposed):
+    raise HTTPException(
+      status_code=409, detail="This message id already belongs to another message."
+    )
+  return existing
+
+
+async def _mark_group_message_delivered(app, gid: str, message_id: str) -> dict:
+  """A successful retry upgrades the one saved failed copy in place."""
+  async with fs_locks.app_storage_lock(app.id):
+    path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
+    record = json.loads(path.read_text())
+    if record.get("status") == "delivered":
+      return record
+    record["status"] = "delivered"
+    owns_dirty_marker = begin_message_mutation("group", gid)
+    atomic_write(path, json.dumps(record))
+    version = _bump_version(app, history_covered=False)
+    mirror_message(
+      "group", gid, record, path, version=version,
+      owns_dirty_marker=owns_dirty_marker,
+    )
+    return record
+
+
 @router.post("/{gid}/send")
 async def send_group_message(
   gid: str,
@@ -938,14 +985,20 @@ async def send_group_message(
   attachment = _validate_attachment(body.attachment)
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
   reply_to = _validate_reply_to(body.reply_to)
+  message_id = body.id or str(uuid.uuid4())
+  if not isinstance(message_id, str) or not _GID_RE.fullmatch(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  intent = {"text": text, "reply_to": reply_to, "attachment": attachment}
   identity = _load_identity()
-  message_id = str(uuid.uuid4())
   sent_at = time.time()
 
   async with _group_lock(gid):
     with _host_group_transaction(gid):
       group = _load_host_group(gid)
       if group is not None:
+        # The host commits before fan-out, so a retry finds the saved post.
+        if _own_group_message(app, gid, message_id, **intent) is not None:
+          return {"status": "delivered", "id": message_id, "failed_members": []}
         _require_open(group)
         original = _post_envelope(
           identity, gid, _own_host(), message_id=message_id, text=text,
@@ -964,6 +1017,12 @@ async def send_group_message(
       meta = _load_group_meta(app, gid)
       if meta is None:
         raise HTTPException(status_code=404, detail="Unknown group.")
+      existing = _own_group_message(app, gid, message_id, **intent)
+      if existing is not None:
+        if existing.get("status") == "delivered":
+          return {"status": "delivered", "id": message_id, "detail": None}
+        # Re-send the saved post unchanged; the host deduplicates by id.
+        sent_at = existing.get("sent_at") or sent_at
       _require_open(meta)
       _require_accepted_group(meta)
       envelope = _post_envelope(
@@ -1000,7 +1059,9 @@ async def send_group_message(
     }
     if reply_to is not None:
       record["reply_to"] = reply_to
-    await _store_group_message(app, gid, record, attachment)
+    if not await _store_group_message(app, gid, record, attachment) and ok:
+      record = await _mark_group_message_delivered(app, gid, message_id)
+  ok = record.get("status") == "delivered"
   detail = None if ok else f"The group host {meta['host']} could not be reached."
   return {
     "status": "delivered" if ok else "failed", "id": message_id, "detail": detail,

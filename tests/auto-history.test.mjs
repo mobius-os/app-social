@@ -25,47 +25,51 @@ test('near-top means an upward user scroll, never initial position or prepend an
   assert.equal(reachedEarlierHistory(200, el), false)
 })
 
-for (const [file, listName, identity] of [
-  ['Thread.jsx', 'listMessages', 'peer'],
-  ['GroupThread.jsx', 'listGroupMessages', 'gid'],
-]) {
-  test(`${file} owns near-top pagination, dedupe, retry and anchored prepend`, async () => {
+// Chromium and Firefox anchor scroll on prepend by themselves; Safari may not.
+// The restored position must be the same either way, never applied twice.
+for (const anchoring of [false, true]) {
+  test(`the shared timeline owns near-top pagination, dedupe, retry and prepend restore (${anchoring ? 'with' : 'without'} scroll anchoring)`, async () => {
     const el = { scrollTop: 200, scrollHeight: 1000, clientHeight: 300 }
-    const frames = []
     const calls = []
     let resolve, reject
     const deps = {
       nextCursor: 'first', loadingEarlier: false, earlierInFlight: { current: false },
       earlierFailed: { current: false }, lastScrollTop: { current: 200 },
-      paginationGeneration: { current: 1 }, conversationEpoch: { current: 1 },
+      paginationGeneration: { current: 1 }, prepended: { current: null },
       scrollRef: { current: el }, stickToBottom: { current: true },
-      reachedEarlierHistory, requestPending: false, currentGroup: { request_status: 'accepted' },
-      requestStatus: () => 'accepted',
-      [identity]: 'conversation-1',
-      [listName]: (...args) => { calls.push(args); return new Promise((yes, no) => { resolve = yes; reject = no }) },
+      reachedEarlierHistory, prependedScrollTop, pinnedTop: false,
+      loadPage: (...args) => { calls.push(args); return new Promise((yes, no) => { resolve = yes; reject = no }) },
       reconcileOlderPage: (_prior, page) => page,
       messagesRef: { current: [{ id: 'latest' }] },
-      updateMessages: rows => { deps.messagesRef.current = rows; el.scrollHeight += 100 },
+      // React commits the prepend, the browser may anchor, then the layout
+      // effect restores the position before paint.
+      updateMessages: rows => {
+        deps.messagesRef.current = rows
+        el.scrollHeight += 100
+        if (anchoring) el.scrollTop += 100
+        deps.restorePrependedPosition()
+      },
       setNextCursor: cursor => { deps.nextCursor = cursor },
       setLoadingEarlier: value => { deps.loadingEarlier = value },
       setLoadError: value => { deps.loadError = value },
-      requestAnimationFrame: callback => frames.push(callback),
     }
-    const load = owningFunction(file, 'async function loadEarlier() {', file === 'Thread.jsx' ? 'async function decideRequest' : 'useEffect(() => {\n    const el = scrollRef.current', deps)
+    const file = 'useMessageTimeline.jsx'
+    deps.restorePrependedPosition = owningFunction(file, 'function restorePrependedPosition() {', 'useLayoutEffect(restorePrependedPosition', deps)
+    const load = owningFunction(file, 'async function loadEarlier() {', '// Browser scroll anchoring may', deps)
     deps.loadEarlier = load
     const track = owningFunction(file, 'function trackScroll() {', 'async function chooseImage', deps)
 
     el.scrollTop = 40
     track()
     assert.equal(calls.length, 1)
-    assert.equal(calls[0][1], 'first')
+    assert.equal(calls[0][0], 'first')
+    assert.equal(deps.stickToBottom.current, false, 'reading back stops pinning to the newest message')
     el.scrollTop = 30
     track()
     assert.equal(calls.length, 1, 'one page request in flight')
     resolve({ messages: [{ id: 'older' }], nextCursor: null })
     await new Promise(setImmediate)
-    frames.shift()()
-    assert.equal(el.scrollTop, 130, 'prepend keeps the visible message in place')
+    assert.equal(el.scrollTop, 130, 'prepend keeps the visible message in place, measured at prepend time')
     assert.equal(deps.nextCursor, null)
     el.scrollTop = 20
     track()
@@ -87,9 +91,32 @@ for (const [file, listName, identity] of [
     assert.equal(calls.length, 3, 'explicit retry is possible')
     resolve({ messages: [{ id: 'oldest' }], nextCursor: null })
     await retry
+    assert.equal(el.scrollTop, 120)
+    assert.equal(deps.prepended.current, null, 'a restore applies once')
     assert.equal(deps.loadError, '')
   })
 }
+
+test('pending previews stay at the top and never page history by scrolling', () => {
+  const el = { scrollTop: 10, scrollHeight: 1000, clientHeight: 300 }
+  let requested = false
+  const deps = {
+    scrollRef: { current: el }, pinnedTop: true, lastScrollTop: { current: 200 },
+    stickToBottom: { current: true }, reachedEarlierHistory, nextCursor: 'first',
+    earlierFailed: { current: false }, loadEarlier: () => { requested = true },
+  }
+  owningFunction('useMessageTimeline.jsx', 'function trackScroll() {', 'async function chooseImage', deps)()
+  assert.equal(requested, false)
+})
+
+test('direct and group threads share the timeline owner instead of duplicating it', () => {
+  for (const [file, listName] of [['Thread.jsx', 'listMessages'], ['GroupThread.jsx', 'listGroupMessages']]) {
+    const source = readFileSync(new URL(`../ui/${file}`, import.meta.url), 'utf8')
+    assert.match(source, /useMessageTimeline\(\{/)
+    assert.match(source, new RegExp(`loadPage: \\(cursor, options\\) => ${listName}\\(`))
+    assert.doesNotMatch(source, /function (loadEarlier|trackScroll|send)\(/)
+  }
+})
 
 test('Community owner only triggers on upward near-top scroll and preserves prepend offset', async () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
