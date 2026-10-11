@@ -48,12 +48,13 @@ export default function Messages({
       <div className="cn-view-heading">
         <div><h2>Chats</h2><p>Your accepted conversations and requests.</p></div>
       </div>
-      <div className="cn-message-tabs" role="tablist" aria-label="Message inbox">
-        <button type="button" role="tab" aria-selected={!showingRequests}
+      {/* Two views of one list: plain toggle buttons, not a tab widget. */}
+      <div className="cn-message-tabs" role="group" aria-label="Message inbox">
+        <button type="button" aria-pressed={!showingRequests}
                 className={!showingRequests ? 'is-active' : ''} onClick={() => setView('chats')}>
           Chats
         </button>
-        <button type="button" role="tab" aria-selected={showingRequests}
+        <button type="button" aria-pressed={showingRequests}
                 className={`${showingRequests ? 'is-active' : ''}${requests.length ? ' has-requests' : ''}`}
                 onClick={() => setView('requests')}>
           Requests{requests.length ? <span className="cn-request-count">{requests.length}</span> : null}
@@ -106,7 +107,7 @@ export default function Messages({
                     {showingRequests ? 'Wants to message you · ' : item.last_dir === 'out' ? 'You: ' : ''}{lastMessagePreview(item)}
                   </span>
                 </span>
-                {!showingRequests && item.unread > 0 && <span className="cn-unread-dot" aria-label="Unread" />}
+                {!showingRequests && item.unread > 0 && <span className="cn-unread-dot" role="img" aria-label="Unread messages" />}
               </button>
             ) : (
               <button className="cn-row" key={`g-${key}`} onClick={() => onOpenGroup(item)}>
@@ -126,7 +127,7 @@ export default function Messages({
                       : `${(item.members || []).length} ${(item.members || []).length === 1 ? 'person' : 'people'}`}
                   </span>
                 </span>
-                {!showingRequests && item.unread > 0 && <span className="cn-unread-dot" aria-label="Unread" />}
+                {!showingRequests && item.unread > 0 && <span className="cn-unread-dot" role="img" aria-label="Unread messages" />}
               </button>
             )
           ))}

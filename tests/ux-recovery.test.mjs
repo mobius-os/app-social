@@ -49,6 +49,12 @@ test('Social modal focus owns initial focus so it can restore the actual opener'
 test('conversation recovery is visible and new messages do not steal the reading position', () => {
   for (const file of ['Thread.jsx', 'GroupThread.jsx']) {
     const source = readFileSync(new URL(`../ui/${file}`, import.meta.url), 'utf8')
+    assert.match(source, /useMessageTimeline\(\{/)
+    assert.match(source, /<MessageTimeline timeline=\{timeline\}/)
+    assert.match(source, /watchLatest: \(onPage\) => watchLatest(?:Group)?Messages\(/)
+  }
+  {
+    const source = readFileSync(new URL('../ui/useMessageTimeline.jsx', import.meta.url), 'utf8')
     assert.match(source, /Messages couldn’t be refreshed/)
     assert.match(source, /onClick=\{\(\) => earlierFailed\.current \? loadEarlier\(\) : refresh\(\)\}>Try again/)
     assert.match(source, /stickToBottom/)
@@ -57,7 +63,10 @@ test('conversation recovery is visible and new messages do not steal the reading
     assert.match(source, /reconcileOlderPage/)
     assert.match(source, /generation === paginationGeneration\.current/)
     assert.match(source, /Loading messages…/)
-    assert.match(source, /watchLatest(?:Group)?Messages/)
+    // Sending your own message returns to the newest message, and the first
+    // position is set before paint.
+    assert.match(source, /stickToBottom\.current = true\n\s*setSending\(true\)/)
+    assert.match(source, /useLayoutEffect\(\(\) => \{\n\s*const el = scrollRef\.current/)
   }
 })
 
@@ -69,7 +78,7 @@ test('message text stays selectable and reply uses an explicit touch target', ()
   assert.match(theme, /\.cn-bubble-copy[\s\S]*user-select: text/)
   assert.match(theme, /@media \(hover: none\)[\s\S]*\.cn-bubble-reply \{ opacity: 1; pointer-events: auto; \}/)
   assert.doesNotMatch(theme, /\.cn-bubble-reply \{ display: none; \}/)
-  assert.match(theme, /\.cn-composer-send svg \{ width: 24px; height: 24px; \}/)
+  assert.match(theme, /\.cn-composer-send svg \{[^}]*width: 24px; height: 24px; \}/)
   assert.match(theme, /\.cn-composer-send svg path \{[\s\S]*stroke-width: \.24;/)
 })
 
@@ -109,7 +118,9 @@ test('Community and replies use the same Möbius chat composer primitive', () =>
   assert.match(composer, /className="cn-composer-input-line"/)
   assert.match(theme, /\.cn-composer-pill \{[^}]*min-height: 48px;[^}]*border-radius: 24px;/s)
   assert.match(theme, /\.cn-composer-pill:focus-within \{[^}]*box-shadow: 0 0 0 3px var\(--accent-dim\);/)
-  assert.match(theme, /\.cn-composer-send \{[^}]*width: 40px; height: 40px;/s)
+  // A 44px target that still draws the 40px send circle inside the pill.
+  assert.match(theme, /\.cn-composer-send \{[^}]*width: 44px; height: 44px; margin: -2px;/s)
+  assert.match(theme, /\.cn-composer-send::before \{[^}]*inset: 2px;[^}]*background: var\(--accent\);/s)
   assert.match(theme, /\.cn-composer-attach \{[^}]*width: 48px; height: 48px;/s)
 })
 
@@ -141,14 +152,23 @@ test('message tabs keep one position and startup identity never flashes a label'
   assert.match(app, /meState === 'loading'[\s\S]*cn-header-chip is-loading/)
 })
 
-test('direct messages keep one client identity and expose interrupted delivery retry', () => {
+test('direct and group messages keep one client identity and expose interrupted delivery retry', () => {
   const thread = readFileSync(new URL('../ui/Thread.jsx', import.meta.url), 'utf8')
+  const group = readFileSync(new URL('../ui/GroupThread.jsx', import.meta.url), 'utf8')
+  const timeline = readFileSync(new URL('../ui/useMessageTimeline.jsx', import.meta.url), 'utf8')
   const api = readFileSync(new URL('../api.js', import.meta.url), 'utf8')
-  assert.match(thread, /const messageId = crypto\.randomUUID\(\)/)
-  assert.match(thread, /sendMessage\(messageId, peer/)
-  assert.match(thread, /Delivery interrupted · Retry/)
-  assert.match(thread, /retryMessage\(peer, messageId\)/)
+  assert.match(timeline, /const messageId = crypto\.randomUUID\(\)/)
+  assert.match(timeline, /deliver\(\{ id: messageId,/)
+  assert.match(timeline, /settleMessage\(prior, messageId, result\)/)
+  assert.match(timeline, /Delivery interrupted · Retry/)
+  assert.match(thread, /sendMessage\(id, peer/)
+  assert.match(thread, /retryMessage\(peer, id\)/)
+  assert.match(group, /sendGroupMessage\(id, gid/)
+  assert.match(group, /retryGroupMessage\(gid, id\)/)
+  assert.match(api, /retryGroupMessage = \(gid, id\) =>\n\s*call\(`groups\/\$\{encodeURIComponent\(gid\)\}\/messages\/\$\{encodeURIComponent\(id\)\}\/retry`/)
+  assert.doesNotMatch(group, /local-|settleOptimistic|_client_pending/)
   assert.match(api, /id,\s*\n\s*to,/)
+  assert.match(api, /sendGroupMessage = \(id, gid,[^]*?body: JSON\.stringify\(\{\n\s*id,/)
   assert.match(api, /messages\/\$\{encodeURIComponent\(id\)\}\/retry/)
 })
 

@@ -314,14 +314,19 @@ export const addGroupMember = (gid, host) =>
   call(`groups/${encodeURIComponent(gid)}/members`, { method: 'POST', body: JSON.stringify({ host }) })
 export const deleteGroup = (gid) =>
   call(`groups/${encodeURIComponent(gid)}`, { method: 'DELETE' })
-export const sendGroupMessage = (gid, text, attachment, replyTo) =>
+export const sendGroupMessage = (id, gid, text, attachment, replyTo) =>
   call(`groups/${encodeURIComponent(gid)}/send`, {
     method: 'POST',
     body: JSON.stringify({
+      id,
       text,
       ...(attachment ? { attachment } : {}),
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
+  })
+export const retryGroupMessage = (gid, id) =>
+  call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/retry`, {
+    method: 'POST', body: JSON.stringify({}),
   })
 export const acceptGroupInvitation = gid =>
   call(`groups/${encodeURIComponent(gid)}/accept`, { method: 'POST', body: JSON.stringify({}) })

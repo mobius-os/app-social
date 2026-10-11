@@ -53,6 +53,7 @@
     "ui/Messages.jsx",
     "ui/Thread.jsx",
     "ui/GroupThread.jsx",
+    "ui/useMessageTimeline.jsx",
     "ui/People.jsx",
     "ui/Media.jsx",
     "ui/MessageBubble.jsx",

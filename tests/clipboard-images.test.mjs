@@ -19,6 +19,10 @@ test('unreadable clipboard entries do not hide a later valid image', () => {
 test('direct and group pastes share the picker preparation and sending gate', () => {
   for (const name of ['Thread', 'GroupThread']) {
     const source = readFileSync(new URL(`../ui/${name}.jsx`, import.meta.url), 'utf8')
+    assert.match(source, /<TimelineComposer timeline=\{timeline\} onOpenImage=\{onOpenImage\} \/>/)
+  }
+  {
+    const source = readFileSync(new URL('../ui/useMessageTimeline.jsx', import.meta.url), 'utf8')
     assert.match(source, /await selectImage\(file\)/)
     assert.match(source, /onImagePaste=\{sending \? undefined : selectImage\}/)
     assert.match(source, /setSelectedImage\(await prepareImage\(file\)\)/)

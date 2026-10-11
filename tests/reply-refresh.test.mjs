@@ -342,3 +342,17 @@ test('a forced read never joins a request that started before it', async () => {
   await Promise.all([first, forced])
   assert.deepEqual(view.ids, [], 'the stale read cannot bring the deleted reply back')
 })
+
+test('an ordinary background poll shares a read already in flight', async () => {
+  let release
+  const view = thread({ count: 1, read: (number) => number === 1
+    ? new Promise(resolve => { release = resolve })
+    : { replies: [] } })
+  const first = view.load()
+  const poll = view.load({ background: true })
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve()
+  assert.equal(view.reads, 1, 'polls do not add duplicate reply reads on the service lane')
+  release({ replies: [reply('kept')] })
+  await Promise.all([first, poll])
+  assert.deepEqual(view.ids, ['kept'])
+})

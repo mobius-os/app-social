@@ -412,13 +412,15 @@ export const CSS = `
 .cn-view-heading p { margin: 4px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .cn-view-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
 .cn-view-actions svg { width: 18px; height: 18px; }
+/* Each toggle is a 44px target; its transparent border keeps the inset pill. */
 .cn-message-tabs {
-  display: inline-flex; min-height: 44px; margin: 0 0 10px; padding: 3px; gap: 2px;
+  display: inline-flex; min-height: 44px; margin: 0 0 10px; padding: 0 2px; gap: 0;
   border-radius: 13px; background: var(--surface-2, var(--surface));
   box-shadow: none;
 }
 .cn-message-tabs button {
-  min-height: 38px; padding: 7px 14px; border: 0; border-radius: 10px;
+  min-height: 44px; padding: 7px 14px; border: solid transparent; border-width: 3px 1px;
+  border-radius: 13px; background-clip: padding-box;
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   background: transparent; color: var(--muted); font: 650 13.5px var(--font);
   cursor: pointer; transition: background 0.15s ease, color 0.15s ease;
@@ -509,8 +511,9 @@ export const CSS = `
   flex: 1; min-height: 0; overflow-y: auto; padding: 18px 16px;
   display: flex; flex-direction: column; gap: 8px;
 }
+.cn-message-log { display: flex; flex-direction: column; gap: 8px; }
 .cn-history-more {
-  align-self: center; min-height: 34px; padding: 7px 13px; margin-bottom: 4px;
+  align-self: center; min-height: 44px; padding: 7px 13px; margin-bottom: 4px;
   border: 1px solid var(--border); border-radius: 999px;
   background: var(--surface); color: var(--muted); font: inherit;
   font-size: 12.5px; font-weight: 650; cursor: pointer;
@@ -572,13 +575,21 @@ export const CSS = `
    vanish there: invert it instead. */
 .cn-root .cn-bubble.is-mine ::selection { background: var(--accent-fg); color: var(--accent); }
 .cn-bubble.is-theirs { border-bottom-left-radius: 7px; }
-.cn-bubble-time { display: block; margin-top: 3px; font-size: 10.5px; opacity: 0.62; text-align: right; }
-.cn-bubble.is-failed { border-color: var(--danger); }
-.cn-failed-note {
-  appearance: none; border: 0; background: transparent; padding: 0;
-  font: inherit; font-size: 11px; color: var(--danger); cursor: pointer;
-  align-self: flex-end; margin-top: -4px;
+.cn-bubble-time {
+  display: block; margin-top: 3px; font-size: 10.5px; opacity: 0.62; text-align: right;
+  user-select: none; -webkit-user-select: none;
 }
+.cn-bubble.is-mine .cn-bubble-time { opacity: 1; }
+.cn-bubble.is-failed { border-color: var(--danger); }
+/* Readable text beside a danger icon. The 44px target reaches into the 8px
+   list gaps on both sides but never over the bubble or reply button. */
+.cn-failed-note {
+  appearance: none; border: 0; background: transparent; padding: 0 4px;
+  min-height: 44px; display: inline-flex; align-items: center; gap: 4px;
+  font: inherit; font-size: 12px; font-weight: 650; color: var(--text); cursor: pointer;
+  align-self: flex-end; margin: -8px 0;
+}
+.cn-failed-note svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--danger); }
 .cn-failed-note:disabled { cursor: default; opacity: 0.65; }
 .cn-message-line {
   width: 92%; display: flex; align-items: flex-end; gap: 6px; align-self: flex-start;
@@ -607,6 +618,7 @@ export const CSS = `
   opacity: 0; pointer-events: none; transition: opacity 0.14s ease, background 0.14s ease;
 }
 .cn-bubble-reply svg { width: 17px; height: 17px; }
+.cn-message-line.is-mine .cn-bubble-reply { order: -1; }
 .cn-message-line:hover .cn-bubble-reply,
 .cn-bubble-reply:focus-visible { opacity: 1; pointer-events: auto; }
 .cn-bubble-reply:hover { background: var(--surface-2, var(--surface)); color: var(--text); }
@@ -628,6 +640,7 @@ export const CSS = `
   margin-top: 2px; font-size: 12px; line-height: 1.35;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.78;
 }
+.cn-bubble.is-mine .cn-quote span { opacity: 1; }
 .cn-file-input { display: none; }
 .cn-reply-target button {
   width: 44px; height: 44px; border: 0; border-radius: 50%; flex: 0 0 auto;
@@ -1161,13 +1174,18 @@ export const CSS = `
 }
 .cn-composer-input-line textarea:focus-visible { outline: none; }
 .cn-composer-input-line textarea::placeholder { color: var(--muted); }
+/* A 44px target drawing a 40px circle; the margin keeps the pill's height. */
 .cn-composer-send {
-  width: 40px; height: 40px; flex: 0 0 auto; align-self: flex-end; padding: 0;
+  position: relative; width: 44px; height: 44px; margin: -2px; flex: 0 0 auto; align-self: flex-end; padding: 0;
   display: grid; place-items: center; border: 0; border-radius: 50%;
-  background: var(--accent); color: var(--accent-fg); cursor: pointer;
+  background: transparent; color: var(--accent-fg); cursor: pointer;
   transition: filter .14s, transform .1s, opacity .14s;
 }
-.cn-composer-send svg { width: 24px; height: 24px; }
+.cn-composer-send::before {
+  content: ''; position: absolute; inset: 2px; border-radius: 50%; pointer-events: none;
+  background: var(--accent);
+}
+.cn-composer-send svg { position: relative; width: 24px; height: 24px; }
 .cn-composer-send svg path { stroke: currentColor; stroke-width: .24; stroke-linejoin: round; }
 .cn-composer-send:hover { filter: brightness(1.07); }
 .cn-composer-send:active { transform: scale(.92); }
@@ -1193,14 +1211,9 @@ export const CSS = `
 .cn-reply-composer .cn-composer-pill { min-height: 44px; padding: 0; border-radius: 22px; }
 .cn-reply-composer .cn-composer-input-line textarea { padding: 4px 2px 4px 10px; line-height: 1.3; }
 .cn-reply-composer .cn-composer-attach { width: 46px; height: 46px; }
-.cn-reply-composer .cn-composer-send {
-  position: relative; width: 44px; height: 44px; background: transparent; border: 0;
-}
-.cn-reply-composer .cn-composer-send::before {
-  content: ''; position: absolute; inset: 6px; border-radius: 50%; pointer-events: none;
-  background: var(--accent);
-}
-.cn-reply-composer .cn-composer-send svg { position: relative; width: 18px; height: 18px; }
+.cn-reply-composer .cn-composer-send { margin: 0; }
+.cn-reply-composer .cn-composer-send::before { inset: 6px; }
+.cn-reply-composer .cn-composer-send svg { width: 18px; height: 18px; }
 
 /* Mobile navigation sits inline with the brand and account, not in a dock. */
 @media (max-width: 719px) {
