@@ -674,6 +674,8 @@ class CommonPublicStore:
       return {}
     try:
       value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+      return {}  # A concurrent deletion is ordinary absence, not corrupt data.
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
       raise HTTPException(status_code=500, detail="Public data record is invalid.") from exc
     if not isinstance(value, dict):

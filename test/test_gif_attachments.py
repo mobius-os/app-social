@@ -1334,6 +1334,43 @@ class GifValidationOwnershipTests(unittest.TestCase):
                      [data for data, _ in gifs])
     self.assertEqual(store.reply_image("abcdef12", "abcdef34")[0].read_bytes(), gifs[0][0])
 
+  def test_post_deleted_during_reply_preread_is_unknown_without_writing_media(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store = CommonPublicStore(root)
+    post_id = "abcdef12"
+    store.store_post({"id": post_id, "host": "member.example", "text": "Post",
+                      "created_at": 1, "replies": []})
+    path = store.board_dir() / f"{post_id}.json"
+    read_text = Path.read_text
+
+    def delete_before_read(target, *args, **kwargs):
+      if target == path:
+        target.unlink()
+      return read_text(target, *args, **kwargs)
+
+    data = animation()
+    with patch.object(Path, "read_text", delete_before_read):
+      with self.assertRaises(HTTPException) as caught:
+        store.add_reply(post_id, "abcdef34", "member.example", "member", "Reply", 2,
+                        (wire(data), data))
+    self.assertEqual((caught.exception.status_code, caught.exception.detail),
+                     (404, "Unknown post."))
+    self.assertFalse((store.reply_media_dir() / post_id).exists())
+    self.assertFalse((store.reply_thumbnail_dir() / post_id).exists())
+
+  def test_reply_preread_keeps_corrupt_and_unreadable_records_as_errors(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    path = Path(root) / "record.json"
+    path.write_text("{bad json")
+    with self.assertRaises(HTTPException) as caught:
+      CommonPublicStore._load_object(path)
+    self.assertEqual(caught.exception.status_code, 500)
+    path.write_text("{}")
+    with patch.object(Path, "read_text", side_effect=PermissionError("unreadable")):
+      with self.assertRaises(HTTPException) as caught:
+        CommonPublicStore._load_object(path)
+    self.assertEqual(caught.exception.status_code, 500)
+
   def test_a_check_is_reused_only_for_the_unchanged_wire_it_proved(self):
     root = self.enterContext(tempfile.TemporaryDirectory())
     store = CommonPublicStore(root)
