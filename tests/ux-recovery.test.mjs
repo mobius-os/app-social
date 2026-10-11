@@ -199,7 +199,7 @@ test('board warms real threads without fetching known empty threads', () => {
   assert.match(board, /REPLY_PREFETCH_LIMIT = 8/)
   assert.match(board, /REPLY_CACHE_LIMIT = 64/)
   assert.match(board, /Number\(post\.reply_count \|\| 0\) === 0/)
-  assert.match(board, /className="cn-post-delete"/)
+  assert.match(board, /<OwnActions kind="message"/)
   assert.match(app, /host=\{me\?\.host\} size="small" remote/)
 })
 
