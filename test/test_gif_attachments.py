@@ -997,6 +997,10 @@ class CanonicalGifTests(unittest.TestCase):
   def test_large_original_fits_signed_plaintext_and_encrypted_transport(self):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    self.enterContext(patch.dict(os.environ, {
+      "APP_STORAGE_DIR": root, "APP_ID": "7", "APP_SLUG": "social",
+    }))
     import social_routes
     original = wire(padded_gif(1024 * 1024 + 1), (1, 1))
     key = common_protocol.new_signing_key()
