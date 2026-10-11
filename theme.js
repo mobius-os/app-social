@@ -8,7 +8,9 @@ export const CSS = `
   background: var(--bg); color: var(--text); font-family: var(--font);
   -webkit-font-smoothing: antialiased;
 }
-.cn-root ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+.cn-root ::selection { background: color-mix(in srgb, var(--accent) 48%, transparent); color: var(--text); }
+/* Own bubbles are filled with the accent, so an accent tint would vanish there. */
+.cn-root .cn-bubble.is-mine ::selection { background: var(--accent-fg); color: var(--accent); }
 .cn-root :where(input, textarea) { caret-color: var(--accent); }
 .cn-scroll {
   flex: 1; min-height: 0;
