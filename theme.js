@@ -8,7 +8,6 @@ export const CSS = `
   background: var(--bg); color: var(--text); font-family: var(--font);
   -webkit-font-smoothing: antialiased;
 }
-.cn-root ::selection { background: color-mix(in srgb, var(--accent) 48%, transparent); color: var(--text); }
 .cn-root :where(input, textarea) { caret-color: var(--accent); }
 .cn-scroll {
   flex: 1; min-height: 0;
@@ -17,6 +16,7 @@ export const CSS = `
   word-break: break-word; overflow-wrap: anywhere;
 }
 /* /mobius-ui:Root */
+.cn-root ::selection { background: color-mix(in srgb, var(--accent) 48%, transparent); color: var(--text); }
 .cn-scroll { order: 1; padding: 0 16px 24px; }
 .cn-scroll.is-board { padding-bottom: 0; }
 .cn-content { width: 100%; max-width: 720px; margin: 0 auto; }
@@ -168,6 +168,10 @@ export const CSS = `
   /* Separate rule: a browser without :has() drops only this one. */
   .cn-post:hover:not(:has(.cn-inline-replies:hover, .cn-reply-composer:hover)) .cn-post-head > .cn-own-actions { opacity: 1; }
 }
+.cn-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 .cn-edited { margin-left: 5px; font-size: 12px; color: var(--muted); font-weight: 400; }
 .cn-inline-edit { margin-top: 4px; }
 .cn-inline-edit-field {
@@ -190,7 +194,10 @@ export const CSS = `
   .cn-own-actions.is-compact .cn-own-action { margin: -12px 0; }
   .cn-post.is-mine .cn-post-head { padding-right: 92px; }
 }
-@media (hover: none) { .cn-inline-edit-hint { visibility: hidden; } }
+@media (hover: none) {
+  .cn-inline-edit-hint { visibility: hidden; }
+  .cn-btn.cn-btn-small { min-height: 44px; }
+}
 .cn-person {
   padding: 0; border: 0; background: transparent; text-align: left; color: inherit;
   font-family: var(--font); cursor: pointer; min-height: 24px; min-width: 0;

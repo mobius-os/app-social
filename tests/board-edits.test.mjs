@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { readFileSync } from 'node:fs'
+
+import { TEXT_LIMITS } from '../participation.js'
 import {
-  isEditTarget, postEditSettled, withoutReply, withPostEdit, withReplyEdit, withRestoredReply,
+  editorHasChanges, editTargetShown, isEditTarget, postEditSettled, withoutReply, withPostEdit, withReplyEdit, withRestoredReply,
 } from '../ui/boardEdits.js'
 
 test('a confirmed post edit shows until the feed delivers it or a newer edit', () => {
@@ -41,4 +44,34 @@ test('only the item being edited matches the editor target', () => {
   assert.equal(isEditTarget(editing, 'p'), false)
   assert.equal(isEditTarget({ postId: 'p', replyId: null }, 'p'), true)
   assert.equal(isEditTarget(null, 'p'), false)
+})
+
+test('only unsaved text holds the editor open against another edit', () => {
+  assert.equal(editorHasChanges(null), false)
+  assert.equal(editorHasChanges({ initial: 'Hi', text: 'Hi ' }), false)
+  assert.equal(editorHasChanges({ initial: 'Hi', text: 'Hi there' }), true)
+  assert.equal(editorHasChanges({ initial: '', text: '' }), false)
+})
+
+test('an editor closes once its post or reply is no longer shown', () => {
+  const view = {
+    feed: [{ id: 'p' }, { id: 'q' }], hiddenIds: new Set(['q']),
+    replyPostId: 'p', replies: [{ id: 'r' }],
+  }
+  assert.equal(editTargetShown({ postId: 'p', replyId: null }, view), true)
+  assert.equal(editTargetShown({ postId: 'q', replyId: null }, view), false, 'deleted here')
+  assert.equal(editTargetShown({ postId: 'gone', replyId: null }, view), false, 'deleted elsewhere')
+  assert.equal(editTargetShown({ postId: 'p', replyId: 'r' }, view), true)
+  assert.equal(editTargetShown({ postId: 'p', replyId: 'x' }, view), false, 'reply deleted')
+  assert.equal(editTargetShown({ postId: 'p', replyId: 'r' }, { ...view, replyPostId: null }), false, 'thread closed')
+  assert.equal(editTargetShown(null, view), false)
+})
+
+test('editor and composer limits match the protocol limits', () => {
+  const protocol = readFileSync(new URL('../common_protocol.py', import.meta.url), 'utf8')
+  const limit = (name) => Number(protocol.match(new RegExp(`^${name}\\s*=\\s*([\\d_]+)`, 'm'))?.[1].replaceAll('_', ''))
+  assert.equal(TEXT_LIMITS.post, limit('MAX_POST_TEXT_CHARS'))
+  assert.equal(TEXT_LIMITS.reply, limit('MAX_REPLY_TEXT_CHARS'))
+  const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(board, /maxLength=\{\d/, 'Board takes every text limit from TEXT_LIMITS')
 })
