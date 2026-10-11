@@ -1124,7 +1124,8 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
           root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",
         )["body"]
         self.assertEqual(actor["apps"], [{"name": "Shared", "description": "public app"}])
-        self.assertEqual(seen_paths, ["/api/identity", "/api/apps/"])
+        # The two reads run concurrently, so only their set and count are stable.
+        self.assertEqual(sorted(seen_paths), ["/api/apps/", "/api/identity"])
         seen_paths.clear()
         self.call(
           root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",

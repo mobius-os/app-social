@@ -8,7 +8,6 @@ export const CSS = `
   background: var(--bg); color: var(--text); font-family: var(--font);
   -webkit-font-smoothing: antialiased;
 }
-.cn-root ::selection { background: color-mix(in srgb, var(--accent) 48%, transparent); color: var(--text); }
 .cn-root :where(input, textarea) { caret-color: var(--accent); }
 .cn-scroll {
   flex: 1; min-height: 0;
@@ -17,6 +16,7 @@ export const CSS = `
   word-break: break-word; overflow-wrap: anywhere;
 }
 /* /mobius-ui:Root */
+.cn-root ::selection { background: color-mix(in srgb, var(--accent) 48%, transparent); color: var(--text); }
 .cn-scroll { order: 1; padding: 0 16px 24px; }
 .cn-scroll.is-board { padding-bottom: 0; }
 .cn-content { width: 100%; max-width: 720px; margin: 0 auto; }
