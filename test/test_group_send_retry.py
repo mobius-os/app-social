@@ -186,6 +186,58 @@ class GroupSendRetryTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(data, base64.b64decode(image["data_b64"]))
     self.assertEqual((wire["mime"], wire["w"], wire["h"]), ("image/png", 4, 3))
 
+  async def test_a_failed_send_racing_a_delivered_save_reports_the_saved_copy(self):
+    self.member_of()
+    calls = []
+
+    async def racing_deliver(host, envelope):
+      calls.append(envelope)
+      if len(calls) == 1:
+        # The same message is sent again and saved as delivered meanwhile.
+        inner = await self.send()
+        self.assertEqual(inner["status"], "delivered")
+        return False
+      return True
+
+    self.deliver.side_effect = racing_deliver
+    outer = await self.send()
+
+    self.assertEqual((outer["status"], outer["detail"]), ("delivered", None))
+    self.assertEqual([(m["id"], m["status"]) for m in self.saved()], [(MESSAGE_ID, "delivered")])
+
+  async def test_a_racing_send_with_different_content_cannot_settle_the_saved_post(self):
+    self.member_of()
+    calls = []
+
+    async def racing_deliver(host, envelope):
+      calls.append(envelope)
+      if len(calls) == 1:
+        # A different message reuses the id and fails to deliver meanwhile.
+        await self.send(text="Other text")
+        return True
+      return False
+
+    self.deliver.side_effect = racing_deliver
+    with self.assertRaises(social_groups.HTTPException) as caught:
+      await self.send()
+    self.assertEqual(caught.exception.status_code, 409)
+    self.assertEqual([(m["text"], m["status"]) for m in self.saved()], [("Other text", "failed")])
+
+  async def test_retry_reports_a_group_closed_while_it_was_delivering(self):
+    self.member_of()
+    self.delivered = False
+    await self.send()
+    meta_path = self.storage / "groups" / GID / "meta.json"
+
+    async def closing_deliver(host, envelope):
+      meta = json.loads(meta_path.read_text())
+      meta_path.write_text(json.dumps({**meta, "deleted_at": 1.0}))
+      return True
+
+    self.deliver.side_effect = closing_deliver
+    result = await self.retry()
+    self.assertEqual((result["status"], result.get("group_deleted")), ("delivered", True))
+
   async def test_retry_that_still_fails_keeps_one_failed_copy(self):
     self.member_of()
     self.delivered = False

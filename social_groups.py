@@ -1025,9 +1025,11 @@ async def _retry_saved_group_message(app, gid: str, message_id: str) -> dict:
   if await _deliver(meta["host"], envelope):
     record = await _mark_group_message_delivered(app, gid, message_id)
   ok = record.get("status") == "delivered"
+  current = _load_group_meta(app, gid) or meta
   return {
     "status": "delivered" if ok else "failed", "id": message_id,
     "detail": None if ok else f"The group host {meta['host']} could not be reached.",
+    **({"group_deleted": True} if current.get("deleted_at") else {}),
   }
 
 
@@ -1137,9 +1139,14 @@ async def send_group_message(
     }
     if reply_to is not None:
       record["reply_to"] = reply_to
-    if not await _store_group_message(app, gid, record, attachment) and ok:
-      # A concurrent exact retry saved this id first; upgrade that copy.
-      record = await _mark_group_message_delivered(app, gid, message_id)
+    if not await _store_group_message(app, gid, record, attachment):
+      # A concurrent send saved this id first. It must be this same message
+      # (409 otherwise); settle that one copy and report its real state.
+      saved = _own_group_message(app, gid, message_id, **intent)
+      if ok:
+        record = await _mark_group_message_delivered(app, gid, message_id)
+      elif saved is not None:
+        record = saved
   ok = record.get("status") == "delivered"
   detail = None if ok else f"The group host {meta['host']} could not be reached."
   return {
