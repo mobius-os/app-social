@@ -1,10 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Chat, Trash, X,
+  Chat, X,
 } from '@openai/apps-sdk-ui/components/Icon'
+import { EditedMark, InlineEditor, OwnActions } from './OwnActions.jsx'
 import {
-  avatarHue, deletePost, getPeer, getReplies, initials,
+  isEditTarget, postEditSettled, withoutReply, withPostEdit, withReplyEdit, withRestoredReply,
+} from './boardEdits.js'
+import {
+  avatarHue, deletePost, deleteReply, editBoardText, getPeer, getReplies, initials,
   postDateTime, postReply, publishPost, timeAgo,
 } from '../api.js'
 import {
@@ -261,6 +265,10 @@ export default function Board({
   const [pending, setPending] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [hiddenIds, setHiddenIds] = useState(() => new Set())
+  // Editing one item at a time: { postId, replyId, saving }.
+  const [editing, setEditing] = useState(null)
+  // Confirmed post edits shown before the next feed refresh delivers them.
+  const [postEdits, setPostEdits] = useState({})
   const [selectedImages, setSelectedImages] = useState([])
   const [reactionPickerFor, setReactionPickerFor] = useState(null)
   const [previewPost, setPreviewPost] = useState(null)
@@ -303,6 +311,18 @@ export default function Board({
     () => restoreDeleteFocus.current,
   )
   replySendingRef.current = replySending
+
+  useEffect(() => {
+    setPostEdits((prior) => {
+      const ids = Object.keys(prior)
+      if (!ids.length) return prior
+      const posts = new Map(feed.map((post) => [String(post.id), post]))
+      const next = Object.fromEntries(ids
+        .filter((id) => !posts.has(id) || !postEditSettled(posts.get(id), prior[id]))
+        .map((id) => [id, prior[id]]))
+      return Object.keys(next).length === ids.length ? prior : next
+    })
+  }, [feed])
   replyPostIdRef.current = replyPost?.id
 
   useEffect(() => {
@@ -805,6 +825,7 @@ export default function Board({
   }
 
   async function doDelete() {
+    if (deleteTarget?.reply) return doDeleteReply()
     const post = deleteTarget
     if (!post) return
     // The trigger is about to disappear. Do not restore focus to it: browsers
@@ -828,6 +849,81 @@ export default function Board({
       return
     }
     onRefresh(true)
+  }
+
+  function updateReplies(postId, change) {
+    const key = String(postId)
+    if (replyPostIdRef.current === postId) {
+      // A reply load already in flight predates this change; drop its result.
+      replyRequest.current += 1
+      setReplies(change)
+    }
+    const cached = replyCache.get(key)?.result?.replies
+    if (cached) rememberReplies(key, { ...replyCache.get(key).result, replies: change(cached) })
+  }
+
+  function refreshOpenThread(post) {
+    if (replyPostIdRef.current === post.id) loadReplies(post, { background: true })
+  }
+
+  // Keep keyboard and screen-reader users in place when an editor or a reply
+  // they were acting on goes away.
+  function focusItem(postId, replyId) {
+    requestAnimationFrame(() => {
+      const target = (replyId && document.getElementById(`cn-reply-${replyId}`))
+        || document.getElementById(`cn-post-${postId}`)
+      target?.focus?.({ preventScroll: true })
+    })
+  }
+
+  async function doDeleteReply() {
+    const { post, reply } = deleteTarget
+    restoreDeleteFocus.current = false
+    setDeleteTarget(null)
+    updateReplies(post.id, (prior) => withoutReply(prior, reply.id))
+    focusItem(post.id)
+    try {
+      await deleteReply(post.id, reply.id)
+    } catch (error) {
+      updateReplies(post.id, (prior) => withRestoredReply(prior, reply))
+      showToast(error.message || 'This reply couldn’t be deleted.', 'error')
+      refreshOpenThread(post)
+      return
+    }
+    refreshOpenThread(post)
+    onRefresh(true)
+  }
+
+  function closeEditor(postId, replyId) {
+    setEditing((current) => isEditTarget(current, postId, replyId) ? null : current)
+    focusItem(postId, replyId)
+  }
+
+  async function saveEdit(post, reply, text) {
+    const replyId = reply?.id || null
+    setEditing({ postId: post.id, replyId, saving: true })
+    try {
+      const result = await editBoardText(post.id, text, replyId)
+      const edit = { text: result.text ?? text, edited_at: result.edited_at }
+      if (reply) {
+        updateReplies(post.id, (prior) => withReplyEdit(prior, reply.id, edit))
+        refreshOpenThread(post)
+      } else if (typeof edit.edited_at === 'number') {
+        setPostEdits((prior) => ({ ...prior, [post.id]: edit }))
+      }
+      if (result.applied === false) {
+        showToast('A newer edit already exists, so this one wasn’t saved.', 'error')
+        onRefresh(true)
+      }
+      closeEditor(post.id, replyId)
+    } catch (error) {
+      setEditing((current) => isEditTarget(current, post.id, replyId) ? { ...current, saving: false } : current)
+      showToast(error.message || 'Your edit couldn’t be saved.', 'error')
+    }
+  }
+
+  function isEditing(postId, replyId = null) {
+    return isEditTarget(editing, postId, replyId)
   }
 
   function chooseImage(event) {
@@ -1065,8 +1161,11 @@ export default function Board({
       )}
       {earlierError && <p className="cn-inline-error" role="alert">{earlierError} <button className="cn-btn cn-btn-secondary" type="button" onClick={loadEarlierPosts}>Try again</button></p>}
       <div className="cn-feed">
-        {chronologicalFeed.map((post) => {
+        {chronologicalFeed.map((feedPost) => {
+          const post = withPostEdit(feedPost, postEdits[feedPost.id])
           const replyCount = countFor(post)
+          const mine = canInteract && me?.host && post.host === me.host
+          const editingPost = isEditing(post.id)
           const threadOpen = replyPost?.id === post.id
           const togglePreview = canInteract
             ? () => setPreviewPost(previewPost?.id === post.id ? null : { id: post.id, host: post.host })
@@ -1083,16 +1182,12 @@ export default function Board({
                     <span className="cn-person-name">{post.handle ? `@${post.handle}` : 'Social member'}</span>
                     <span className="cn-post-dot" aria-hidden="true">·</span>
                     <span className="cn-meta">{postDateTime(post.created_at)}</span>
+                    <EditedMark editedAt={post.edited_at} />
                   </button>
-                  {canInteract && me?.host && post.host === me.host && (
-                    <button
-                      className="cn-post-delete"
-                      onClick={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }}
-                      aria-label="Delete message"
-                      title="Delete message"
-                    >
-                      <Trash aria-hidden="true" />
-                    </button>
+                  {mine && !editingPost && (
+                    <OwnActions kind="message" disabled={handoffBusy || participationBusy || Boolean(editing?.saving)}
+                      onEdit={() => setEditing({ postId: post.id, replyId: null, saving: false })}
+                      onDelete={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }} />
                   )}
                 </div>
                 <div className="cn-post-body">
@@ -1102,7 +1197,11 @@ export default function Board({
                                   onViewProfile={onOpenPerson} onMessage={onMessageUser}
                                   canMessage={canInteract && post.host !== me?.host} />
                 )}
-                {post.text && <RichText text={post.text} className="cn-post-copy" preview />}
+                {editingPost
+                  ? <InlineEditor kind="message" initial={post.text} maxLength={4000} saving={editing.saving}
+                      allowEmpty={Boolean(post.attachment || post.attachments?.length)}
+                      onCancel={() => closeEditor(post.id, null)} onSave={(text) => saveEdit(post, null, text)} />
+                  : post.text && <RichText text={post.text} className="cn-post-copy" preview />}
                 <BoardImage
                   post={post}
                   onOpen={onOpenImage}
@@ -1156,9 +1255,22 @@ export default function Board({
                           <div className="cn-reply-copy">
                             <div className="cn-reply-meta">
                               <strong>{reply.handle ? `@${reply.handle}` : 'Social member'}</strong>
-                              <span className="cn-time">{reply.pending ? 'Sending…' : timeAgo(reply.created_at)}</span>
+                              <span className="cn-time">
+                                {reply.pending ? 'Sending…' : timeAgo(reply.created_at)}
+                                <EditedMark editedAt={reply.edited_at} />
+                              </span>
+                              {canInteract && me?.host && reply.host === me.host && !reply.pending
+                                && !reply.id.startsWith('local-') && !isEditing(post.id, reply.id) && (
+                                <OwnActions kind="reply" compact disabled={handoffBusy || participationBusy || Boolean(editing?.saving)}
+                                  onEdit={() => setEditing({ postId: post.id, replyId: reply.id, saving: false })}
+                                  onDelete={() => { restoreDeleteFocus.current = true; setDeleteTarget({ post, reply }) }} />
+                              )}
                             </div>
-                            <RichText text={reply.text} />
+                            {isEditing(post.id, reply.id)
+                              ? <InlineEditor kind="reply" initial={reply.text} maxLength={1000} saving={editing.saving}
+                                  allowEmpty={Boolean(reply.attachment)}
+                                  onCancel={() => closeEditor(post.id, reply.id)} onSave={(text) => saveEdit(post, reply, text)} />
+                              : <RichText text={reply.text} />}
                             <ReplyImage postId={post.id} reply={reply} onOpen={onOpenImage}
                               onUnavailable={(error) => showToast(error.message, 'error')} />
                             {replyReactions && !reply.pending && !reply.id.startsWith('local-') && <ReactionControls item={reply}
@@ -1258,10 +1370,11 @@ export default function Board({
           <div ref={deleteRef} tabIndex={-1} className="cn-sheet cn-confirm-sheet"
                onClick={(e) => e.stopPropagation()}>
             <div className="cn-grabber" aria-hidden="true" />
-            <h3 className="cn-sheet-title">Delete this message?</h3>
+            <h3 className="cn-sheet-title">{deleteTarget.reply ? 'Delete this reply?' : 'Delete this message?'}</h3>
             <p className="cn-sheet-body">
-              This removes your message from the community chat for everyone. This
-              can’t be undone.
+              {deleteTarget.reply
+                ? 'This removes your reply from the conversation for everyone. This can’t be undone.'
+                : 'This removes your message from the community chat for everyone. This can’t be undone.'}
             </p>
             <div className="cn-sheet-actions">
               <button className="cn-btn cn-btn-secondary" onClick={() => setDeleteTarget(null)}>

@@ -63,7 +63,9 @@
     "ui/GroupDetails.jsx",
     "boardNavigation.js",
     "ui/Composer.jsx",
-    "ui/ReactionControls.jsx"
+    "ui/ReactionControls.jsx",
+    "ui/OwnActions.jsx",
+    "ui/boardEdits.js"
   ],
   "store": {
     "tagline": "Your people, across every Möbius.",

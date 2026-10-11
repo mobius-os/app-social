@@ -2214,6 +2214,13 @@ async def reply_to_post(
     raise HTTPException(status_code=502, detail=detail) from exc
   except HTTPException:
     raise
+  except httpx.HTTPStatusError as exc:
+    if exc.response.status_code == 410:
+      # The author deleted this reply; a retry of it must stop, not repost.
+      raise HTTPException(status_code=410, detail="This reply was deleted.") from exc
+    raise HTTPException(
+      status_code=502, detail=_community_write_error(exc, "reply")
+    ) from exc
   except Exception as exc:
     raise HTTPException(
       status_code=502, detail=_community_write_error(exc, "reply")
@@ -2222,6 +2229,70 @@ async def reply_to_post(
 
 class DeletePost(BaseModel):
   post_id: str
+
+
+class DeleteReply(BaseModel):
+  post_id: str
+  reply_id: str
+
+
+class EditBoardText(BaseModel):
+  post_id: str
+  reply_id: str | None = None
+  text: str = ""
+
+
+def _checked_board_id(value: str | None, label: str) -> str:
+  value = (value or "").strip()
+  if not re.fullmatch(r"[a-f0-9-]{8,64}", value):
+    raise HTTPException(status_code=400, detail=f"{label} id is invalid.")
+  return value
+
+
+# Host validation reasons worth showing as-is; anything else stays generic.
+_BOARD_AUTHOR_REASONS = {
+  "Text cannot be empty.": "Text can’t be empty.",
+  "Text is invalid.": "That’s too long.",
+}
+
+
+async def _send_board_author_action(
+  path: str, envelope: dict, *, unsupported: str, forbidden: str, failed: str,
+) -> dict:
+  """Sign and send one author-only Board change to the community host."""
+  identity = _load_identity()
+  envelope = {**envelope, "from": _own_host(), "sent_at": time.time()}
+  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+  try:
+    response = await federation_request(
+      "POST", _peer_service_url(COMMUNITY_HOST, path), json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return response.json()
+  except httpx.HTTPStatusError as exc:
+    # The host was reachable but refused. An older release has no route
+    # (FastAPI's own 404/405) or rejects the unknown envelope type (400); say
+    # plainly that it cannot do this yet instead of a misleading "unreachable".
+    code = exc.response.status_code
+    try:
+      detail = exc.response.json().get("detail")
+    except (ValueError, AttributeError):
+      detail = None
+    if code == 404 and detail in ("Unknown post.", "Unknown reply."):
+      raise HTTPException(status_code=404, detail="That message no longer exists.") from exc
+    if code in (404, 405) or (code == 400 and detail == "Unsupported envelope type."):
+      raise HTTPException(status_code=501, detail=unsupported) from exc
+    if code == 403:
+      raise HTTPException(status_code=403, detail=forbidden) from exc
+    if code == 400 and detail in _BOARD_AUTHOR_REASONS:
+      raise HTTPException(status_code=400, detail=_BOARD_AUTHOR_REASONS[detail]) from exc
+    raise HTTPException(status_code=502, detail=failed) from exc
+  except Exception as exc:
+    raise HTTPException(
+      status_code=502, detail="Community host could not be reached."
+    ) from exc
 
 
 @router.post("/delete")
@@ -2233,48 +2304,61 @@ async def delete_own_post(
   """Delete one of the owner's own board posts from the community host."""
   require_nondelegated_owner_control(principal)
   _require_member(db, principal)
-  post_id = body.post_id.strip()
-  if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  identity = _load_identity()
-  host = COMMUNITY_HOST
+  post_id = _checked_board_id(body.post_id, "Post")
+  return await _send_board_author_action(
+    "board/delete", {"v": 0, "type": "board_delete", "post_id": post_id},
+    unsupported="This community server doesn’t support deleting posts yet.",
+    forbidden="You can only delete your own posts.",
+    failed="The post could not be deleted.",
+  )
+
+
+@router.post("/reply/delete")
+async def delete_own_reply(
+  body: DeleteReply,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Delete one of the owner's own replies from the community host."""
+  require_nondelegated_owner_control(principal)
+  _require_member(db, principal)
+  return await _send_board_author_action(
+    "board/reply/delete", {
+      "v": 0, "type": "board_reply_delete",
+      "post_id": _checked_board_id(body.post_id, "Post"),
+      "reply_id": _checked_board_id(body.reply_id, "Reply"),
+    },
+    unsupported="This community server doesn’t support deleting replies yet.",
+    forbidden="You can only delete your own replies.",
+    failed="The reply could not be deleted.",
+  )
+
+
+@router.post("/edit")
+async def edit_own_board_text(
+  body: EditBoardText,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Replace the text of one of the owner's own posts or replies."""
+  require_nondelegated_owner_control(principal)
+  _require_member(db, principal)
+  text = body.text.strip()
+  limit = MAX_POST_TEXT_CHARS if body.reply_id is None else MAX_REPLY_TEXT_CHARS
+  if len(text) > limit:
+    raise HTTPException(status_code=400, detail="That’s too long.")
   envelope = {
-    "v": 0,
-    "type": "board_delete",
-    "post_id": post_id,
-    "from": _own_host(),
-    "sent_at": time.time(),
+    "v": 0, "type": "board_edit",
+    "post_id": _checked_board_id(body.post_id, "Post"), "text": text,
   }
-  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-  try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, "board/delete"), json=envelope,
-      max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
-    )
-    response.raise_for_status()
-    return response.json()
-  except httpx.HTTPStatusError as exc:
-    # The host was reachable but refused. An older release has no delete route
-    # (404) or rejects the unknown envelope (400); either way it cannot delete
-    # yet, so say that plainly instead of a misleading "unreachable". Our client
-    # only ever sends a valid id and envelope, so those codes are not our fault.
-    if exc.response.status_code in (400, 404):
-      raise HTTPException(
-        status_code=501,
-        detail="This community server doesn’t support deleting posts yet.",
-      ) from exc
-    if exc.response.status_code == 403:
-      raise HTTPException(
-        status_code=403, detail="You can only delete your own posts.",
-      ) from exc
-    raise HTTPException(
-      status_code=502, detail="The post could not be deleted.",
-    ) from exc
-  except Exception as exc:
-    raise HTTPException(
-      status_code=502, detail="Community host could not be reached."
-    ) from exc
+  if body.reply_id is not None:
+    envelope["reply_id"] = _checked_board_id(body.reply_id, "Reply")
+  return await _send_board_author_action(
+    "board/edit", envelope,
+    unsupported="This community server doesn’t support editing yet.",
+    forbidden="You can only edit your own posts and replies.",
+    failed="Your edit couldn’t be saved.",
+  )
 
 
 async def _people_payload(
