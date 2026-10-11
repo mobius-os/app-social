@@ -2,14 +2,13 @@ import { useEffect, useState } from 'react'
 import { ArrowLeft } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptGroupInvitation, clearGroupUnread, clockTime, declineGroupInvitation,
-  getGroup, listGroupMessages, requestStatus, sendGroupMessage,
+  getGroup, listGroupMessages, requestStatus, retryGroupMessage, sendGroupMessage,
   watchLatestGroupMessages,
 } from '../api.js'
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
 import GroupDetails from './GroupDetails.jsx'
-import { canResendGroupMessage } from '../message_ui_state.js'
 import {
   DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
   withDayDividers,
@@ -44,10 +43,7 @@ export default function GroupThread({
         showToast(`Sent — ${count} ${count === 1 ? 'person is' : 'people are'} unreachable right now.`, 'error')
       }
     },
-    // The same id and content make the server return or re-send its one copy.
-    redeliver: (message) => sendGroupMessage(
-      message.id, gid, message.text || '', message._retry_attachment, message.reply_to,
-    ),
+    retrySaved: (id) => retryGroupMessage(gid, id),
     retryFailedText: 'The group host still couldn’t be reached.',
   })
   const { messages } = timeline
@@ -110,8 +106,7 @@ export default function GroupThread({
           message, author || 'Social member',
         ))}
       />,
-      <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline}
-                    canRetry={canResendGroupMessage(message)} />,
+      <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline} />,
     ]
   })
 

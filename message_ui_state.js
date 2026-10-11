@@ -73,9 +73,3 @@ export function settleMessage(messages, messageId, result) {
 export function deliveryLabel(status) {
   return status === 'sending' ? 'Sending' : status === 'failed' ? 'Not delivered' : 'Delivered'
 }
-
-// A group retry re-sends the exact saved content under the same id. A photo
-// is re-sendable only while this device still holds its prepared payload.
-export function canResendGroupMessage(message) {
-  return !message?.attachment || !!message._retry_attachment
-}

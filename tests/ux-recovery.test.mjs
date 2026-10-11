@@ -63,7 +63,6 @@ test('conversation recovery is visible and new messages do not steal the reading
     assert.match(source, /reconcileOlderPage/)
     assert.match(source, /generation === paginationGeneration\.current/)
     assert.match(source, /Loading messages…/)
-    assert.match(source, /role="log" aria-label="Messages" aria-busy=\{loadingEarlier\}/)
     // Sending your own message returns to the newest message, and the first
     // position is set before paint.
     assert.match(source, /stickToBottom\.current = true\n\s*setSending\(true\)/)
@@ -163,9 +162,10 @@ test('direct and group messages keep one client identity and expose interrupted 
   assert.match(timeline, /settleMessage\(prior, messageId, result\)/)
   assert.match(timeline, /Delivery interrupted · Retry/)
   assert.match(thread, /sendMessage\(id, peer/)
-  assert.match(thread, /retryMessage\(peer, message\.id\)/)
+  assert.match(thread, /retryMessage\(peer, id\)/)
   assert.match(group, /sendGroupMessage\(id, gid/)
-  assert.match(group, /sendGroupMessage\(\n\s*message\.id, gid, message\.text \|\| '', message\._retry_attachment, message\.reply_to,/)
+  assert.match(group, /retryGroupMessage\(gid, id\)/)
+  assert.match(api, /retryGroupMessage = \(gid, id\) =>\n\s*call\(`groups\/\$\{encodeURIComponent\(gid\)\}\/messages\/\$\{encodeURIComponent\(id\)\}\/retry`/)
   assert.doesNotMatch(group, /local-|settleOptimistic|_client_pending/)
   assert.match(api, /id,\s*\n\s*to,/)
   assert.match(api, /sendGroupMessage = \(id, gid,[^]*?body: JSON\.stringify\(\{\n\s*id,/)

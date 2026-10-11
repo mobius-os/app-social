@@ -1,4 +1,12 @@
-// Pure state rules for author edits and reply deletion on the Board.
+// Pure state rules for Board drafts, author edits and reply deletion.
+
+// Release the object URLs of photos picked on this device. Previews resumed
+// from a saved draft carry no file and own no URL.
+export function revokeLocalPreviews(images, revoke = (url) => URL.revokeObjectURL(url)) {
+  for (const image of images || []) {
+    if (image?.file && image.previewUrl?.startsWith('blob:')) revoke(image.previewUrl)
+  }
+}
 
 // A confirmed post edit shows until the feed delivers that edit or a newer one.
 export function withPostEdit(post, edit) {

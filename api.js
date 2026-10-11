@@ -324,6 +324,10 @@ export const sendGroupMessage = (id, gid, text, attachment, replyTo) =>
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
   })
+export const retryGroupMessage = (gid, id) =>
+  call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/retry`, {
+    method: 'POST', body: JSON.stringify({}),
+  })
 export const acceptGroupInvitation = gid =>
   call(`groups/${encodeURIComponent(gid)}/accept`, { method: 'POST', body: JSON.stringify({}) })
 export const declineGroupInvitation = gid =>

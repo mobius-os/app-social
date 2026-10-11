@@ -5,8 +5,8 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import { EditedMark, InlineEditor, OwnActions } from './OwnActions.jsx'
 import {
-  editorHasChanges, editTargetShown, isEditTarget, postEditSettled, withoutReply, withPostEdit,
-  withReplyEdit, withRestoredReply,
+  editorHasChanges, editTargetShown, isEditTarget, postEditSettled, revokeLocalPreviews,
+  withoutReply, withPostEdit, withReplyEdit, withRestoredReply,
 } from './boardEdits.js'
 import {
   avatarHue, deletePost, deleteReply, editBoardText, getPeer, getReplies, initials,
@@ -275,6 +275,9 @@ export default function Board({
   // Confirmed post edits shown before the next feed refresh delivers them.
   const [postEdits, setPostEdits] = useState({})
   const [selectedImages, setSelectedImages] = useState([])
+  // The feed as of now, for checks made after an await.
+  const feedRef = useRef(feed)
+  feedRef.current = feed
   const [reactionPickerFor, setReactionPickerFor] = useState(null)
   const [previewPost, setPreviewPost] = useState(null)
   const [replyPost, setReplyPost] = useState(null)
@@ -410,12 +413,14 @@ export default function Board({
 
   // A retained post retry id whose post has since landed (a timed-out publish
   // the feed now shows) is finished: clear the draft rather than resend it.
-  useEffect(() => {
+  function clearLandedPostDraft() {
     if (!postMessageId || posting || !feed.some((post) => post.id === postMessageId)) return
     setDraft('')
+    revokeLocalPreviews(selectedImages)
     setSelectedImages([])
     setPostMessageId(null)
-  }, [postMessageId, posting, feed])
+  }
+  useEffect(clearLandedPostDraft, [postMessageId, posting, feed])
 
   // A post deleted here or elsewhere takes its open thread with it.
   useEffect(() => {
@@ -1044,10 +1049,7 @@ export default function Board({
   function removeImage(index) {
     setPostMessageId(null)
     setSelectedImages((prior) => {
-      const image = prior[index]
-      if (image?.file && image.previewUrl?.startsWith('blob:')) {
-        URL.revokeObjectURL(image.previewUrl)
-      }
+      revokeLocalPreviews([prior[index]])
       return prior.filter((_, i) => i !== index)
     })
   }
@@ -1132,8 +1134,9 @@ export default function Board({
     try {
       const receipt = await publishPost(text, attachment, attachments, thumbnails, postId)
       setPostMessageId(null)
-      // A retry of a post the feed already shows must not reset its counts.
-      if (!feed.some((post) => post.id === (receipt.id || postId))) onPostConfirmed?.({
+      // A retry of a post the feed already shows must not reset its counts,
+      // including one that landed while this request was in flight.
+      if (!feedRef.current.some((post) => post.id === (receipt.id || postId))) onPostConfirmed?.({
         id: receipt.id || postId,
         host: me?.host,
         handle: me?.handle || '',
@@ -1152,11 +1155,7 @@ export default function Board({
       onCompleteParticipation?.(completedIntent)
       // Release the local previews now that the post succeeded (on failure we
       // restore them for a retry, so only revoke on the happy path).
-      for (const image of images) {
-        if (image.file && image.previewUrl?.startsWith('blob:')) {
-          URL.revokeObjectURL(image.previewUrl)
-        }
-      }
+      revokeLocalPreviews(images)
     } catch (error) {
       setPending(null)
       setDraft(text)

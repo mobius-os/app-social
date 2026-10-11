@@ -33,18 +33,7 @@ export default function Thread({
         showToast(result.detail || 'This person couldn’t be reached.', 'error')
       }
     },
-    redeliver: async (message) => {
-      try {
-        return await retryMessage(peer, message.id)
-      } catch (error) {
-        // A send interrupted before the server saved it has nothing to retry.
-        if (error.status !== 404 || !message._client_retry) throw error
-        return sendMessage(
-          message.id, peer, message.text || '', peerHandle,
-          message._retry_attachment, message.reply_to,
-        )
-      }
-    },
+    retrySaved: (id) => retryMessage(peer, id),
     retryFailedText: 'This person still couldn’t be reached.',
   })
   const { messages, refresh } = timeline

@@ -581,14 +581,14 @@ export const CSS = `
 }
 .cn-bubble.is-mine .cn-bubble-time { opacity: 1; }
 .cn-bubble.is-failed { border-color: var(--danger); }
-/* Readable text beside a danger icon; a 44px target that keeps its compact look. */
+/* Readable text beside a danger icon. The 44px target reaches into the 8px
+   list gaps on both sides but never over the bubble or reply button. */
 .cn-failed-note {
   appearance: none; border: 0; background: transparent; padding: 0 4px;
   min-height: 44px; display: inline-flex; align-items: center; gap: 4px;
   font: inherit; font-size: 12px; font-weight: 650; color: var(--text); cursor: pointer;
-  align-self: flex-end; margin: -16px 0 -12px;
+  align-self: flex-end; margin: -8px 0;
 }
-span.cn-failed-note { cursor: default; }
 .cn-failed-note svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--danger); }
 .cn-failed-note:disabled { cursor: default; opacity: 0.65; }
 .cn-message-line {

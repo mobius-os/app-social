@@ -16,7 +16,7 @@ import {
 // different conversation.
 export function useMessageTimeline({
   version, loadPage, watchLatest, refreshExtra, onRefreshed, pinnedTop = false,
-  sendBlocked = false, deliver, redeliver, onSent, retryFailedText, signals, showToast,
+  sendBlocked = false, deliver, retrySaved, onSent, retryFailedText, signals, showToast,
 }) {
   const [messages, setMessages] = useState(null)
   const [nextCursor, setNextCursor] = useState(null)
@@ -261,7 +261,19 @@ export function useMessageTimeline({
     const messageId = message.id
     setRetrying(messageId)
     try {
-      const result = await redeliver(message)
+      let result
+      try {
+        // The server re-sends its saved copy, photo included, under this id.
+        result = await retrySaved(messageId)
+      } catch (error) {
+        // A send interrupted before the server saved it has nothing to retry,
+        // so send it again from this device under the same id.
+        if (error.status !== 404 || !message._client_retry) throw error
+        result = await deliver({
+          id: messageId, text: message.text || '',
+          attachment: message._retry_attachment, reply: message.reply_to,
+        })
+      }
       updateMessages((prior) => settleMessage(prior, messageId, result))
       if (result.status === 'delivered') {
         showToast('Message delivered', 'success')
@@ -294,15 +306,11 @@ export function DeliveryTick({ status }) {
   )
 }
 
-// An interrupted or failed own message keeps one retry beside it. A message
-// that can't be re-sent exactly (a photo no longer held locally) says so.
-export function DeliveryNote({ message, timeline, canRetry = true }) {
+// An interrupted or failed own message keeps one retry beside it.
+export function DeliveryNote({ message, timeline }) {
   const { sending, retrying, retry } = timeline
   if (message.status !== 'failed' && (message.status !== 'sending' || sending)) return null
   const failed = message.status === 'failed'
-  if (!canRetry) {
-    return <span className="cn-failed-note"><Warning aria-hidden="true" />{failed ? 'Not delivered' : 'Delivery interrupted'}</span>
-  }
   return (
     <button className="cn-failed-note" type="button" disabled={!!retrying}
             onClick={() => retry(message)}>
@@ -351,7 +359,10 @@ export function MessageTimeline({ timeline, header, empty, children }) {
       {loadError && <div className="cn-directory-error" role="alert"><p>{loadError}</p><button className="cn-btn cn-btn-secondary" onClick={() => earlierFailed.current ? loadEarlier() : refresh()}>Try again</button></div>}
       {messages === null && !loadError && <div className="cn-center cn-history-loading" role="status"><div className="cn-spinner" /><span>Loading messages…</span></div>}
       {messages !== null && messages.length === 0 && empty}
-      <div className="cn-message-log" role="log" aria-label="Messages" aria-busy={loadingEarlier}>
+      {/* The live region starts once history has loaded, so the backlog
+          present at that moment is not announced; only later arrivals are. */}
+      <div className="cn-message-log" role={messages === null ? undefined : 'log'}
+           aria-label={messages === null ? undefined : 'Messages'} aria-busy={loadingEarlier}>
         {children}
       </div>
     </div>

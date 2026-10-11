@@ -20,6 +20,7 @@ member's authorship. Nothing about a group ever touches a third instance.
 Owner surface (owner JWT or the Social app's scoped token):
   POST /api/services/social/groups                     create a group + invite members
   POST /api/services/social/groups/{gid}/send          send a message to the group
+  POST /api/services/social/groups/{gid}/messages/{id}/retry  re-send a saved failed post
   POST /api/services/social/groups/{gid}/read          mark saved messages read
   POST /api/services/social/groups/{gid}/accept        accept + join a remote group
   POST /api/services/social/groups/{gid}/decline       decline a remote invitation
@@ -34,6 +35,7 @@ storage under `groups/<gid>/`, where the app UI reads it.
 from __future__ import annotations
 
 import asyncio
+import base64
 import fcntl
 import hashlib
 import json
@@ -952,11 +954,42 @@ def _own_group_message(
   return existing
 
 
+def _saved_outgoing_group_message(app, gid: str, message_id: str) -> dict:
+  """Load the owner's own saved outgoing post; nothing else is retryable."""
+  path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
+  if not path.is_file():
+    raise HTTPException(status_code=404, detail="Message not found.")
+  record = json.loads(path.read_text())
+  if record.get("author") != _own_host() or record.get("dir") != "out":
+    raise HTTPException(status_code=403, detail="Only your own messages can be retried.")
+  return record
+
+
+def _stored_group_attachment(app, gid: str, record: dict) -> tuple[dict, bytes] | None:
+  """Rebuild the exact photo a saved post was sent with from its media file."""
+  metadata = record.get("attachment")
+  if not isinstance(metadata, dict):
+    return None
+  group = _group_dir(app, gid).resolve()
+  relative = metadata.get("file")
+  path = (group / relative).resolve() if isinstance(relative, str) else None
+  if path is None or not path.is_relative_to(group) or not path.is_file():
+    raise HTTPException(status_code=409, detail="This photo is no longer saved here.")
+  data = path.read_bytes()
+  if metadata.get("sha256") not in (None, hashlib.sha256(data).hexdigest()):
+    raise HTTPException(status_code=409, detail="This photo is no longer saved here.")
+  return _validate_attachment({
+    "mime": metadata.get("mime"), "w": metadata.get("w"), "h": metadata.get("h"),
+    "data_b64": base64.b64encode(data).decode(),
+  })
+
+
 async def _mark_group_message_delivered(app, gid: str, message_id: str) -> dict:
   """A successful retry upgrades the one saved failed copy in place."""
   async with fs_locks.app_storage_lock(app.id):
+    # Re-check under the lock: only the owner's own outgoing post is upgraded.
+    record = _saved_outgoing_group_message(app, gid, message_id)
     path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
-    record = json.loads(path.read_text())
     if record.get("status") == "delivered":
       return record
     record["status"] = "delivered"
@@ -968,6 +1001,50 @@ async def _mark_group_message_delivered(app, gid: str, message_id: str) -> dict:
       owns_dirty_marker=owns_dirty_marker,
     )
     return record
+
+
+async def _retry_saved_group_message(app, gid: str, message_id: str) -> dict:
+  """Re-send a saved outgoing post exactly as stored, under its original id
+  and time, so the host deduplicates it and the copy here upgrades in place."""
+  async with _group_lock(gid):
+    record = _saved_outgoing_group_message(app, gid, message_id)
+    if record.get("status") == "delivered":
+      return {"status": "delivered", "id": message_id, "detail": None}
+    meta = _load_group_meta(app, gid)
+    if meta is None:
+      raise HTTPException(status_code=404, detail="Unknown group.")
+    _require_open(meta)
+    _require_accepted_group(meta)
+    envelope = _post_envelope(
+      _load_identity(), gid, meta["host"], message_id=message_id,
+      text=record.get("text") or "", sent_at=record["sent_at"],
+      attachment=_stored_group_attachment(app, gid, record),
+      reply_to=record.get("reply_to"),
+    )
+  # As for a first send, never hold the member lock while contacting the host.
+  if await _deliver(meta["host"], envelope):
+    record = await _mark_group_message_delivered(app, gid, message_id)
+  ok = record.get("status") == "delivered"
+  return {
+    "status": "delivered" if ok else "failed", "id": message_id,
+    "detail": None if ok else f"The group host {meta['host']} could not be reached.",
+  }
+
+
+@router.post("/{gid}/messages/{message_id}/retry")
+async def retry_group_message(
+  gid: str,
+  message_id: str,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Retry the owner's saved outgoing group post without a new identity."""
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  _validate_gid(gid)
+  if not _GID_RE.fullmatch(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  return await _retry_saved_group_message(app, gid, message_id)
 
 
 @router.post("/{gid}/send")
@@ -991,6 +1068,7 @@ async def send_group_message(
   intent = {"text": text, "reply_to": reply_to, "attachment": attachment}
   identity = _load_identity()
   sent_at = time.time()
+  existing = None
 
   async with _group_lock(gid):
     with _host_group_transaction(gid):
@@ -1018,17 +1096,17 @@ async def send_group_message(
       if meta is None:
         raise HTTPException(status_code=404, detail="Unknown group.")
       existing = _own_group_message(app, gid, message_id, **intent)
-      if existing is not None:
-        if existing.get("status") == "delivered":
-          return {"status": "delivered", "id": message_id, "detail": None}
-        # Re-send the saved post unchanged; the host deduplicates by id.
-        sent_at = existing.get("sent_at") or sent_at
-      _require_open(meta)
-      _require_accepted_group(meta)
-      envelope = _post_envelope(
-        identity, gid, meta["host"], message_id=message_id, text=text,
-        sent_at=sent_at, attachment=attachment, reply_to=reply_to,
-      )
+      if existing is None:
+        _require_open(meta)
+        _require_accepted_group(meta)
+        envelope = _post_envelope(
+          identity, gid, meta["host"], message_id=message_id, text=text,
+          sent_at=sent_at, attachment=attachment, reply_to=reply_to,
+        )
+
+  if existing is not None:
+    # An exact repeat of a saved send settles or retries that one copy.
+    return await _retry_saved_group_message(app, gid, message_id)
 
   if group is not None:
     # The post is committed before networking. Membership or closure may
@@ -1060,6 +1138,7 @@ async def send_group_message(
     if reply_to is not None:
       record["reply_to"] = reply_to
     if not await _store_group_message(app, gid, record, attachment) and ok:
+      # A concurrent exact retry saved this id first; upgrade that copy.
       record = await _mark_group_message_delivered(app, gid, message_id)
   ok = record.get("status") == "delivered"
   detail = None if ok else f"The group host {meta['host']} could not be reached."
