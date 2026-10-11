@@ -8,7 +8,7 @@ const read = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8'
 
 test('delivery ticks and unread dots are named images in plain words', () => {
   assert.equal(deliveryLabel('sending'), 'Sending')
-  assert.equal(deliveryLabel('failed'), 'Not delivered')
+  assert.equal(deliveryLabel('failed'), 'Delivery failed')
   assert.equal(deliveryLabel('delivered'), 'Delivered')
   assert.equal(deliveryLabel(undefined), 'Delivered')
   const timeline = read('ui/useMessageTimeline.jsx')

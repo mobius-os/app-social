@@ -110,6 +110,9 @@ export const saveMe = (settings) =>
 export const sendMessage = (id, to, text, peerHandle, attachment, replyTo) =>
   call('send', {
     method: 'POST',
+    // The platform serializes private service calls. Allow queued work ahead
+    // of this request as well as the service's own bounded delivery attempt.
+    timeoutMs: 60_000,
     body: JSON.stringify({
       id,
       to,
@@ -121,7 +124,7 @@ export const sendMessage = (id, to, text, peerHandle, attachment, replyTo) =>
   })
 export const retryMessage = (peer, id) =>
   call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/retry`, {
-    method: 'POST', body: JSON.stringify({}),
+    method: 'POST', body: JSON.stringify({}), timeoutMs: 60_000,
   })
 export const publishPost = (text, attachment, attachments, thumbnails, id) =>
   call('publish', {
@@ -317,6 +320,7 @@ export const deleteGroup = (gid) =>
 export const sendGroupMessage = (id, gid, text, attachment, replyTo) =>
   call(`groups/${encodeURIComponent(gid)}/send`, {
     method: 'POST',
+    timeoutMs: 60_000,
     body: JSON.stringify({
       id,
       text,
@@ -326,7 +330,7 @@ export const sendGroupMessage = (id, gid, text, attachment, replyTo) =>
   })
 export const retryGroupMessage = (gid, id) =>
   call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/retry`, {
-    method: 'POST', body: JSON.stringify({}),
+    method: 'POST', body: JSON.stringify({}), timeoutMs: 60_000,
   })
 export const acceptGroupInvitation = gid =>
   call(`groups/${encodeURIComponent(gid)}/accept`, { method: 'POST', body: JSON.stringify({}) })

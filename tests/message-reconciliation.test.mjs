@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  addUnseenMessages, isDefinitePrecommitRejection, mergeMessages, reconcileLatestPage,
+  addUnseenMessages, isDefinitePrecommitRejection, markDeliveryUnknown, mergeMessages, reconcileLatestPage,
   reconcileOlderPage, settleMessage,
 } from '../message_ui_state.js'
 
@@ -111,6 +111,18 @@ test('only a definite local rejection restores a draft for a new send', () => {
   assert.equal(isDefinitePrecommitRejection({ status: 409 }), true)
   assert.equal(isDefinitePrecommitRejection({ status: 500 }), false)
   assert.equal(isDefinitePrecommitRejection(new TypeError('lost response')), false)
+})
+
+test('an unconfirmed send keeps its id and attachment for a safe retry', () => {
+  const photo = { mime: 'image/png', data_b64: 'cGhvdG8=' }
+  const pending = [{ id: 'one', status: 'sending', _client_retry: true, _retry_attachment: photo }]
+  const [unknown] = markDeliveryUnknown(pending, 'one', 'Confirmation interrupted')
+  assert.equal(unknown.id, 'one')
+  assert.equal(unknown.status, 'sending')
+  assert.equal(unknown.failure, 'Confirmation interrupted')
+  assert.equal(unknown._retry_attachment, photo)
+  assert.equal(unknown._client_retry, true)
+  assert.equal(markDeliveryUnknown([{ id: 'one', status: 'delivered' }], 'one', 'lost')[0].status, 'delivered')
 })
 
 test('retry settles an older loaded row without depending on the newest page', () => {
