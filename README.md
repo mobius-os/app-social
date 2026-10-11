@@ -89,6 +89,15 @@ not resized or flattened. Community galleries allow up to four images and
 content envelopes allow 60 MiB for base64, encryption, thumbnails and the
 legacy first-image compatibility copy. The app declares that reviewed service
 transfer allowance; other apps retain the platform's 8 MiB default.
+The reviewed service contract also caps `GET /actor` and `POST /activity` at
+1 MiB per serialized request and response. Their smaller admission reservations
+can fit alongside a receiving large upload without increasing the platform's
+memory budgets. The activity body has its stricter 32 KiB receive cap before
+Social decodes or authenticates it. Other routes keep the 60 MiB service ceiling.
+These are admission bounds, not execution priority or guaranteed availability
+under total-budget saturation; the public service execution lane remains serial.
+The platform release supporting reviewed `service.route_limits` must be merged
+and deployed before this manifest, since older platforms reject that field.
 Before JSON container decoding or authentication, every Common envelope also
 allows at most 32,768 structural punctuation characters (`{}[]:,` outside
 strings) and 64 nested containers. This separately bounds containers, scalar

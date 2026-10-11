@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 import httpx
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from PIL import Image
 
@@ -99,6 +99,66 @@ class GifOwnerRoutes(unittest.IsolatedAsyncioTestCase):
     raw += b" " * (1_048_618 - len(raw))
     self.assertEqual(len(raw), 1_048_618)
     self.assertEqual(await self.assert_activity_predecode_rejected([raw]), 0)
+
+  async def test_service_dispatch_preserves_literal_path_and_separate_query(self):
+    import service
+    probe = FastAPI()
+    @probe.api_route("/{path:path}", methods=["POST"])
+    async def echo(request: Request, path: str):
+      return {"path": request.scope["path"],
+              "query": {key: request.query_params.getlist(key) for key in request.query_params}}
+    query = {"q": ["a?b#c", "%61ctivity"], "tag": ["one", "two"]}
+    with patch.object(service, "app", probe), \
+         patch.object(service, "migrate_legacy_state"), \
+         patch.object(service, "reconcile_badge", new=AsyncMock()):
+      for path in ("activity", "/activity", "%61ctivity", "%2Factivity",
+                   "activity?x=1", "activity#x", "a b", "é🪐"):
+        with self.subTest(path=path):
+          response = await service.dispatch({"method": "POST", "path": path,
+                                             "query": query, "body": {}})
+          self.assertEqual(response["status"], 200)
+          self.assertEqual(response["body"],
+                           {"path": "/" + path.lstrip("/"), "query": query})
+
+  async def test_service_dispatch_activity_receive_cap_applies_after_reencoding(self):
+    import service
+    cap = common_protocol.MAX_ENVELOPE_BYTES
+    value = {"v": 0, "type": "board_activity", "to": "owner.example",
+             "from": routes.COMMUNITY_HOST, "post_id": "abcdef12", "kind": "like",
+             "actor": "owner.example", "extra": ""}
+    compact = lambda item: json.dumps(item, separators=(",", ":"), ensure_ascii=False).encode()
+    value["extra"] = "x" * (cap - len(compact(value)))
+    self.assertEqual(len(compact(value)), cap)
+    with patch.object(service, "migrate_legacy_state"), \
+         patch.object(service, "reconcile_badge", new=AsyncMock()), \
+         patch.object(common_protocol, "_preflight_envelope_structure",
+                      wraps=common_protocol._preflight_envelope_structure) as preflight, \
+         patch.object(routes, "_verify_peer_envelope", new=AsyncMock()) as auth:
+      response = await service.dispatch({"method": "POST", "path": "activity", "body": value})
+      self.assertEqual((response["status"], response["body"]), (200, {"status": "ok"}))
+      auth.assert_awaited_once_with(value)
+      preflight.assert_called_once()
+      auth.reset_mock()
+      preflight.reset_mock()
+      value["extra"] += "x"
+      self.assertEqual(len(compact(value)), cap + 1)
+      response = await service.dispatch({"method": "POST", "path": "activity", "body": value})
+      self.assertEqual(response["status"], 413)
+      auth.assert_not_awaited()
+      preflight.assert_not_called()
+
+  async def test_service_dispatch_encoded_control_paths_do_not_alias_activity(self):
+    import service
+    with patch.object(service, "migrate_legacy_state"), \
+         patch.object(service, "reconcile_badge", new=AsyncMock()), \
+         patch.object(common_protocol, "_preflight_envelope_structure") as preflight, \
+         patch.object(routes, "_verify_peer_envelope", new=AsyncMock()) as auth:
+      for path in ("%61ctivity", "activity?x=1", "activity#x"):
+        with self.subTest(path=path):
+          response = await service.dispatch({"method": "POST", "path": path, "body": {}})
+          self.assertEqual(response["status"], 404)
+      auth.assert_not_awaited()
+      preflight.assert_not_called()
 
   async def test_activity_route_cap_ignores_claimed_content_type_and_length(self):
     for claimed_type in ("board_activity", "message", "board_post", "board_reply"):

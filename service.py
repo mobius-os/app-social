@@ -7,7 +7,7 @@ import asyncio
 import base64
 import json
 import sys
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from fastapi import FastAPI
@@ -33,7 +33,10 @@ MOBIUS_PRELOAD = True
 async def dispatch(request: dict) -> dict:
   migrate_legacy_state()
   query = request.get("query") if isinstance(request.get("query"), dict) else {}
-  suffix = "/" + str(request.get("path") or "").lstrip("/")
+  # The platform already decoded the path when selecting its reviewed cap.
+  # Preserve that literal identity through httpx's URL/ASGI boundary rather
+  # than interpreting another escape, query or fragment as a different route.
+  suffix = quote("/" + str(request.get("path") or "").lstrip("/"), safe="/")
   if query:
     suffix += "?" + urlencode(query, doseq=True)
   headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
