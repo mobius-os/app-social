@@ -1325,6 +1325,8 @@ def _request_peer(peer_host: str) -> str:
 
 class PublishPost(BaseModel):
   text: str
+  # A stable id lets a retry after a lost confirmation land once.
+  id: str | None = None
   attachment: Any = None
   attachments: Any = None
   thumbnails: Any = None
@@ -1810,12 +1812,15 @@ async def publish_post(
   _validate_text_or_attachment(
     text, first, "Post text is invalid.", MAX_POST_TEXT_CHARS,
   )
+  post_id = post.id or str(uuid.uuid4())
+  if not _valid_id(post_id):
+    raise HTTPException(status_code=400, detail="Post id is invalid.")
   identity = _load_identity()
   _require_username(identity)
   envelope = {
     "v": 0,
     "type": "board_post",
-    "id": str(uuid.uuid4()),
+    "id": post_id,
     "from": _own_host(),
     "text": text,
     "sent_at": time.time(),
@@ -1846,7 +1851,7 @@ async def publish_post(
       response.raise_for_status()
       return {"status": "posted", "id": envelope["id"]}
   except (TimeoutError, httpx.TimeoutException) as exc:
-    detail = ("The post may have been sent, but confirmation timed out. Check the feed before sending again."
+    detail = ("The post may have been sent, but confirmation timed out. Send it again to confirm."
       if write_started else "Community GIF support could not be checked.")
     raise HTTPException(status_code=502, detail=detail) from exc
   except HTTPException:
@@ -2146,6 +2151,7 @@ async def _react_to_post(post_id_value, emoji, db, principal, reply_id=None):
     response.raise_for_status()
     return response.json()
   except Exception as exc:
+    _raise_if_board_target_gone(exc)
     raise HTTPException(
       status_code=502, detail=_community_write_error(exc, "reaction")
     ) from exc
@@ -2218,6 +2224,7 @@ async def reply_to_post(
     if exc.response.status_code == 410:
       # The author deleted this reply; a retry of it must stop, not repost.
       raise HTTPException(status_code=410, detail="This reply was deleted.") from exc
+    _raise_if_board_target_gone(exc)
     raise HTTPException(
       status_code=502, detail=_community_write_error(exc, "reply")
     ) from exc
@@ -2256,6 +2263,20 @@ _BOARD_AUTHOR_REASONS = {
 }
 
 
+def _host_error_detail(exc: httpx.HTTPStatusError) -> object:
+  try:
+    return exc.response.json().get("detail")
+  except (ValueError, AttributeError):
+    return None
+
+
+def _raise_if_board_target_gone(exc: Exception) -> None:
+  """Report a deleted post or reply as gone (410), not as unsupported (404)."""
+  if (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404
+      and _host_error_detail(exc) in ("Unknown post.", "Unknown reply.")):
+    raise HTTPException(status_code=410, detail="That message no longer exists.") from exc
+
+
 async def _send_board_author_action(
   path: str, envelope: dict, *, unsupported: str, forbidden: str, failed: str,
 ) -> dict:
@@ -2264,10 +2285,9 @@ async def _send_board_author_action(
   envelope = {**envelope, "from": _own_host(), "sent_at": time.time()}
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    response = await federation_request(
-      "POST", _peer_service_url(COMMUNITY_HOST, path), json=envelope,
+    response = await _post_signed_envelope(
+      _peer_service_url(COMMUNITY_HOST, path), envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
     return response.json()
@@ -2275,13 +2295,9 @@ async def _send_board_author_action(
     # The host was reachable but refused. An older release has no route
     # (FastAPI's own 404/405) or rejects the unknown envelope type (400); say
     # plainly that it cannot do this yet instead of a misleading "unreachable".
+    _raise_if_board_target_gone(exc)
     code = exc.response.status_code
-    try:
-      detail = exc.response.json().get("detail")
-    except (ValueError, AttributeError):
-      detail = None
-    if code == 404 and detail in ("Unknown post.", "Unknown reply."):
-      raise HTTPException(status_code=404, detail="That message no longer exists.") from exc
+    detail = _host_error_detail(exc)
     if code in (404, 405) or (code == 400 and detail == "Unsupported envelope type."):
       raise HTTPException(status_code=501, detail=unsupported) from exc
     if code == 403:

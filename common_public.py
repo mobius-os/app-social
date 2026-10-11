@@ -948,10 +948,7 @@ class CommonPublicStore:
         record["attachment"] = {
           "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
         }
-      owns_dirty_marker = self._mark_board_index_dirty()
-      atomic_write(path, json.dumps(record))
-      if self._refresh_board_index(record, path) and owns_dirty_marker:
-        self._clear_board_index_dirty()
+      self._write_board_record(record, path)
       return True
 
   def toggle_like(
@@ -994,6 +991,20 @@ class CommonPublicStore:
       for emoji in BOARD_REACTION_EMOJIS if reactions.get(emoji)
     ]
 
+  @staticmethod
+  def _board_target(post: dict, reply_id: str | None) -> dict:
+    """The post itself, or the reply with ``reply_id`` inside it."""
+    if reply_id is None:
+      return post
+    replies = post.get("replies")
+    target = next(
+      (reply for reply in replies if isinstance(reply, dict) and reply.get("id") == reply_id),
+      None,
+    ) if isinstance(replies, list) else None
+    if target is None:
+      raise HTTPException(status_code=404, detail="Unknown reply.")
+    return target
+
   def toggle_reaction(
     self, post_id: str, host: str, emoji: str,
     *, reply_id: str | None = None, replay_token: str | None = None,
@@ -1010,15 +1021,7 @@ class CommonPublicStore:
       if not path.is_file():
         raise HTTPException(status_code=404, detail="Unknown post.")
       post = self._load_object(path)
-      target = post
-      if reply_id is not None:
-        replies = post.get("replies")
-        target = next(
-          (reply for reply in replies if isinstance(reply, dict) and reply.get("id") == reply_id),
-          None,
-        ) if isinstance(replies, list) else None
-        if target is None:
-          raise HTTPException(status_code=404, detail="Unknown reply.")
+      target = self._board_target(post, reply_id)
       reactions = self._reaction_hosts(target)
       hosts = reactions.setdefault(emoji, {})
       target["reactions"] = reactions
@@ -1054,10 +1057,7 @@ class CommonPublicStore:
         del hosts[host]
       else:
         hosts[host] = now
-      owns_dirty_marker = self._mark_board_index_dirty()
-      atomic_write(path, json.dumps(post))
-      if self._refresh_board_index(post, path) and owns_dirty_marker:
-        self._clear_board_index_dirty()
+      self._write_board_record(post, path)
       # Only a newly added reaction notifies the target's author, never a
       # removal or replay.
       return {
@@ -1104,8 +1104,10 @@ class CommonPublicStore:
       )
       if existing is not None:
         # A stable retry may confirm the same reply, never replace another
-        # author's text or media under its id.
-        if (existing.get("host") != host or existing.get("text") != text
+        # author's text or media under its id. Once the author has edited it,
+        # a retry of the original send differs only in that edited text.
+        if (existing.get("host") != host
+            or (existing.get("text") != text and "_edit_clock" not in existing)
             or existing.get("attachment_sha256") != digest
             or existing.get("attachment") != attachment_meta
             or existing.get("thumbnail_sha256") != thumbnail_digest):
@@ -1170,10 +1172,12 @@ class CommonPublicStore:
     """Remove one reply its own author asked to delete, with its media.
 
     Like `delete_post`, this is a deliberate author action and idempotent. The
-    id is remembered so a delayed retry of the original signed reply cannot
-    bring the deleted reply back. An older host release reading these records
-    neither hides that list of ids nor checks it; rolling back reopens only the
-    short signed-envelope replay window.
+    id is remembered so a delayed retry of the original reply cannot bring the
+    deleted reply back. That list keeps only the newest BOARD_REPLY_LIMIT ids
+    per post, so a very old deleted id can be forgotten. An older host release
+    reading these records neither hides the list nor checks it: after a rollback,
+    a draft id the author's Social still holds could recreate the reply, because
+    the relay signs every retry afresh rather than replaying the old envelope.
     """
     try:
       self._ensure_board_index()
@@ -1224,15 +1228,7 @@ class CommonPublicStore:
       if not path.is_file():
         raise HTTPException(status_code=404, detail="Unknown post.")
       post = self._load_object(path)
-      target = post
-      if reply_id is not None:
-        replies = post.get("replies")
-        target = next(
-          (reply for reply in replies if isinstance(reply, dict) and reply.get("id") == reply_id),
-          None,
-        ) if isinstance(replies, list) else None
-        if target is None:
-          raise HTTPException(status_code=404, detail="Unknown reply.")
+      target = self._board_target(post, reply_id)
       if target.get("host") != host:
         raise HTTPException(status_code=403, detail="Only the author may edit this.")
       has_media = bool(target.get("attachment") or target.get("attachments"))
@@ -1493,7 +1489,7 @@ def read_board_page(
     if position is not None:
       next_cursor = _encode_board_cursor(*position)
   return {
-    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True},
+    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True},
     "posts": posts,
     "next_cursor": next_cursor,
   }

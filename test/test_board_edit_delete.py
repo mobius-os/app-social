@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -136,7 +137,58 @@ class EditTests(unittest.TestCase):
       self.assertEqual(store.edit_text(post_id, reply_id, "replier.example", "", 5.0)["text"], "")
 
 
+class RetryTests(unittest.TestCase):
+  def test_retrying_an_edited_reply_with_its_original_text_confirms_it(self):
+    with tempfile.TemporaryDirectory() as root:
+      store = common_public.CommonPublicStore(root)
+      post_id, reply_id = str(uuid.uuid4()), str(uuid.uuid4())
+      _seed(store, post_id, reply_id)
+      # Before any edit, other text under the same id is still a conflict.
+      with self.assertRaises(HTTPException) as caught:
+        store.add_reply(post_id, reply_id, "replier.example", "replier", "other", 2.0)
+      self.assertEqual(caught.exception.status_code, 409)
+      store.edit_text(post_id, reply_id, "replier.example", "x, edited", 10.0)
+      retry = store.add_reply(post_id, reply_id, "replier.example", "replier", "x", 2.0)
+      self.assertEqual((retry["status"], retry["activity"], retry["reply_count"]), ("ok", False, 1))
+      self.assertEqual(store.get_replies(post_id)["replies"][0]["text"], "x, edited")
+      # Another author, or different media, still never confirms under this id.
+      with self.assertRaises(HTTPException) as caught:
+        store.add_reply(post_id, reply_id, "someone.example", "someone", "x", 2.0)
+      self.assertEqual(caught.exception.status_code, 409)
+      data = photo()
+      with self.assertRaises(HTTPException) as caught:
+        store.add_reply(post_id, reply_id, "replier.example", "replier", "x", 2.0,
+                        (wire(data), data))
+      self.assertEqual(caught.exception.status_code, 409)
+
+
 class SignedRouteTests(unittest.TestCase):
+  def test_host_advertises_author_edits(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      with TestClient(community_host.create_app(data_dir)) as client:
+        capabilities = client.get("/api/common/board").json()["capabilities"]
+      self.assertIs(capabilities["author_edits"], True)
+      self.assertIs(capabilities["reply_reactions"], True)
+
+  def test_an_exact_post_retry_with_the_same_id_lands_once(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      author = _peer(Path(data_dir), "author.example")
+      store = common_public.CommonPublicStore(data_dir)
+      store.register("author.example", "author", "")
+      post_id = str(uuid.uuid4())
+      with TestClient(community_host.create_app(data_dir)) as client:
+        for sent_at in (time.time(), time.time() + 1):
+          # The relay re-signs each retry, so only the id and content repeat.
+          sent = client.post("/api/common/board", json=_signed(author, {
+            "v": 0, "type": "board_post", "id": post_id, "from": "author.example",
+            "text": "Hello once", "sent_at": sent_at,
+          }))
+          self.assertEqual(sent.status_code, 200, sent.text)
+          self.assertEqual(sent.json(), {"status": "posted"})
+      posts = store.read_board(10, None)
+      self.assertEqual([(post["id"], post["text"]) for post in posts], [(post_id, "Hello once")])
+
+
   def test_signed_reply_delete_and_edit_routes(self):
     with tempfile.TemporaryDirectory() as data_dir:
       root = Path(data_dir)
@@ -171,35 +223,95 @@ class SignedRouteTests(unittest.TestCase):
       self.assertEqual(store.read_board(10, None)[0]["text"], "Post")
 
 
+@contextmanager
+def _owner_relay(host):
+  with ExitStack() as stack:
+    for patcher in _owner_patches(host):
+      stack.enter_context(patcher)
+    yield
+
+
+def _owner_patches(host):
+  return (
+    patch.object(social_routes, "require_nondelegated_owner_control"),
+    patch.object(social_routes, "_require_member"),
+    patch.object(social_routes, "_load_identity", return_value={"private_key_b64": "fixture"}),
+    patch.object(social_routes, "_require_username"),
+    patch.object(social_routes, "_sign", return_value="fixture-signature"),
+    patch.object(social_routes, "_own_host", return_value="self.example"),
+    # Author actions share the signed-write transport (and its timeout).
+    patch.object(social_routes, "_post_signed_envelope", new=host),
+  )
+
+
+def _host_reply(status, detail):
+  return AsyncMock(return_value=httpx.Response(status, json={"detail": detail},
+    request=httpx.Request("POST", "https://community.example/board")))
+
+
 class OwnerRelayTests(unittest.IsolatedAsyncioTestCase):
-  async def _relay(self, status, detail):
-    response = httpx.Response(status, json={"detail": detail},
-      request=httpx.Request("POST", "https://community.example/board/edit"))
-    host = AsyncMock(return_value=response)
-    with (
-      patch.object(social_routes, "require_nondelegated_owner_control"),
-      patch.object(social_routes, "_require_member"),
-      patch.object(social_routes, "_load_identity", return_value={"private_key_b64": "fixture"}),
-      patch.object(social_routes, "_sign", return_value="fixture-signature"),
-      patch.object(social_routes, "_own_host", return_value="self.example"),
-      patch.object(social_routes, "federation_request", new=host),
-    ):
+  async def _call(self, host, action):
+    with _owner_relay(host):
       with self.assertRaises(HTTPException) as caught:
-        await social_routes.edit_own_board_text(
-          social_routes.EditBoardText(post_id="abcdef12", reply_id="12abcdef", text=" new "),
-          db=None, principal=None,
-        )
-    envelope = host.await_args.kwargs["json"]
+        await action()
+    return caught.exception
+
+  async def _relay(self, status, detail):
+    host = _host_reply(status, detail)
+    error = await self._call(host, lambda: social_routes.edit_own_board_text(
+      social_routes.EditBoardText(post_id="abcdef12", reply_id="12abcdef", text=" new "),
+      db=None, principal=None,
+    ))
+    envelope = host.await_args.args[1]
     self.assertEqual((envelope["type"], envelope["reply_id"], envelope["text"]),
                      ("board_edit", "12abcdef", "new"))
-    return caught.exception
+    return error
+
+  async def test_acting_on_a_deleted_post_or_reply_reads_as_gone(self):
+    actions = {
+      "edit": lambda: social_routes.edit_own_board_text(
+        social_routes.EditBoardText(post_id="abcdef12", reply_id="12abcdef", text="new"),
+        db=None, principal=None),
+      "reaction": lambda: social_routes.react_to_post(
+        social_routes.ReactionPost(post_id="abcdef12", emoji="❤️", reply_id="12abcdef"),
+        db=None, principal=None),
+      "reply": lambda: social_routes.reply_to_post(
+        social_routes.ReplyPost(post_id="abcdef12", id="12abcdef", text="x"),
+        db=None, principal=None),
+    }
+    for name, action in actions.items():
+      for detail in ("Unknown post.", "Unknown reply."):
+        with self.subTest(action=name, detail=detail):
+          gone = await self._call(_host_reply(404, detail), action)
+          # Not 404: the app reads that as a server without the feature.
+          self.assertEqual((gone.status_code, gone.detail), (410, "That message no longer exists."))
+    older = await self._call(_host_reply(404, "Not Found"), actions["reaction"])
+    self.assertEqual(older.status_code, 502)
+
+  async def test_a_post_retry_keeps_its_id_and_a_bad_id_is_refused(self):
+    host = AsyncMock(return_value=httpx.Response(200, json={"status": "posted"},
+      request=httpx.Request("POST", "https://community.example/board")))
+    with _owner_relay(host):
+      for _ in range(2):
+        result = await social_routes.publish_post(
+          social_routes.PublishPost(text="Hello", id="abcdef12-3456"), db=None, principal=None)
+        self.assertEqual(result, {"status": "posted", "id": "abcdef12-3456"})
+        self.assertEqual(host.await_args.args[1]["id"], "abcdef12-3456")
+      fresh = await social_routes.publish_post(
+        social_routes.PublishPost(text="Hello"), db=None, principal=None)
+      self.assertNotEqual(fresh["id"], "abcdef12-3456")
+      with self.assertRaises(HTTPException) as caught:
+        await social_routes.publish_post(
+          social_routes.PublishPost(text="Hello", id="../not-an-id"), db=None, principal=None)
+      self.assertEqual(caught.exception.status_code, 400)
 
   async def test_only_a_missing_route_reads_as_an_older_server(self):
     self.assertEqual((await self._relay(404, "Not Found")).status_code, 501)
     self.assertEqual((await self._relay(405, "Method Not Allowed")).status_code, 501)
     self.assertEqual((await self._relay(404, None)).status_code, 501)
+    self.assertEqual((await self._relay(400, "Unsupported envelope type.")).status_code, 501)
     gone = await self._relay(404, "Unknown reply.")
-    self.assertEqual((gone.status_code, gone.detail), (404, "That message no longer exists."))
+    self.assertEqual((gone.status_code, gone.detail), (410, "That message no longer exists."))
     self.assertEqual((await self._relay(403, "Only the author may edit this.")).status_code, 403)
 
   async def test_host_validation_reasons_reach_the_author(self):
@@ -209,24 +321,11 @@ class OwnerRelayTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual((other.status_code, other.detail), (502, "Your edit couldn’t be saved."))
 
   async def test_retrying_a_deleted_reply_stops_instead_of_reposting(self):
-    response = httpx.Response(410, json={"detail": "This reply was deleted."},
-      request=httpx.Request("POST", "https://community.example/board/reply"))
-    with (
-      patch.object(social_routes, "require_nondelegated_owner_control"),
-      patch.object(social_routes, "_require_member"),
-      patch.object(social_routes, "_load_identity", return_value={"private_key_b64": "fixture"}),
-      patch.object(social_routes, "_require_username"),
-      patch.object(social_routes, "_sign", return_value="fixture-signature"),
-      patch.object(social_routes, "_own_host", return_value="self.example"),
-      patch.object(social_routes, "_post_signed_envelope", new=AsyncMock(return_value=response)),
-    ):
-      with self.assertRaises(HTTPException) as caught:
-        await social_routes.reply_to_post(
-          social_routes.ReplyPost(post_id="abcdef12", id="12abcdef", text="x"),
-          db=None, principal=None,
-        )
-    self.assertEqual((caught.exception.status_code, caught.exception.detail),
-                     (410, "This reply was deleted."))
+    error = await self._call(_host_reply(410, "This reply was deleted."),
+      lambda: social_routes.reply_to_post(
+        social_routes.ReplyPost(post_id="abcdef12", id="12abcdef", text="x"),
+        db=None, principal=None))
+    self.assertEqual((error.status_code, error.detail), (410, "This reply was deleted."))
 
 
 if __name__ == "__main__":
