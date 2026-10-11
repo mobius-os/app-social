@@ -1230,6 +1230,199 @@ class CommunityGifTests(unittest.TestCase):
         self.assertEqual(list(store.board_media_dir().rglob("*")), [])
 
 
+class DecryptedMessageAdmissionTests(unittest.IsolatedAsyncioTestCase):
+  """Authenticated DM plaintext passes the shared JSON structure admission."""
+
+  def setUp(self):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    self.enterContext(patch.dict(os.environ, {
+      "APP_STORAGE_DIR": root, "APP_ID": "7", "APP_SLUG": "social",
+    }))
+    import social_routes
+    self.routes = social_routes
+    recipient = X25519PrivateKey.generate()
+    self.private = base64.b64encode(recipient.private_bytes(
+      serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+      serialization.NoEncryption())).decode()
+    self.public = base64.b64encode(recipient.public_key().public_bytes(
+      serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+
+  def seal(self, plaintext, message_id="abcdef12"):
+    """Use the real sealing path, substituting only the plaintext bytes."""
+    with patch.object(self.routes, "_canonical", return_value=plaintext):
+      return self.routes._seal_dm(message_id, self.public, text="", attachment=None, reply_to=None)
+
+  def assert_generic_failure(self, message_id, sealed, private=None):
+    with self.assertRaises(HTTPException) as caught:
+      self.routes._open_dm(message_id, sealed, private or self.private)
+    self.assertEqual(caught.exception.status_code, 400)
+    self.assertEqual(caught.exception.detail, "Message could not be decrypted.")
+    return caught.exception
+
+  def assert_predecode_rejected(self, plaintext):
+    sealed = self.seal(plaintext)
+    with patch.object(json, "loads") as decoded:
+      failure = self.assert_generic_failure("abcdef12", sealed)
+      decoded.assert_not_called()
+    # The generic wire failure is caused by the shared structure budget.
+    self.assertIsInstance(failure.__cause__, HTTPException)
+    self.assertEqual(failure.__cause__.status_code, 413)
+
+  def test_dense_decrypted_containers_reject_before_decode_with_bounded_memory(self):
+    plaintext = b'{"attachment":null,"reply_to":null,"text":[' + b'[],' * 699999 + b'[]]}'
+    sealed = self.seal(plaintext)
+    tracemalloc.start()
+    try:
+      with patch.object(json, "loads") as decoded:
+        failure = self.assert_generic_failure("abcdef12", sealed)
+        decoded.assert_not_called()
+      _, peak = tracemalloc.get_traced_memory()
+    finally:
+      tracemalloc.stop()
+    self.assertEqual(failure.__cause__.status_code, 413)
+    # Ciphertext decode, decryption and source decoding only (about 6.3 MB);
+    # the unguarded json.loads(plaintext) returned 700k lists, peaking at 51.4 MB,
+    # before late text rejection.
+    self.assertLess(peak, 4 * len(plaintext) + 2 * 1024 * 1024)
+
+  def test_entries_duplicates_depth_and_escaping_follow_the_shared_contract(self):
+    base = b'{"attachment":null,"reply_to":null,'
+    for element in (b'[]', b'{}', b'0', b'true', b'null', b'"x"'):
+      with self.subTest(element=element):
+        self.assert_predecode_rejected(base + b'"text":[' + (element + b',') * 33000 + element + b']}')
+    # Duplicates collapse to the exact three keys yet still spend the budget.
+    self.assert_predecode_rejected(base + b'"text":"",' * 17000 + b'"text":"x"}')
+    # Root object is depth one: depth 64 is admitted, 65 rejects before decode.
+    limit = common_protocol.MAX_ENVELOPE_DEPTH
+    nested = lambda depth: base + b'"text":' + b'[' * (depth - 1) + b'0' + b']' * (depth - 1) + b'}'
+    opened = self.routes._open_dm("abcdef12", self.seal(nested(limit)), self.private)
+    self.assertEqual(set(opened), {"text", "attachment", "reply_to"})
+    self.assert_predecode_rejected(nested(limit + 1))
+    # Inclusive token boundary: nine wrapper punctuation characters plus N-1 commas.
+    count = common_protocol.MAX_ENVELOPE_STRUCTURE_TOKENS - 8
+    exact = base + b'"text":[' + b'0,' * (count - 1) + b'0]}'
+    self.assertEqual(len(self.routes._open_dm("abcdef12", self.seal(exact), self.private)["text"]), count)
+    self.assert_predecode_rejected(exact[:-2] + b',0]}')
+    # Structural characters and escapes inside strings are not structure.
+    text = '[]{}:,\\"' * 4000 + '🪐é\n'
+    value = {"text": text, "attachment": None, "reply_to": None}
+    for ensure_ascii in (True, False):
+      source = json.dumps(value, ensure_ascii=ensure_ascii).replace('/', '\\/')
+      for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+                       "utf-32", "utf-32-le", "utf-32-be"):
+        with self.subTest(ensure_ascii=ensure_ascii, encoding=encoding):
+          self.assertEqual(self.routes._open_dm(
+            "abcdef12", self.seal(source.encode(encoding)), self.private), value)
+
+  def test_malformed_plaintext_keys_and_ciphertext_still_fail_generically(self):
+    valid = common_protocol.canonical({"text": "hi", "attachment": None, "reply_to": None})
+    # Stdlib json.loads(bytes) stays authoritative for grammar and encodings.
+    for plaintext in (b'', b'{', b'{"text":}', b'{"text":"\xff","attachment":null,"reply_to":null}',
+                      b'{"text":"\\q","attachment":null,"reply_to":null}', b'[]', b'null',
+                      b'{"text":"x","attachment":null}', valid[:-1] + b',"extra":1}', valid + b' {}',
+                      b'{"attachment":null,"reply_to":null,"text":[' + b'[],' * 12000 + b'bad JSON'):
+      with self.subTest(plaintext=plaintext[:40]):
+        self.assert_generic_failure("abcdef12", self.seal(plaintext))
+    sealed = self.seal(valid)
+    self.assertEqual(self.routes._open_dm("abcdef12", sealed, self.private)["text"], "hi")
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    other = base64.b64encode(X25519PrivateKey.generate().private_bytes(
+      serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+      serialization.NoEncryption())).decode()
+    ciphertext = bytearray(base64.b64decode(sealed["ct_b64"]))
+    ciphertext[0] ^= 1
+    with patch.object(json, "loads") as decoded:
+      self.assert_generic_failure("abcdef12", sealed, other)
+      self.assert_generic_failure("abcdef34", sealed)  # message id is the AAD
+      self.assert_generic_failure("abcdef12", {**sealed, "ct_b64": base64.b64encode(bytes(ciphertext)).decode()})
+      self.assert_generic_failure("abcdef12", {**sealed, "ct_b64": "!"})
+      self.assert_generic_failure("abcdef12", {**sealed, "v": 2})
+      self.assert_generic_failure("abcdef12", {**sealed, "extra": 1})
+      decoded.assert_not_called()
+
+  def test_maximum_gif_text_and_quoted_reply_roundtrip_exactly(self):
+    data = padded_gif(common_protocol.MAX_ATTACHMENT_BYTES, padding=b'\xff')
+    attachment = wire(data, (1, 1))
+    reply_to = {"id": "abcdef56", "author_handle": "a" * common_protocol.MAX_REPLY_AUTHOR_CHARS,
+                "excerpt": "[]{}:,\\\"🪐" * 14}
+    text = '🪐' * common_protocol.MAX_MESSAGE_TEXT_CHARS
+    sealed = self.routes._seal_dm("abcdef12", self.public, text=text,
+                                  attachment=attachment, reply_to=reply_to)
+    # Sealed wire bytes still carry the frozen canonical plaintext.
+    key = common_protocol.new_signing_key()
+    envelope = {"v": 0, "type": "message", "id": "abcdef12", "from": "a.example",
+                "to": "b.example", "text": "", "sent_at": time.time(), "enc": sealed}
+    envelope["sig"] = common_protocol.sign(envelope, key)
+    common_protocol.validate_attachment_envelope_size(envelope)
+    self.assertTrue(common_protocol.verify(
+      {k: v for k, v in envelope.items() if k != "sig"}, envelope["sig"],
+      common_protocol.signing_public_key(key)))
+    with patch.object(json, "loads", wraps=json.loads) as decoded:
+      opened = self.routes._open_dm("abcdef12", sealed, self.private)
+      self.assertEqual(decoded.call_count, 1)
+    self.assertEqual(opened, {"text": text, "attachment": attachment, "reply_to": reply_to})
+    self.assertEqual(common_protocol.validate_attachment(opened["attachment"])[1], data)
+    self.assertEqual(common_protocol.validate_reply_to(opened["reply_to"]), reply_to)
+    common_protocol.validate_text_or_attachment(opened["text"], None, "invalid")
+    # A sender may legally escape every base64 slash; the original is unchanged.
+    escaped = common_protocol.canonical(opened).replace(b'/', b'\\/')
+    self.assertGreater(escaped.count(b'\\/'), 20 * 1024 * 1024)
+    del opened
+    reopened = self.routes._open_dm("abcdef12", self.seal(escaped), self.private)
+    self.assertEqual(common_protocol.validate_attachment(reopened["attachment"])[1], data)
+
+  async def test_receive_route_verifies_signature_before_bounded_decryption(self):
+    plaintext = b'{"attachment":null,"reply_to":null,"text":[' + b'[],' * 699999 + b'[]]}'
+    envelope = {"v": 0, "type": "message", "from": "peer.example", "to": "self.example",
+                "id": "abcdef12", "sent_at": 1, "enc": self.seal(plaintext)}
+    routes = self.routes
+    with (patch.object(routes, "_joined_for_federation", return_value=True),
+          patch.object(routes, "_own_host", return_value="self.example"),
+          patch.object(routes, "_read_envelope", new=AsyncMock(return_value=envelope)),
+          patch.object(routes, "_load_identity", return_value={"enc_private_key_b64": self.private}),
+          patch.object(routes, "_common_app") as stored):
+      unsigned = HTTPException(status_code=401, detail="Signature is invalid.")
+      with patch.object(routes, "_verify_peer_envelope", new=AsyncMock(side_effect=unsigned)), \
+           patch.object(routes, "_open_dm", wraps=routes._open_dm) as opened:
+        with self.assertRaises(HTTPException) as caught:
+          await routes.receive_message(None, db=None)
+        self.assertEqual(caught.exception.status_code, 401)
+        opened.assert_not_called()
+      with patch.object(routes, "_verify_peer_envelope", new=AsyncMock(return_value={"handle": "peer"})), \
+           patch.object(json, "loads") as decoded:
+        with self.assertRaises(HTTPException) as caught:
+          await routes.receive_message(None, db=None)
+        self.assertEqual((caught.exception.status_code, caught.exception.detail),
+                         (400, "Message could not be decrypted."))
+        decoded.assert_not_called()
+      stored.assert_not_called()
+
+
+class LoadsBoundedJsonTests(unittest.TestCase):
+  def test_matches_stdlib_bytes_decoding_and_rejects_structure_first(self):
+    corpus = [b'{"x":NaN}', b'{"a":1,"a":2}', b'\xef\xbb\xbf{"x":[]}', b'"\\ud800"',
+              '{"x":"\ud800"}'.encode("utf-16-le", "surrogatepass"), '{"🪐":[1]}'.encode("utf-32"),
+              b'', b'{', b'{"x":"\xff"}', b'{"x":01}', b'{} {}', b'\xff\xfe\x00']
+    for raw in corpus:
+      with self.subTest(raw=raw):
+        try:
+          expected = ("ok", json.loads(raw))
+        except Exception as exc:
+          expected = ("error", type(exc))
+        try:
+          actual = ("ok", common_protocol.loads_bounded_json(raw))
+        except Exception as exc:
+          actual = ("error", type(exc))
+        self.assertEqual(repr(actual), repr(expected))
+    with patch.object(json, "loads") as decoded, self.assertRaises(HTTPException) as caught:
+      common_protocol.loads_bounded_json(b'[' + b'0,' * 40000 + b'0]')
+    self.assertEqual(caught.exception.status_code, 413)
+    decoded.assert_not_called()
+
+
 class MessageGifSeamTests(unittest.IsolatedAsyncioTestCase):
   async def test_dm_and_group_canonical_seam_rejects_before_outbound_persistence(self):
     with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {

@@ -433,6 +433,20 @@ def _preflight_envelope_structure(document: str) -> None:
       raise HTTPException(status_code=413, detail="Envelope JSON is too complex.")
 
 
+def loads_bounded_json(data: bytes) -> Any:
+  """Decode JSON bytes like ``json.loads(bytes)``, admitting structure first.
+
+  Wire envelopes and authenticated plaintext revealed only after decryption
+  share this one primitive; neither has a trusted shape. Encoding detection
+  matches stdlib's UTF-8/16/32 handling and retains one decoded source. A
+  resource overrun raises HTTPException(413) before any container exists; any
+  other exception means the bytes are not JSON. Callers own their wire errors.
+  """
+  document = data.decode(json.detect_encoding(data), "surrogatepass")
+  _preflight_envelope_structure(document)
+  return json.loads(document)
+
+
 async def read_envelope(
   request: Request, *, max_bytes: int = MAX_ATTACHMENT_ENVELOPE_BYTES,
 ) -> dict:
@@ -461,14 +475,9 @@ async def read_envelope(
     raise HTTPException(status_code=408, detail="Envelope receive deadline exceeded.") from None
   body = bytes(body)
   try:
-    # Match json.loads(bytes)' UTF-8/16/32 handling exactly, and retain only
-    # one decoded source. No containers exist until the resource check passes.
-    document = body.decode(json.detect_encoding(body), "surrogatepass")
-  except (UnicodeError, LookupError) as exc:
-    raise HTTPException(status_code=400, detail="Envelope is not JSON.") from exc
-  _preflight_envelope_structure(document)
-  try:
-    envelope = json.loads(document)
+    envelope = loads_bounded_json(body)
+  except HTTPException:
+    raise
   except Exception as exc:
     raise HTTPException(status_code=400, detail="Envelope is not JSON.") from exc
   if not isinstance(envelope, dict):

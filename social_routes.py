@@ -81,6 +81,7 @@ from common_protocol import (
   NEEDS_USERNAME, OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
   canonical as _canonical, peer_service_url as _peer_service_url,
   post_signed_envelope as _post_signed_envelope,
+  loads_bounded_json as _loads_bounded_json,
   new_signing_key, read_envelope as _read_envelope, sign as _sign,
   signing_public_key,
   valid_host as _valid_host, valid_id as _valid_id,
@@ -522,7 +523,10 @@ def _open_dm(message_id: str, enc: Any, private_key_b64: str) -> dict:
     plaintext = ChaCha20Poly1305(
       _dm_key(private.exchange(ephemeral))
     ).decrypt(nonce, ciphertext, message_id.encode("utf-8"))
-    payload = json.loads(plaintext)
+    # Authentication proves the sender, not a safe JSON shape. Admit the
+    # revealed bytes through the same structure budget as wire envelopes;
+    # an overrun stays the generic decryption failure below.
+    payload = _loads_bounded_json(plaintext)
     if not isinstance(payload, dict) or set(payload) != {
       "text", "attachment", "reply_to",
     }:
