@@ -745,6 +745,7 @@ export default function App({ appId, token }) {
                  onJoin={beginJoin} joinBusy={saving || meState === 'loading'}
                  emojiReactions={Boolean(feedCapabilities.emoji_reactions)}
                  replyReactions={Boolean(feedCapabilities.reply_reactions)}
+                 authorEdits={Boolean(feedCapabilities.author_edits)}
                  replyAttachments={Boolean(feedCapabilities.reply_attachments)}
                  boardTarget={boardTarget} onTargetHandled={finishBoardTarget}
                  composerMount={composerMount} scrollRef={boardScrollRef}

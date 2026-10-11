@@ -31,3 +31,18 @@ export function withReplyEdit(replies, replyId, edit) {
 export function isEditTarget(editing, postId, replyId = null) {
   return Boolean(editing) && editing.postId === postId && (editing.replyId || null) === (replyId || null)
 }
+
+// Whether the open editor holds text its author hasn't saved.
+export function editorHasChanges(editing) {
+  return Boolean(editing) && editing.text.trim() !== (editing.initial || '').trim()
+}
+
+// Whether the item being edited is still on screen: a post in the visible feed,
+// or a reply in the open thread.
+export function editTargetShown(editing, { feed, hiddenIds, replyPostId, replies }) {
+  if (!editing) return false
+  if (editing.replyId) {
+    return replyPostId === editing.postId && replies.some((reply) => reply.id === editing.replyId)
+  }
+  return !hiddenIds.has(editing.postId) && feed.some((post) => post.id === editing.postId)
+}

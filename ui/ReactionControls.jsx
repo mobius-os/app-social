@@ -32,7 +32,7 @@ export function useBoardReactions({ refreshTarget, onError, onSettled }) {
         result = await reactToPost(target.postId, emoji, target.replyId)
       } catch (error) {
         setOverrides(prior => ({ ...prior, [key]: current }))
-        onError(error)
+        onError(error, target)
         return
       }
       setOverrides(prior => ({ ...prior, [key]: confirmedReactions(result) }))

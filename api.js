@@ -123,11 +123,12 @@ export const retryMessage = (peer, id) =>
   call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/retry`, {
     method: 'POST', body: JSON.stringify({}),
   })
-export const publishPost = (text, attachment, attachments, thumbnails) =>
+export const publishPost = (text, attachment, attachments, thumbnails, id) =>
   call('publish', {
     method: 'POST',
     body: JSON.stringify({
       text,
+      ...(id ? { id } : {}),
       ...(attachment ? { attachment } : {}),
       ...(attachments && attachments.length ? { attachments } : {}),
       ...(thumbnails && thumbnails.length ? { thumbnails } : {}),

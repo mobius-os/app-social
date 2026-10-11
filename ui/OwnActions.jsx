@@ -1,14 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { EditPencil, Trash } from '@openai/apps-sdk-ui/components/Icon'
+import { isTouchPrimary, shouldSubmitMessageKey } from './interactionRules.js'
 
 // Edit/Delete for the owner's own post or reply. Pointer devices reveal them on
 // hover or keyboard focus (like Slack/Discord); touch devices always show them.
+// Without `onEdit` (a host that predates edits) only Delete is offered.
 export function OwnActions({ kind, onEdit, onDelete, disabled, compact = false }) {
   return <div className={`cn-own-actions${compact ? ' is-compact' : ''}`}>
-    <button type="button" className="cn-own-action" onClick={onEdit} disabled={disabled}
+    {onEdit && <button type="button" className="cn-own-action" onClick={onEdit} disabled={disabled}
             aria-label={`Edit ${kind}`} title={`Edit ${kind}`}>
       <EditPencil aria-hidden="true" />
-    </button>
+    </button>}
     <button type="button" className="cn-own-action is-danger" onClick={onDelete} disabled={disabled}
             aria-label={`Delete ${kind}`} title={`Delete ${kind}`}>
       <Trash aria-hidden="true" />
@@ -16,10 +18,13 @@ export function OwnActions({ kind, onEdit, onDelete, disabled, compact = false }
   </div>
 }
 
-// Inline editor in place of the message text. Enter saves, Shift+Enter adds a
-// line, Escape cancels. Text may be emptied only when the item has an image.
-export function InlineEditor({ kind = 'message', initial, maxLength, allowEmpty, saving, onSave, onCancel }) {
-  const [value, setValue] = useState(initial || '')
+// Inline editor in place of the message text; the Board owns its text so an
+// unsaved edit survives another edit request. Enter saves (on a touch keyboard
+// it adds a line, like the composer), Shift+Enter adds a line, Escape cancels.
+// Text may be emptied only when the item has an image.
+export function InlineEditor({
+  kind = 'message', initial, value, onChange, maxLength, allowEmpty, saving, onSave, onCancel,
+}) {
   const ref = useRef(null)
   useLayoutEffect(() => {
     const field = ref.current
@@ -44,10 +49,10 @@ export function InlineEditor({ kind = 'message', initial, maxLength, allowEmpty,
   return <div className="cn-inline-edit" onClick={(event) => event.stopPropagation()}>
     <textarea ref={ref} className="cn-inline-edit-field" value={value} rows={1}
               maxLength={maxLength} readOnly={saving} aria-busy={saving} aria-label={`Edit ${kind}`}
-              onChange={(event) => setValue(event.target.value)}
+              onChange={(event) => onChange(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (!saving) onCancel() }
-                else if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                else if (shouldSubmitMessageKey(event, isTouchPrimary())) {
                   event.preventDefault(); save()
                 }
               }} />
