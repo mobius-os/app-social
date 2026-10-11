@@ -927,6 +927,9 @@ class CommonPublicStore:
     with self._mutation_lock(self._board_lock, "board"):
       path = self.board_dir() / f"{post['id']}.json"
       if path.is_file():
+        # A stable retry confirms its own post; an id is never shared.
+        if self._load_object(path).get("host") != post.get("host"):
+          raise HTTPException(status_code=409, detail="Post id already belongs to another author.")
         return False
       if self._board_count() >= BOARD_POST_LIMIT:
         raise HTTPException(status_code=507, detail="Board is full.")

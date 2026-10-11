@@ -23,9 +23,10 @@ export function OwnActions({ kind, onEdit, onDelete, disabled, compact = false }
 // it adds a line, like the composer), Shift+Enter adds a line, Escape cancels.
 // Text may be emptied only when the item has an image.
 export function InlineEditor({
-  kind = 'message', initial, value, onChange, maxLength, allowEmpty, saving, onSave, onCancel,
+  kind = 'message', fieldRef, initial, value, onChange, maxLength, allowEmpty, saving, onSave, onCancel,
 }) {
-  const ref = useRef(null)
+  const ownRef = useRef(null)
+  const ref = fieldRef || ownRef
   useLayoutEffect(() => {
     const field = ref.current
     if (!field) return

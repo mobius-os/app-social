@@ -162,6 +162,20 @@ class RetryTests(unittest.TestCase):
       self.assertEqual(caught.exception.status_code, 409)
 
 
+class PostIdTests(unittest.TestCase):
+  def test_a_post_id_confirms_its_own_retry_but_is_never_shared(self):
+    with tempfile.TemporaryDirectory() as root:
+      store = common_public.CommonPublicStore(root)
+      post_id = str(uuid.uuid4())
+      record = {"id": post_id, "host": "author.example", "text": "Hi", "created_at": 1.0, "replies": []}
+      self.assertTrue(store.store_post(dict(record)))
+      self.assertFalse(store.store_post(dict(record)))
+      with self.assertRaises(HTTPException) as caught:
+        store.store_post({**record, "host": "other.example", "text": "Mine now"})
+      self.assertEqual(caught.exception.status_code, 409)
+      self.assertEqual(store.read_board(10, None)[0]["text"], "Hi")
+
+
 class SignedRouteTests(unittest.TestCase):
   def test_host_advertises_author_edits(self):
     with tempfile.TemporaryDirectory() as data_dir:

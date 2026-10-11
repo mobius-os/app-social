@@ -53,15 +53,16 @@ function rememberReplies(key, result) {
   }
 }
 
-function cachedReplies(postId, { force = false, background = false } = {}) {
+function cachedReplies(postId, { force = false, afterChange = false, background = false } = {}) {
   const key = String(postId)
   const existing = replyCache.get(key)
   const fresh = existing?.result && Date.now() - existing.updatedAt < REPLY_CACHE_TTL_MS
   if (!force && fresh) return Promise.resolve(existing.result)
   // A tap must not wait behind queued prefetches: only share an in-flight
-  // request that is at least as urgent as this one. A forced read must also
-  // postdate any change just made, so it never joins an earlier request.
-  if (!force && existing?.promise && (background || !existing.background)) return existing.promise
+  // request that is at least as urgent as this one. A read after a change
+  // (`afterChange`) must postdate it, so it never joins an earlier request;
+  // ordinary polls and reopened threads still share one.
+  if (!afterChange && existing?.promise && (background || !existing.background)) return existing.promise
 
   // A superseded request (a prefetch overtaken by a tap) must not overwrite
   // the entry its successor now owns.
@@ -296,6 +297,7 @@ export default function Board({
   const lastScrollTop = useRef(null)
   const replyRequest = useRef(0)
   const replySendingRef = useRef(false)
+  const editorFieldRef = useRef(null)
   // Reply deletes in flight; a poll that started before one could restore it.
   const replyDeletingRef = useRef(0)
   // Start relaxed: the launch just delivered the feed, and every early poll
@@ -406,6 +408,15 @@ export default function Board({
         && !reply.id.startsWith('local-'))) clearReplyDraft(replyPost.id)
   }, [replyPost?.id, replyMessageId, replySending, replies])
 
+  // A retained post retry id whose post has since landed (a timed-out publish
+  // the feed now shows) is finished: clear the draft rather than resend it.
+  useEffect(() => {
+    if (!postMessageId || posting || !feed.some((post) => post.id === postMessageId)) return
+    setDraft('')
+    setSelectedImages([])
+    setPostMessageId(null)
+  }, [postMessageId, posting, feed])
+
   // A post deleted here or elsewhere takes its open thread with it.
   useEffect(() => {
     if (feedState === 'ready' && replyPost && !feed.some((post) => post.id === replyPost.id)) {
@@ -509,7 +520,7 @@ export default function Board({
       setReplyError('')
     }
     try {
-      const result = await cachedReplies(post.id, { force: force || background, background })
+      const result = await cachedReplies(post.id, { force: force || background, afterChange: force, background })
       if (request !== replyRequest.current) return
       const loaded = result.replies || []
       setReplies(prior => reconcileReplies(loaded, prior))
@@ -953,7 +964,7 @@ export default function Board({
   function startEdit(postId, reply, initial) {
     // Another edit request must not discard text the author hasn't saved.
     if (editorHasChanges(editing)) {
-      const field = document.querySelector('.cn-inline-edit-field')
+      const field = editorFieldRef.current
       field?.focus({ preventScroll: true })
       field?.scrollIntoView?.({ block: 'nearest' })
       return
@@ -1121,7 +1132,8 @@ export default function Board({
     try {
       const receipt = await publishPost(text, attachment, attachments, thumbnails, postId)
       setPostMessageId(null)
-      onPostConfirmed?.({
+      // A retry of a post the feed already shows must not reset its counts.
+      if (!feed.some((post) => post.id === (receipt.id || postId))) onPostConfirmed?.({
         id: receipt.id || postId,
         host: me?.host,
         handle: me?.handle || '',
@@ -1285,7 +1297,7 @@ export default function Board({
                                   canMessage={canInteract && post.host !== me?.host} />
                 )}
                 {editingPost
-                  ? <InlineEditor kind="message" initial={editing.initial} value={editing.text} onChange={changeEdit}
+                  ? <InlineEditor kind="message" fieldRef={editorFieldRef} initial={editing.initial} value={editing.text} onChange={changeEdit}
                       maxLength={TEXT_LIMITS.post} saving={editing.saving}
                       allowEmpty={Boolean(post.attachment || post.attachments?.length)}
                       onCancel={() => closeEditor(post.id, null)} onSave={(text) => saveEdit(post, null, text)} />
@@ -1351,15 +1363,15 @@ export default function Board({
                                 {reply.pending ? 'Sending…' : timeAgo(reply.created_at)}
                                 <EditedMark editedAt={reply.edited_at} />
                               </span>
-                              {authorEdits && canInteract && me?.host && reply.host === me.host && !reply.pending
+                              {canInteract && me?.host && reply.host === me.host && !reply.pending
                                 && !reply.id.startsWith('local-') && !isEditing(post.id, reply.id) && (
                                 <OwnActions kind="reply" compact disabled={handoffBusy || participationBusy || Boolean(editing?.saving)}
-                                  onEdit={() => startEdit(post.id, reply, reply.text)}
+                                  onEdit={authorEdits ? () => startEdit(post.id, reply, reply.text) : null}
                                   onDelete={() => { restoreDeleteFocus.current = true; setDeleteTarget({ post, reply }) }} />
                               )}
                             </div>
                             {isEditing(post.id, reply.id)
-                              ? <InlineEditor kind="reply" initial={editing.initial} value={editing.text} onChange={changeEdit}
+                              ? <InlineEditor kind="reply" fieldRef={editorFieldRef} initial={editing.initial} value={editing.text} onChange={changeEdit}
                                   maxLength={TEXT_LIMITS.reply} saving={editing.saving}
                                   allowEmpty={Boolean(reply.attachment)}
                                   onCancel={() => closeEditor(post.id, reply.id)} onSave={(text) => saveEdit(post, reply, text)} />
