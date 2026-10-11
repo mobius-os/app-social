@@ -83,7 +83,10 @@ Selected draft previews may animate after deliberate selection.
 GIF originals allow up to 20 MiB, with at most
 1600 pixels on the longest side, 300 frames, and 32 million logical canvas pixels
 summed across frames. The protocol validates complete GIF framing before decoding
-all frames, on both private and public paths. Oversized animations are rejected,
+all frames, on both private and public paths. That walk is also capped at 524,288
+blocks (extensions, images and data sub-blocks; ordinary 255-byte sub-blocks need
+about 82,000 at 20 MiB), and repeated graphic controls are folded for decoding
+without changing the stored original. Oversized animations are rejected,
 not resized or flattened. Community galleries allow up to four images and
 20 MiB of originals combined; no GIF is flattened to fit a gallery. Signed
 content envelopes allow 60 MiB for base64, encryption, thumbnails and the

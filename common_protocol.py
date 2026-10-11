@@ -56,6 +56,13 @@ MAX_ATTACHMENT_DIMENSION = 8192
 MAX_GIF_DIMENSION = 1600
 MAX_GIF_FRAMES = 300
 MAX_GIF_CANVAS_PIXELS = 32_000_000
+# Every extension, image descriptor and data sub-block is one interpreted GIF
+# block, walked synchronously in Python. Encoders write full 255-byte data
+# sub-blocks, so a maximum-size original or comment-padded file needs about
+# 82,000 blocks. The cap leaves room for short text/XMP sub-blocks while bounding
+# the walk of a container built from millions of tiny blocks or repeated
+# controls, which the byte limit alone would still admit.
+MAX_GIF_BLOCKS = 524_288
 # One board post may carry four images within a separate raw-byte budget.
 MAX_BOARD_ATTACHMENTS = 4
 MAX_REPLY_AUTHOR_CHARS = 80
@@ -185,6 +192,27 @@ def verify(payload: dict, sig_b64: str, public_key_b64: str) -> bool:
     return False
 
 
+_GIF_TOO_COMPLEX = "GIF structure is too complex."
+
+
+def _skip_gif_subblocks(data: bytes, position: int, blocks: int) -> tuple[int, int]:
+  """Step over one data sub-block chain, counting each against MAX_GIF_BLOCKS.
+
+  Dense chains are the hot path: lengths are read without slicing payloads, and
+  the walk stops at the cap rather than after the whole container.
+  """
+  end = len(data)
+  while position < end:
+    size = data[position]
+    position += size + 1
+    if not size:
+      return position, blocks
+    blocks += 1
+    if blocks > MAX_GIF_BLOCKS:
+      raise HTTPException(status_code=413, detail=_GIF_TOO_COMPLEX)
+  raise ValueError("Truncated GIF block.")
+
+
 def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
   """Preflight complete GIF framing/budgets, then decode every raster.
 
@@ -198,6 +226,7 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
   if len(data) > MAX_ATTACHMENT_BYTES:
     raise HTTPException(status_code=413, detail="Attachment is too large.")
   position = 0
+  blocks = 0  # Every interpreted block, bounded by MAX_GIF_BLOCKS.
 
   def take(size: int) -> bytes:
     nonlocal position
@@ -207,10 +236,6 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
     block = data[position:end]
     position = end
     return block
-
-  def subblocks() -> None:
-    while size := take(1)[0]:
-      take(size)
 
   try:
     if take(6) not in (b"GIF87a", b"GIF89a") or wire["mime"] != "image/gif":
@@ -229,6 +254,12 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
     # Validate its framing while excluding it from Pillow's slower metadata
     # aggregation; the original bytes remain untouched for storage.
     decoded_parts = [data[:position]]
+    # GIF89a allows one graphic control per rendering block, but decoders
+    # tolerate a run of them. Pillow folds a run before one image: the last
+    # delay, the last transparency index and the last non-zero disposal win.
+    # Keeping just the controls that supply those values (in original order)
+    # decodes exactly like keeping all of them, with at most three per frame.
+    controls: dict[str, tuple[int, int]] = {}
     frames = 0
     while True:
       block_start = position
@@ -236,24 +267,38 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
       if marker == 0x3b:  # Trailer: it must terminate the entire container.
         if not frames or position != len(data):
           raise ValueError("GIF trailer is invalid.")
+        # Controls after the last image precede no raster.
         decoded_parts.append(b";")
         break
+      blocks += 1
+      if blocks > MAX_GIF_BLOCKS:
+        raise HTTPException(status_code=413, detail=_GIF_TOO_COMPLEX)
       if marker == 0x21:  # Extension; unknown labels are safely skippable.
         label = take(1)[0]
-        if label in (0xf9, 0xff, 0x01):
+        if label == 0xf9:
+          # Size, packed fields, delay, transparency index, terminator.
+          control = take(6)
+          packed = control[1]
+          if control[0] != 4 or control[5] or packed & 0xe0 or ((packed >> 2) & 7) > 3:
+            raise ValueError("GIF graphic control is invalid.")
+          span = (block_start, position)
+          controls["delay"] = span
+          if packed & 0x01:
+            controls["transparency"] = span
+          if packed & 0x1c:
+            controls["disposal"] = span
+          continue
+        if label in (0xff, 0x01):  # Application and plain-text headers.
           size = take(1)[0]
-          if size != {0xf9: 4, 0xff: 11, 0x01: 12}[label]:
+          if size != (11 if label == 0xff else 12):
             raise ValueError("GIF extension size is invalid.")
-          block = take(size)
-          if label == 0xf9:
-            if block[0] & 0xe0 or ((block[0] >> 2) & 7) > 3 or take(1) != b"\x00":
-              raise ValueError("GIF graphic control is invalid.")
-            decoded_parts.append(data[block_start:position])
-            continue
-        subblocks()
+          take(size)
+        position, blocks = _skip_gif_subblocks(data, position, blocks)
         continue
       if marker != 0x2c:
         raise ValueError("GIF block is invalid.")
+      decoded_parts.extend(data[start:end] for start, end in sorted(set(controls.values())))
+      controls.clear()
       descriptor = take(9)
       left, top, frame_width, frame_height = (
         int.from_bytes(descriptor[i:i + 2], "little") for i in (0, 2, 4, 6)
@@ -271,7 +316,7 @@ def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
         raise ValueError("GIF frame has no color table.")
       if not 2 <= take(1)[0] <= 8:
         raise ValueError("GIF LZW code size is invalid.")
-      subblocks()
+      position, blocks = _skip_gif_subblocks(data, position, blocks)
       decoded_parts.append(data[block_start:position])
     # No Pillow seek/load happens until the complete container fits every cap.
     decode_view = b"".join(decoded_parts)
@@ -639,6 +684,7 @@ __all__ = [
   "MAX_ENVELOPE_RECEIVE_SECONDS",
   "MAX_MESSAGE_TEXT_CHARS", "MAX_POST_TEXT_CHARS",
   "MAX_GIF_DIMENSION", "MAX_GIF_FRAMES", "MAX_GIF_CANVAS_PIXELS",
+  "MAX_GIF_BLOCKS",
   "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
   "COMMUNITY_HOST", "NEEDS_USERNAME", "PROTOCOL", "PUBLIC_SERVICE_PATH",
   "new_signing_key", "signing_public_key",

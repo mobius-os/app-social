@@ -64,14 +64,14 @@ def tiny_container(size=(1, 1), frames=1, *, broken_last=False):
   return bytes(header) + frame * (frames - 1) + bytes(last) + b";"
 
 
-def padded_gif(total_bytes, padding=b"x"):
+def padded_gif(total_bytes, padding=b"x", chunk=255):
   """A fully framed, decodable GIF with legal comment sub-block padding."""
   original = tiny_container()
   overhead = 3  # extension introducer, comment label, terminator
   room = total_bytes - len(original) - overhead
   blocks = bytearray()
   while room:
-    take = min(255, room - 1)
+    take = min(chunk, room - 1)
     if room - take - 1 == 1:
       take -= 1
     if take <= 0:
@@ -80,6 +80,24 @@ def padded_gif(total_bytes, padding=b"x"):
     blocks.extend(padding * take)
     room -= take + 1
   return original[:-1] + b"\x21\xfe" + bytes(blocks) + b"\x00;"
+
+
+def control(packed=0, delay=0, index=0):
+  """One graphic control extension: packed fields, delay, transparency index."""
+  return b"\x21\xf9\x04" + bytes([packed]) + delay.to_bytes(2, "little") + bytes([index, 0])
+
+
+# A plain-text header, an application extension and an unknown label, each
+# carrying data sub-blocks that a decode view never needs.
+PLAIN_TEXT = b"\x21\x01\x0c" + bytes(12) + b"\x05hello\x00"
+APPLICATION = b"\x21\xff\x0bXMP DataXMP\x03<x>\x00"
+UNKNOWN = b"\x21\x99\x02ab\x00"
+
+
+def with_metadata(gif, metadata):
+  """Insert extension blocks before the first image of a tiny container."""
+  start = 13 + 3 * 2 ** ((gif[10] & 7) + 1)
+  return gif[:start] + metadata + gif[start:]
 
 
 def invalid_gifs():
@@ -1038,6 +1056,160 @@ class CanonicalGifTests(unittest.TestCase):
       self.assertEqual(rgba.getpixel((0, 0))[3], 0)
       self.assertGreater(rgba.getpixel((12, 8))[0], 240)
       self.assertLess(rgba.getpixel((12, 8))[2], 10)
+
+
+def decoded_frames(data):
+  """Each frame's composited pixels plus the fields graphic controls set."""
+  with Image.open(io.BytesIO(data)) as image:
+    frames = []
+    for index in range(image.n_frames):
+      image.seek(index)
+      image.load()
+      frames.append((image.convert("RGBA").tobytes(), image.info.get("duration"),
+                     image.disposal_method, image.info.get("transparency")))
+    return frames
+
+
+class GifMetadataBudgetTests(unittest.TestCase):
+  """Metadata cannot multiply decode-view objects or synchronous framing work."""
+
+  def test_repeated_graphic_controls_fold_to_the_same_animation_and_poster(self):
+    data = animation()
+    controls = [i for i in range(len(data)) if data.startswith(b"\x21\xf9\x04", i)]
+    self.assertEqual(len(controls), 2)
+    self.assertTrue(all(data[i + 8] == 0x2c for i in controls))
+    repeated, every_control, previous = bytearray(), bytearray(), 0
+    for i in controls:
+      packed, delay, index = data[i + 3], int.from_bytes(data[i + 4:i + 6], "little"), data[i + 6]
+      self.assertTrue(packed & 0x01 and packed & 0x1c)
+      # Transparency, disposal and delay each come from a different control.
+      run = [control(0x01, delay + 50, index), control(packed & 0x1c, delay + 20, 99),
+             control(0, delay, 77)]
+      repeated += data[previous:i] + run[0] + PLAIN_TEXT + run[1] + APPLICATION + UNKNOWN + run[2]
+      every_control += data[previous:i] + b"".join(run)
+      previous = i + 8
+    # Controls after the last image are validated but precede no raster.
+    repeated += data[previous:-1] + control(0x0d, 5, 3) * 3 + b";"
+    every_control += data[previous:]
+    original = bytes(repeated)
+    value = wire(original)
+    self.assertEqual(common_protocol.validate_attachment(value)[1], original)
+    view = common_protocol.validate_gif_bytes(value, original)
+    self.assertLessEqual(view.count(b"\x21\xf9\x04"), 3 * len(controls))
+    # Equivalent to the earlier view that retained every control, and to the
+    # conforming one-control-per-frame animation those controls fold into.
+    self.assertEqual(decoded_frames(view), decoded_frames(bytes(every_control)))
+    self.assertEqual(decoded_frames(view), decoded_frames(data))
+    self.assertEqual(image_thumbnail_bytes(original), image_thumbnail_bytes(data))
+
+  def test_identical_control_runs_leave_the_conforming_decode_view(self):
+    one = with_metadata(tiny_container(), control(0x05, 7, 0))
+    expected = common_protocol.validate_gif_bytes(wire(one, (1, 1)), one)
+    self.assertEqual(expected.count(b"\x21\xf9"), 1)
+    for metadata in (control(0x05, 7, 0) * 20_000,
+                     (control(0x05, 7, 0) + PLAIN_TEXT + APPLICATION + UNKNOWN) * 5_000):
+      data = with_metadata(tiny_container(), metadata)
+      with self.subTest(size=len(data)):
+        self.assertEqual(common_protocol.validate_gif_bytes(wire(data, (1, 1)), data), expected)
+
+  def test_repeated_controls_validate_without_per_control_objects(self):
+    data = with_metadata(tiny_container(), control(0x04, 3) * 50_000)
+    shape = {"mime": "image/gif", "w": 1, "h": 1}
+    gc.collect()
+    tracemalloc.start()
+    try:
+      view = common_protocol.validate_gif_bytes(shape, data)
+      peak = tracemalloc.get_traced_memory()[1]
+    finally:
+      tracemalloc.stop()
+    self.assertEqual(view.count(b"\x21\xf9"), 1)
+    # Retaining a slice per control held several MiB for this 400 KB input.
+    self.assertLess(peak, 256 * 1024)
+
+  def test_block_budget_counts_extensions_images_and_sub_blocks_exactly(self):
+    tiny = tiny_container()  # One image descriptor and one data sub-block.
+    start = 13 + 3 * 2 ** ((tiny[10] & 7) + 1)
+    payload = tiny[start + 12:-2]
+    dense_image = tiny[:start + 11] + b"".join(b"\x01" + bytes([c]) for c in payload) + b"\x00;"
+    cases = {
+      "control": (with_metadata(tiny, control() * 8), 2 + 8),
+      "plain text": (with_metadata(tiny, PLAIN_TEXT * 8), 2 + 16),
+      "application": (with_metadata(tiny, APPLICATION * 8), 2 + 16),
+      "unknown": (with_metadata(tiny, UNKNOWN * 8), 2 + 16),
+      "empty comments": (with_metadata(tiny, b"\x21\xfe\x00" * 8), 2 + 8),
+      "comment sub-blocks": (with_metadata(tiny, b"\x21\xfe" + b"\x01x" * 8 + b"\x00"), 2 + 9),
+      "image sub-blocks": (dense_image, 1 + len(payload)),
+    }
+    for name, (data, blocks) in cases.items():
+      with self.subTest(name):
+        with patch.object(common_protocol, "MAX_GIF_BLOCKS", blocks):
+          self.assertEqual(common_protocol.validate_attachment(wire(data, (1, 1)))[1], data)
+        with patch.object(common_protocol, "MAX_GIF_BLOCKS", blocks - 1), \
+             patch("PIL.Image.open") as opened, self.assertRaises(HTTPException) as caught:
+          common_protocol.validate_attachment(wire(data, (1, 1)))
+        self.assertEqual((caught.exception.status_code, caught.exception.detail),
+                         (413, "GIF structure is too complex."))
+        opened.assert_not_called()
+
+  def test_block_budget_stops_the_walk_before_later_framing(self):
+    cap = common_protocol.MAX_GIF_BLOCKS
+    tiny = tiny_container()
+    comment = lambda count: b"\x21\xfe" + b"\x01x" * count + b"\x00"
+    at_cap = with_metadata(tiny, comment(cap - 3))
+    self.assertEqual(common_protocol.validate_attachment(wire(at_cap, (1, 1)))[1], at_cap)
+    start = 13 + 3 * 2 ** ((tiny[10] & 7) + 1)
+    unterminated = with_metadata(tiny, comment(cap))[:start + 2 + 2 * cap]
+    # Unterminated after the cap: 413, not the truncation 400 a full walk finds.
+    for over in (with_metadata(tiny, comment(cap - 2)), unterminated):
+      with self.subTest(size=len(over)), self.assertRaises(HTTPException) as caught:
+        common_protocol.validate_attachment(wire(over, (1, 1)))
+      self.assertEqual(caught.exception.status_code, 413)
+
+  def test_maximum_size_dense_metadata_is_rejected_before_pillow(self):
+    size = common_protocol.MAX_ATTACHMENT_BYTES
+    tiny = tiny_container()
+    room = size - len(tiny) - 3
+    dense = {
+      "repeated controls": with_metadata(tiny, control() * ((room + 3) // 8)),
+      "empty unknown extensions": with_metadata(tiny, b"\x21\x99\x00" * ((room + 3) // 3)),
+      "one-byte comment sub-blocks": with_metadata(tiny, b"\x21\xfe" + b"\x01x" * (room // 2) + b"\x00"),
+    }
+    for name, data in dense.items():
+      self.assertLessEqual(len(data), size)
+      with self.subTest(name), patch("PIL.Image.open") as opened, \
+           self.assertRaises(HTTPException) as caught:
+        common_protocol.validate_attachment(wire(data, (1, 1)))
+      self.assertEqual(caught.exception.status_code, 413)
+      opened.assert_not_called()
+    # Legal maximum-size originals with short sub-blocks keep exact identity.
+    data = padded_gif(size, chunk=64)
+    self.assertEqual(len(data), size)
+    self.assertEqual(common_protocol.validate_attachment(wire(data, (1, 1)))[1], data)
+    self.assertEqual(image_thumbnail_bytes(data)[0], "image/webp")
+
+  def test_every_folded_control_and_extension_header_keeps_framing_checks(self):
+    good = control(0x04, 3)
+    malformed = [
+      b"\x21\xf9\x05" + bytes(6),  # wrong control size
+      control(0x20),  # reserved bits
+      control(0x10),  # disposal 4
+      good[:-1] + b"\x01",  # control carries a data sub-block
+      b"\x21\x01\x0b" + bytes(11) + b"\x00",  # plain-text header size
+      b"\x21\xff\x0a" + bytes(10) + b"\x00",  # application header size
+    ]
+    for bad in malformed:
+      data = with_metadata(tiny_container(), good * 3 + bad + good * 3)
+      with self.subTest(bad=bad), patch("PIL.Image.open") as opened, \
+           self.assertRaises(HTTPException) as caught:
+        common_protocol.validate_attachment(wire(data, (1, 1)))
+      self.assertEqual(caught.exception.status_code, 400)
+      opened.assert_not_called()
+    data = with_metadata(tiny_container(), good * 3)
+    start = 13 + 3 * 2 ** ((data[10] & 7) + 1)
+    for end in range(start, start + 3 * len(good)):
+      with self.subTest(prefix=end), self.assertRaises(HTTPException) as caught:
+        common_protocol.validate_attachment(wire(data[:end], (1, 1)))
+      self.assertEqual(caught.exception.status_code, 400)
 
 
 class CommunityGifTests(unittest.TestCase):
