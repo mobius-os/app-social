@@ -143,17 +143,56 @@ export const CSS = `
 .cn-post > .cn-avatar, .cn-post > .cn-avatar-btn { grid-column: 1; grid-row: 1; align-self: start; }
 .cn-post-main { grid-column: 2; min-width: 0; }
 .cn-post-head { min-height: 22px; display: flex; align-items: flex-start; }
-.cn-post.is-mine .cn-post-head { padding-right: 44px; }
-.cn-post-delete {
-  position: absolute; top: 7px; right: 0;
-  width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%;
+.cn-post.is-mine .cn-post-head { padding-right: 84px; }
+.cn-own-actions {
+  position: absolute; top: 7px; right: 0; display: flex; gap: 0;
+  transition: opacity .14s ease;
+}
+.cn-own-actions.is-compact { position: static; margin-left: auto; align-self: center; }
+.cn-own-action {
+  width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   background: transparent; color: var(--muted); cursor: pointer;
   transition: background .14s ease, color .14s ease, transform .1s ease;
 }
-.cn-post-delete:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
-.cn-post-delete:active { transform: scale(.94); }
-.cn-post-delete svg { width: 17px; height: 17px; }
+.cn-own-actions.is-compact .cn-own-action { width: 32px; height: 32px; margin: -6px 0; }
+.cn-own-action:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
+.cn-own-action.is-danger:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.cn-own-action:active { transform: scale(.94); }
+.cn-own-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cn-own-action:disabled { opacity: .4; cursor: default; }
+.cn-own-action svg { width: 17px; height: 17px; }
+.cn-own-actions.is-compact .cn-own-action svg { width: 15px; height: 15px; }
+@media (hover: hover) and (pointer: fine) {
+  .cn-own-actions { opacity: 0; }
+  .cn-reply-row:hover .cn-own-actions,
+  .cn-own-actions:focus-within { opacity: 1; }
+  /* Separate rule: a browser without :has() drops only this one. */
+  .cn-post:hover:not(:has(.cn-inline-replies:hover, .cn-reply-composer:hover)) .cn-post-head > .cn-own-actions { opacity: 1; }
+}
+.cn-edited { margin-left: 5px; font-size: 12px; color: var(--muted); font-weight: 400; }
+.cn-inline-edit { margin-top: 4px; }
+.cn-inline-edit-field {
+  display: block; width: 100%; min-height: 40px; max-height: 320px; resize: none; overflow-y: auto;
+  padding: 9px 12px; border-radius: 12px; border: 1px solid var(--accent);
+  background: var(--surface); color: var(--text);
+  font: inherit; font-size: 15px; line-height: 1.45;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.cn-inline-edit-field:focus { outline: none; }
+.cn-inline-edit-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.cn-inline-edit-hint { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
+.cn-inline-edit-hint kbd {
+  font: inherit; font-size: 11px; padding: 1px 5px; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.cn-btn.cn-btn-small { min-height: 36px; padding: 0 14px; font-size: 13.5px; }
+@media (hover: none) {
+  .cn-own-action, .cn-own-actions.is-compact .cn-own-action { width: 44px; height: 44px; }
+  .cn-own-actions.is-compact .cn-own-action { margin: -12px 0; }
+  .cn-post.is-mine .cn-post-head { padding-right: 92px; }
+}
+@media (hover: none) { .cn-inline-edit-hint { visibility: hidden; } }
 .cn-person {
   padding: 0; border: 0; background: transparent; text-align: left; color: inherit;
   font-family: var(--font); cursor: pointer; min-height: 24px; min-width: 0;

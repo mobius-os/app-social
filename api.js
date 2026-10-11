@@ -163,6 +163,12 @@ export const reactToPost = (postId, emoji, replyId) =>
   }) })
 export const deletePost = (postId) =>
   call('delete', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
+export const deleteReply = (postId, replyId) =>
+  call('reply/delete', { method: 'POST', body: JSON.stringify({ post_id: postId, reply_id: replyId }) })
+export const editBoardText = (postId, text, replyId) =>
+  call('edit', { method: 'POST', body: JSON.stringify({
+    post_id: postId, text, ...(replyId ? { reply_id: replyId } : {}),
+  }) })
 export const getReplies = (postId, { background = false } = {}) =>
   call(`replies/${encodeURIComponent(postId)}`, { background }).then((result) => {
     noteAvatarDigests(result?.replies)
