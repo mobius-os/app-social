@@ -129,16 +129,23 @@ export async function loadParticipationIntent(storage) {
   return parseParticipationIntent(await storage.get(PARTICIPATION_INTENT_PATH))
 }
 
+// Saving is idempotent for the exact draft already stored. Only an intent that
+// meets current limits may be written; an accepted older draft (for example a
+// legacy oversized preview) can be confirmed as already saved, never written
+// anew, and is refused if the stored record changed or disappeared.
 export async function saveParticipationIntent(storage, intent) {
-  const safe = intent?.version === INTENT_VERSION && normalizedIntent(intent.kind, intent)
-  if (!safe || !storage?.getWithVersion || !storage?.durableWrite) return false
+  if (intent?.version !== INTENT_VERSION || !storage?.getWithVersion || !storage?.durableWrite) return false
+  const writable = normalizedIntent(intent.kind, intent)
+  const accepted = writable || parseParticipationIntent(intent)
+  if (!accepted) return false
   const { value, version, offline } = await storage.getWithVersion(PARTICIPATION_INTENT_PATH)
   if (offline) throw new Error('Reconnect before leaving Social so your draft can be saved safely.')
+  if (participationIntentMatches(value, accepted)) return true
+  if (!writable) return false
   if (value != null) {
-    if (participationIntentMatches(value, safe)) return true
     throw new Error('You already have a saved action. Finish that draft before starting another; it has not been replaced.')
   }
-  await storage.durableWrite(PARTICIPATION_INTENT_PATH, safe,
+  await storage.durableWrite(PARTICIPATION_INTENT_PATH, writable,
     version == null ? { ifNoneMatch: true } : { ifMatch: version })
   return true
 }

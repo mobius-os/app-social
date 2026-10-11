@@ -6,6 +6,7 @@ import { setToken, postReply } from '../api.js'
 import { attachmentBytes, galleryFitsMediaLimits, GIF_MAX_BYTES, IMAGE_MAX_BYTES, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 import { boardPostFitsWireLimit } from '../board_payload.js'
 import { upsertReplyAttempt } from '../reconciliation.js'
+import { joinGlobalCommunity } from '../community.js'
 import {
   PARTICIPATION_INTENT_PATH, accountHandoff, clearParticipationIntent,
   completedParticipationIntent, createParticipationIntent, loadParticipationIntent, participationActionLabel, participationStep,
@@ -108,6 +109,231 @@ async function restoredBoard(saved, { fail = false, failPreparation = false } = 
   } }
 }
 
+// Older saved drafts carried previews above today's thumbnail budget.
+function legacyDraft(kind, previewBytes = 200_000) {
+  const attachment = media('image/png', 1024), preview = media('image/webp', previewBytes)
+  return kind === 'reply'
+    ? { version: 1, kind, post_id: 'post-1', text: 'Legacy reply', attachment, thumbnail: preview }
+    : { version: 1, kind, text: 'Legacy caption', attachment, thumbnails: [preview] }
+}
+
+const JOINABLE = { connected: true, joined: false, handle: 'ada', registration: 'missing', identity_app_id: 8 }
+
+// Execute the real signed-out resume path: Board resume/continue hands the
+// saved intent to App requestParticipation, which saves, then joins or opens
+// the account app. Storage reads/writes are recorded; nothing can publish.
+async function signedOutBoard(saved, { me = JOINABLE, joinFailures = 0, postMessageFailures = 0 } = {}) {
+  const storage = memoryStorage()
+  if (saved) await storage.durableWrite(PARTICIPATION_INTENT_PATH, saved, { ifNoneMatch: true })
+  const read = storage.getWithVersion, write = storage.durableWrite
+  const reads = [], writes = []
+  storage.offline = false
+  storage.getWithVersion = async path => {
+    reads.push(path)
+    const result = await read(path)
+    return storage.offline ? { ...result, offline: true } : result
+  }
+  storage.durableWrite = async (path, value, opts) => { writes.push(value); return write(path, value, opts) }
+  const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
+  const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const toasts = [], messages = [], published = [], requests = []
+  let joins = 0, postMessages = 0
+  const env = {
+    participationIntent: await loadParticipationIntent(storage), canInteract: false,
+    participationBusy: false, handoffBusy: false, me, feed: [{ id: 'post-1' }],
+    handoffPending: { current: false },
+    window: { mobius: { storage }, parent: { postMessage(message, target) {
+      if (postMessages++ < postMessageFailures) throw new Error('Account app unavailable')
+      messages.push([message, target])
+    } } },
+    saveParticipationIntent, participationStep, accountHandoff, joinGlobalCommunity,
+    api: { async join() { joins++; return { directory: joins <= joinFailures ? 'unreachable' : 'registered' } } },
+    async loadMe() { return { ...me, joined: true, registration: 'registered' } },
+    async loadFeed() {},
+    setSaving: value => { env.participationBusy = value }, setJoinError() {},
+    setHandoffBusy: value => { env.handoffBusy = value },
+    setParticipationIntent: value => { env.participationIntent = value },
+    showToast: (message, kind) => toasts.push([message, kind]),
+    setDraft() { published.push('composer') }, setSelectedImages() {}, setComposing() {},
+    openReplies() { published.push('reply composer') },
+    async publishPost() { published.push('post') }, async postReply() { published.push('reply') },
+    onRequestParticipation: intent => {
+      const request = actions.requestParticipation(intent)
+      requests.push(intent)
+      return request
+    },
+  }
+  const functions = [handler(board, 'continueParticipation', true), handler(board, 'resumeParticipation'),
+    handler(app, 'openIdentityApp'), handler(app, 'join', true),
+    handler(app, 'requestParticipation', true)].join('\n')
+  const actions = new Function('env', `with (env) { ${functions}; return {
+    resumeParticipation, requestParticipation,
+  } }`)(env)
+  return { storage, env, reads, writes, toasts, messages, published, requests,
+    get joins() { return joins },
+    errors: () => toasts.filter(([, kind]) => kind === 'error').map(([message]) => message),
+    async resume() {
+      actions.resumeParticipation()
+      await new Promise(resolve => setImmediate(resolve))
+    } }
+}
+
+test('a signed-out older post or reply draft continues through Join unchanged and unpublished', async () => {
+  for (const kind of ['post', 'reply']) {
+    const saved = legacyDraft(kind)
+    const flow = await signedOutBoard(saved)
+    assert.deepEqual(flow.env.participationIntent, saved)
+    await flow.resume()
+    assert.deepEqual(flow.errors(), [])
+    assert.equal(flow.joins, 1)
+    assert.deepEqual(flow.requests, [flow.env.participationIntent])
+    assert.deepEqual(flow.env.participationIntent, saved)
+    assert.deepEqual(flow.writes, [])
+    assert.equal((await flow.storage.getWithVersion(PARTICIPATION_INTENT_PATH)).version, 1)
+    assert.deepEqual(await loadParticipationIntent(flow.storage), saved)
+    assert.deepEqual(flow.published, [])
+    assert.equal(flow.env.handoffBusy, false)
+  }
+})
+
+test('a signed-out older draft opens the account app without rewriting the draft', async () => {
+  const profiles = [
+    [{ connected: false, identity_app_id: 42 }, { type: 'moebius:open-app', appId: 42 }],
+    [{ connected: false }, { type: 'moebius:open-app', appId: 'store', intent: 'app:identity' }],
+    [{ connected: true, handle: '', identity_app_id: 8 }, { type: 'moebius:open-app', appId: 8 }],
+  ]
+  for (const kind of ['post', 'reply']) {
+    for (const [me, message] of profiles) {
+      const saved = legacyDraft(kind)
+      const flow = await signedOutBoard(saved, { me })
+      await flow.resume()
+      assert.deepEqual(flow.errors(), [])
+      assert.deepEqual(flow.messages, [[message, '*']])
+      assert.equal(flow.env.handoffPending.current, true)
+      assert.equal(flow.joins, 0)
+      assert.deepEqual(flow.writes, [])
+      assert.deepEqual(await loadParticipationIntent(flow.storage), saved)
+      assert.deepEqual(flow.published, [])
+    }
+  }
+})
+
+test('failed Join or account handoff keeps the older draft and a retry continues', async () => {
+  for (const kind of ['post', 'reply']) {
+    for (const failure of [{ joinFailures: 1 }, { me: { connected: false, identity_app_id: 42 }, postMessageFailures: 1 }]) {
+      const saved = legacyDraft(kind)
+      const flow = await signedOutBoard(saved, failure)
+      await flow.resume()
+      assert.equal(flow.errors().length, 1)
+      if (failure.joinFailures) assert.deepEqual(flow.errors(), ['Social couldn’t finish joining. Your draft is still saved.'])
+      assert.equal(flow.env.handoffBusy, false)
+      assert.deepEqual(await loadParticipationIntent(flow.storage), saved)
+      await flow.resume()
+      assert.equal(flow.errors().length, 1)
+      assert.equal(failure.joinFailures ? flow.joins : flow.messages.length, failure.joinFailures ? 2 : 1)
+      assert.deepEqual(flow.writes, [])
+      assert.deepEqual(await loadParticipationIntent(flow.storage), saved)
+      assert.deepEqual(flow.published, [])
+    }
+  }
+})
+
+test('an older draft is not handed off before the profile loads', async () => {
+  for (const kind of ['post', 'reply']) {
+    const flow = await signedOutBoard(legacyDraft(kind), { me: null })
+    await flow.resume()
+    assert.deepEqual(flow.errors(), ['Social is still loading your profile. Try again in a moment.'])
+    assert.deepEqual(flow.reads, [])
+    assert.deepEqual(flow.writes, [])
+    assert.deepEqual(flow.requests, [])
+    assert.deepEqual(flow.messages, [])
+  }
+})
+
+test('a changed or missing stored draft refuses the stale older draft without restoring it', async () => {
+  for (const kind of ['post', 'reply']) {
+    for (const change of ['replaced', 'edited', 'missing']) {
+      const saved = legacyDraft(kind)
+      const flow = await signedOutBoard(saved)
+      const replacement = change === 'replaced' ? createParticipationIntent('post', { text: 'Another window' })
+        : change === 'edited' ? legacyDraft(kind, 200_001) : null
+      await flow.storage.durableWrite(PARTICIPATION_INTENT_PATH, replacement, { ifMatch: 1 })
+      await flow.resume()
+      assert.deepEqual(flow.errors(), ['Social couldn’t save this draft. Try again before leaving.'])
+      assert.deepEqual(flow.writes, [replacement])
+      assert.equal((await flow.storage.getWithVersion(PARTICIPATION_INTENT_PATH)).version, 2)
+      assert.deepEqual(await loadParticipationIntent(flow.storage), replacement)
+      assert.equal(flow.joins, 0)
+      assert.deepEqual(flow.messages, [])
+      assert.deepEqual(flow.published, [])
+    }
+  }
+})
+
+test('offline, stale-version and concurrent saves keep the exact older draft', async () => {
+  for (const kind of ['post', 'reply']) {
+    const saved = legacyDraft(kind)
+    const offline = await signedOutBoard(saved)
+    offline.storage.offline = true
+    await offline.resume()
+    assert.deepEqual(offline.errors(), ['Reconnect before leaving Social so your draft can be saved safely.'])
+    assert.equal(offline.joins, 0)
+    offline.storage.offline = false
+    await offline.resume()
+    assert.equal(offline.joins, 1)
+    assert.deepEqual(offline.writes, [])
+
+    // Another window rewrote the identical bytes: the same draft, a newer version.
+    const stale = await signedOutBoard(saved)
+    await stale.storage.durableWrite(PARTICIPATION_INTENT_PATH, structuredClone(saved), { ifMatch: 1 })
+    await stale.resume()
+    assert.deepEqual(stale.errors(), [])
+    assert.equal(stale.joins, 1)
+    assert.equal(stale.writes.length, 1)
+
+    const concurrent = await signedOutBoard(saved)
+    const other = createParticipationIntent('post', { text: 'Second window' })
+    const [, otherSave] = await Promise.allSettled([
+      concurrent.resume(), saveParticipationIntent(concurrent.storage, other),
+    ])
+    assert.match(otherSave.reason.message, /already have a saved action/)
+    assert.deepEqual(concurrent.errors(), [])
+    assert.deepEqual(concurrent.writes, [])
+    assert.deepEqual(await loadParticipationIntent(concurrent.storage), saved)
+  }
+})
+
+test('malformed or newly oversized previews are never saved, even as a confirmation', async () => {
+  const storage = memoryStorage()
+  const malformed = { version: 1, kind: 'post', text: 'Bad',
+    attachment: { mime: 'image/png', data_b64: '!!!!', w: 1, h: 1 } }
+  await storage.set(PARTICIPATION_INTENT_PATH, malformed)
+  assert.equal(await loadParticipationIntent(storage), null)
+  for (const kind of ['post', 'reply']) {
+    assert.equal(await saveParticipationIntent(storage, legacyDraft(kind)), false)
+    assert.equal(await saveParticipationIntent(storage, legacyDraft(kind, 1_050_001)), false)
+    assert.equal(await saveParticipationIntent(storage, { ...legacyDraft(kind), version: 2 }), false)
+  }
+  assert.deepEqual(storage.values.get(PARTICIPATION_INTENT_PATH), malformed)
+
+  // A malformed stored record shows no banner, so resume does nothing.
+  const flow = await signedOutBoard(malformed)
+  assert.equal(flow.env.participationIntent, null)
+  await flow.resume()
+  assert.deepEqual(flow.requests, [])
+  assert.deepEqual(flow.writes, [])
+
+  // A new draft still meets the current preview budget before its first write.
+  for (const kind of ['post', 'reply']) {
+    const empty = memoryStorage()
+    assert.equal(await saveParticipationIntent(empty, legacyDraft(kind)), false)
+    assert.equal(empty.values.has(PARTICIPATION_INTENT_PATH), false)
+    const current = legacyDraft(kind, THUMBNAIL_MAX_BYTES)
+    assert.equal(await saveParticipationIntent(empty, current), true)
+    assert.deepEqual(await loadParticipationIntent(empty), current)
+  }
+})
+
 test('restored originals without previews publish and clear the exact saved post', async () => {
   for (const originals of [[media('image/gif', 1024)], [media('image/jpeg', 1024), media('image/png', 1024)]]) {
     const saved = createParticipationIntent('post', { text: '  Saved caption  ',
@@ -132,7 +358,9 @@ test('accepted legacy previews resume, publish originals without oversized rendi
     const flow = await restoredBoard(saved)
     assert.deepEqual(flow.env.participationIntent, saved)
     assert.equal(createParticipationIntent(kind, saved), null)
-    assert.equal(await saveParticipationIntent(flow.storage, saved), false)
+    // Re-saving the exact stored older draft is idempotent and writes nothing.
+    assert.equal(await saveParticipationIntent(flow.storage, saved), true)
+    assert.equal((await flow.storage.getWithVersion(PARTICIPATION_INTENT_PATH)).version, 1)
     await flow.submit()
     assert.deepEqual(flow.errors, [])
     assert.deepEqual(flow.sent[0].attachment, original)

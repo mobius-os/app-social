@@ -737,17 +737,16 @@ export default function Board({
     return toggleItemReaction(item, emoji, target)
   }
 
-  async function continueParticipation(kind, values) {
+  // Continuing hands the accepted saved intent through unchanged. Rebuilding it
+  // under current limits would reject an older saved draft (such as a legacy
+  // oversized preview); the save seam confirms that exact stored record and
+  // never writes such a preview anew.
+  async function continueParticipation(intent) {
     if (handoffBusy || participationBusy) return
     // The board paints from cache before the profile arrives. Until it does,
     // a member's tap must not be saved as a draft and sent to sign-up.
     if (!me) {
       showToast('Social is still loading your profile. Try again in a moment.', 'error')
-      return
-    }
-    const intent = createParticipationIntent(kind, values)
-    if (!intent) {
-      showToast('This draft couldn’t be prepared. Check it and try again.', 'error')
       return
     }
     setHandoffBusy(true)
@@ -764,15 +763,7 @@ export default function Board({
     const intent = participationIntent
     if (!intent) return
     if (!canInteract) {
-      void continueParticipation(intent.kind, {
-        postId: intent.post_id,
-        text: intent.text,
-        attachment: intent.attachment,
-        thumbnail: intent.thumbnail,
-        attachments: intent.attachments,
-        thumbnails: intent.thumbnails,
-        emoji: intent.emoji,
-      })
+      void continueParticipation(intent)
       return
     }
     if (intent.kind === 'post') {
