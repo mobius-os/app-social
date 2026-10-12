@@ -207,12 +207,23 @@ export const getPeerAvatars = (hosts, { background = false, digests = {} } = {})
 
 // ── conversation storage (each side keeps only its own copy) ────────────────
 
+// Lists reload because the server's change counter moved, so read the server's
+// copy: a cache-first get() would repaint the previous metadata and hand the new
+// copy only to subscribers, hiding a delivered message until a manual refresh.
+// If the server cannot answer, keep showing the device copy.
+async function readFresh(store, path) {
+  try { return (await store.getWithVersion(path)).value }
+  catch { return store.get(path) }
+}
+
 async function listMetadata(prefix) {
   const store = window.mobius?.storage
   if (!store) throw new Error('Conversation storage is unavailable.')
   const entries = await store.list(prefix)
   const directories = entries.filter(entry => entry.type === 'directory')
-  const records = await Promise.all(directories.map(entry => store.get(`${prefix}${entry.name}/meta.json`)))
+  const records = await Promise.all(
+    directories.map(entry => readFresh(store, `${prefix}${entry.name}/meta.json`)),
+  )
   return records.filter(Boolean)
 }
 
