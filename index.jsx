@@ -154,6 +154,10 @@ export default function App({ appId, token }) {
   const toastTimer = useRef(null)
   const readySignalled = useRef(false)
   const freshFeedLoaded = useRef(false)
+  // Serialized posts + cursor last persisted to cache/board.json. Background
+  // reloads usually return the same page; skipping identical writes avoids a
+  // storage PUT and a change event for every refresh.
+  const boardCacheSnapshot = useRef(null)
   const meRef = useRef(null)
   meRef.current = me
   const handoffPending = useRef(false)
@@ -225,11 +229,17 @@ export default function App({ appId, token }) {
     }
     setFeedState('ready')
     if (capabilities) setFeedCapabilities(capabilities)
-    window.mobius?.storage?.set('cache/board.json', {
-      posts: posts.slice(0, api.BOARD_PAGE_SIZE),
-      next_cursor: nextCursor === undefined ? feedNextCursorRef.current : nextCursor,
-      cached_at: Date.now(),
-    }).catch(() => null)
+    const cachedPosts = posts.slice(0, api.BOARD_PAGE_SIZE)
+    const cachedCursor = nextCursor === undefined ? feedNextCursorRef.current : nextCursor
+    const snapshot = JSON.stringify([cachedPosts, cachedCursor ?? null])
+    if (snapshot !== boardCacheSnapshot.current) {
+      boardCacheSnapshot.current = snapshot
+      window.mobius?.storage?.set('cache/board.json', {
+        posts: cachedPosts,
+        next_cursor: cachedCursor,
+        cached_at: Date.now(),
+      }).catch(() => { boardCacheSnapshot.current = null })
+    }
     if (!readySignalled.current) {
       readySignalled.current = true
       window.mobius?.signal?.('app_ready', { item_count: posts.length })
@@ -343,7 +353,12 @@ export default function App({ appId, token }) {
     // the primary surface behind them on every launch.
     window.mobius?.storage?.get('cache/board.json')
       .then((cached) => {
-        if (freshFeedLoaded.current || !Array.isArray(cached?.posts)) return
+        if (!Array.isArray(cached?.posts)) return
+        if (boardCacheSnapshot.current === null) {
+          const savedCursor = cached.next_cursor === undefined ? null : cached.next_cursor
+          boardCacheSnapshot.current = JSON.stringify([cached.posts, savedCursor])
+        }
+        if (freshFeedLoaded.current) return
         noteBoardAvatarDigests(cached.posts)
         setFeed(cached.posts)
         const cachedCursor = cached.next_cursor === null || typeof cached.next_cursor === 'string'
@@ -556,8 +571,8 @@ export default function App({ appId, token }) {
     loadConversations()
   }
 
-  function openLightbox(url, alt, cleanup) {
-    setLightbox({ url, alt, cleanup })
+  function openLightbox(url, alt, cleanup, gallery) {
+    setLightbox({ url, alt, cleanup, gallery })
   }
 
   // ── onboarding: join with the shared Möbius identity ──────────────────────
@@ -654,7 +669,7 @@ export default function App({ appId, token }) {
             foreground={foreground}
             onBack={closeThread}
             showToast={showToast}
-            onOpenImage={(url, alt) => setLightbox({ url, alt })}
+            onOpenImage={openLightbox}
           />
         ) : (
           <Thread
@@ -667,7 +682,7 @@ export default function App({ appId, token }) {
             request={thread.request}
             onBack={closeThread}
             showToast={showToast}
-            onOpenImage={(url, alt) => setLightbox({ url, alt })}
+            onOpenImage={openLightbox}
           />
         )}
         {toast && <div className={`cn-toast${toast.kind ? ` is-${toast.kind}` : ''}`} role="status">{toast.text}</div>}
@@ -730,6 +745,7 @@ export default function App({ appId, token }) {
                  onJoin={beginJoin} joinBusy={saving || meState === 'loading'}
                  emojiReactions={Boolean(feedCapabilities.emoji_reactions)}
                  replyReactions={Boolean(feedCapabilities.reply_reactions)}
+                 authorEdits={Boolean(feedCapabilities.author_edits)}
                  replyAttachments={Boolean(feedCapabilities.reply_attachments)}
                  boardTarget={boardTarget} onTargetHandled={finishBoardTarget}
                  composerMount={composerMount} scrollRef={boardScrollRef}

@@ -1,10 +1,15 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Chat, Trash, X,
+  Chat, X,
 } from '@openai/apps-sdk-ui/components/Icon'
+import { EditedMark, InlineEditor, OwnActions } from './OwnActions.jsx'
 import {
-  avatarHue, deletePost, getPeer, getReplies, initials,
+  editorHasChanges, editTargetShown, isEditTarget, postEditSettled, revokeLocalPreviews,
+  withoutReply, withPostEdit, withReplyEdit, withRestoredReply,
+} from './boardEdits.js'
+import {
+  avatarHue, deletePost, deleteReply, editBoardText, getPeer, getReplies, initials,
   postDateTime, postReply, publishPost, timeAgo,
 } from '../api.js'
 import {
@@ -27,7 +32,7 @@ import { reachedEarlierHistory } from './historyScroll.js'
 const MAX_POST_IMAGES = 4
 const GALLERY_BUDGET_BYTES = 960 * 1024
 import {
-  createParticipationIntent, participationActionLabel, participationStep,
+  createParticipationIntent, participationActionLabel, participationStep, TEXT_LIMITS,
 } from '../participation.js'
 
 const profileCache = new Map()
@@ -48,14 +53,16 @@ function rememberReplies(key, result) {
   }
 }
 
-function cachedReplies(postId, { force = false, background = false } = {}) {
+function cachedReplies(postId, { force = false, afterChange = false, background = false } = {}) {
   const key = String(postId)
   const existing = replyCache.get(key)
   const fresh = existing?.result && Date.now() - existing.updatedAt < REPLY_CACHE_TTL_MS
   if (!force && fresh) return Promise.resolve(existing.result)
   // A tap must not wait behind queued prefetches: only share an in-flight
-  // request that is at least as urgent as this one.
-  if (existing?.promise && (background || !existing.background)) return existing.promise
+  // request that is at least as urgent as this one. A read after a change
+  // (`afterChange`) must postdate it, so it never joins an earlier request;
+  // ordinary polls and reopened threads still share one.
+  if (!afterChange && existing?.promise && (background || !existing.background)) return existing.promise
 
   // A superseded request (a prefetch overtaken by a tap) must not overwrite
   // the entry its successor now owns.
@@ -252,16 +259,25 @@ export default function Board({
   composing, setComposing, canInteract, accountState, participationIntent, intentState,
   participationBusy, onJoin, joinBusy, onRetryIntent, onRequestParticipation,
   onCompleteParticipation, onDiscardParticipation, onPostConfirmed, emojiReactions = false, replyReactions = false,
-  replyAttachments = false,
+  replyAttachments = false, authorEdits = false,
   boardTarget, onTargetHandled,
   composerMount, scrollRef,
 }) {
   const [draft, setDraft] = useState('')
+  // One stable id per post draft, so a retry after a lost confirmation lands once.
+  const [postMessageId, setPostMessageId] = useState(null)
   const [posting, setPosting] = useState(false)
   const [pending, setPending] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [hiddenIds, setHiddenIds] = useState(() => new Set())
+  // Editing one item at a time: { postId, replyId, initial, text, saving }.
+  const [editing, setEditing] = useState(null)
+  // Confirmed post edits shown before the next feed refresh delivers them.
+  const [postEdits, setPostEdits] = useState({})
   const [selectedImages, setSelectedImages] = useState([])
+  // The feed as of now, for checks made after an await.
+  const feedRef = useRef(feed)
+  feedRef.current = feed
   const [reactionPickerFor, setReactionPickerFor] = useState(null)
   const [previewPost, setPreviewPost] = useState(null)
   const [replyPost, setReplyPost] = useState(null)
@@ -284,6 +300,9 @@ export default function Board({
   const lastScrollTop = useRef(null)
   const replyRequest = useRef(0)
   const replySendingRef = useRef(false)
+  const editorFieldRef = useRef(null)
+  // Reply deletes in flight; a poll that started before one could restore it.
+  const replyDeletingRef = useRef(0)
   // Start relaxed: the launch just delivered the feed, and every early poll
   // would queue ahead of avatars and history on the single service lane.
   const lastActivityAt = useRef(0)
@@ -303,6 +322,18 @@ export default function Board({
     () => restoreDeleteFocus.current,
   )
   replySendingRef.current = replySending
+
+  useEffect(() => {
+    setPostEdits((prior) => {
+      const ids = Object.keys(prior)
+      if (!ids.length) return prior
+      const posts = new Map(feed.map((post) => [String(post.id), post]))
+      const next = Object.fromEntries(ids
+        .filter((id) => posts.has(id) && !postEditSettled(posts.get(id), prior[id]))
+        .map((id) => [id, prior[id]]))
+      return Object.keys(next).length === ids.length ? prior : next
+    })
+  }, [feed])
   replyPostIdRef.current = replyPost?.id
 
   useEffect(() => {
@@ -371,6 +402,39 @@ export default function Board({
       replyDrafts.current.delete(replyDrafts.current.keys().next().value)
     }
   }, [replyPost?.id, replyDraft, replyImage, replyMessageId])
+
+  // A retained retry id whose reply has since landed (a timed-out send the
+  // thread now shows) is finished: clear the draft rather than resend it.
+  useEffect(() => {
+    if (!replyPost || !replyMessageId || replySending) return
+    if (replies.some((reply) => reply.id === replyMessageId && !reply.pending
+        && !reply.id.startsWith('local-'))) clearReplyDraft(replyPost.id)
+  }, [replyPost?.id, replyMessageId, replySending, replies])
+
+  // A retained post retry id whose post has since landed (a timed-out publish
+  // the feed now shows) is finished: clear the draft rather than resend it.
+  function clearLandedPostDraft() {
+    if (!postMessageId || posting || !feed.some((post) => post.id === postMessageId)) return
+    setDraft('')
+    revokeLocalPreviews(selectedImages)
+    setSelectedImages([])
+    setPostMessageId(null)
+  }
+  useEffect(clearLandedPostDraft, [postMessageId, posting, feed])
+
+  // A post deleted here or elsewhere takes its open thread with it.
+  useEffect(() => {
+    if (feedState === 'ready' && replyPost && !feed.some((post) => post.id === replyPost.id)) {
+      closeReplies()
+    }
+  }, [feed, feedState, replyPost?.id])
+
+  // An editor whose post or reply is no longer shown has nothing to save.
+  useEffect(() => {
+    if (editing && !editTargetShown(editing, { feed, hiddenIds, replyPostId: replyPost?.id, replies })) {
+      setEditing(null)
+    }
+  }, [editing?.postId, editing?.replyId, feed, hiddenIds, replyPost?.id, replies])
 
   useEffect(() => {
     if (boardTarget?.status !== 'ready' || openedTarget.current === boardTarget.requestId) return
@@ -461,7 +525,7 @@ export default function Board({
       setReplyError('')
     }
     try {
-      const result = await cachedReplies(post.id, { force: force || background, background })
+      const result = await cachedReplies(post.id, { force: force || background, afterChange: force, background })
       if (request !== replyRequest.current) return
       const loaded = result.replies || []
       setReplies(prior => reconcileReplies(loaded, prior))
@@ -483,6 +547,14 @@ export default function Board({
     setReplyDraft(saved?.text || '')
     setReplyImage(saved?.image || null)
     setReplyMessageId(saved?.id || null)
+  }
+
+  function clearReplyDraft(postId) {
+    replyDrafts.current.delete(postId)
+    if (replyPostIdRef.current !== postId) return
+    setReplyDraft('')
+    setReplyImage(null)
+    setReplyMessageId(null)
   }
 
   function changeReplyDraft(text) {
@@ -601,7 +673,7 @@ export default function Board({
     const tick = async () => {
       if (!alive) return
       if (document.visibilityState !== 'visible') return
-      if (replySendingRef.current) {
+      if (replySendingRef.current || replyDeletingRef.current) {
         schedule()
         return
       }
@@ -682,15 +754,12 @@ export default function Board({
         id: localId, attachment: image?.payload, thumbnail: image?.thumbnailPayload,
       })
       const confirmed = { ...optimistic, id: receipt.id || localId, pending: false }
-      replyDrafts.current.delete(post.id)
       if (replyPostIdRef.current === post.id) {
         setReplies((prior) => upsertReplyAttempt(
           prior.filter(reply => reply.id !== localId || !reply.pending), confirmed,
         ))
-        setReplyDraft('')
-        setReplyImage(null)
-        setReplyMessageId(null)
       }
+      clearReplyDraft(post.id)
       // Replace any pre-write request without discarding the confirmed write
       // if its fresh confirmation read fails or the thread is reopened.
       const key = String(post.id)
@@ -704,6 +773,12 @@ export default function Board({
       if (replyPostIdRef.current === post.id) {
         setReplies((prior) => prior.filter((reply) => reply.id !== localId || !reply.pending))
       }
+      if (error.status === 410) {
+        // The reply or its post was deleted: this draft can never land.
+        clearReplyDraft(post.id)
+        if (replyPostIdRef.current === post.id) loadReplies(post, { background: true, force: true })
+        onRefresh(true)
+      }
       showToast(error.status === 404
         ? 'Replies aren’t available on this server yet.'
         : error.message, 'error')
@@ -713,13 +788,19 @@ export default function Board({
     }
   }
 
+  async function refreshReactionTarget(target) {
+    if (!target.replyId) return onRefresh(true)
+    if (replyPost?.id !== target.postId) return false
+    return loadReplies(replyPost, { background: true, force: true })
+  }
+
   const { overrides: reactionOverrides, pending: reactionPending, toggle: toggleItemReaction } = useBoardReactions({
-    refreshTarget: async (target) => {
-      if (!target.replyId) return onRefresh(true)
-      if (replyPost?.id !== target.postId) return false
-      return loadReplies(replyPost, { background: true, force: true })
+    refreshTarget: refreshReactionTarget,
+    onError: (error, target) => {
+      showToast(error.message, 'error')
+      // The post or reply was deleted: show the board as it is now.
+      if (error.status === 410) refreshReactionTarget(target).catch(() => {})
     },
-    onError: (error) => showToast(error.message, 'error'),
     onSettled: (target, emoji) => {
       if (!target.replyId) onCompleteParticipation?.(createParticipationIntent('like', {
         postId: target.postId, emoji,
@@ -772,7 +853,7 @@ export default function Board({
       return
     }
     if (intent.kind === 'post') {
-      setDraft(intent.text || '')
+      changeDraft(intent.text || '')
       const saved = Array.isArray(intent.attachments) && intent.attachments.length
         ? intent.attachments
         : (intent.attachment ? [intent.attachment] : [])
@@ -805,6 +886,7 @@ export default function Board({
   }
 
   async function doDelete() {
+    if (deleteTarget?.reply) return doDeleteReply()
     const post = deleteTarget
     if (!post) return
     // The trigger is about to disappear. Do not restore focus to it: browsers
@@ -814,6 +896,7 @@ export default function Board({
     // the server rejects the deletion.
     setHiddenIds((prior) => new Set(prior).add(post.id))
     setDeleteTarget(null)
+    if (replyPostIdRef.current === post.id) closeReplies()
     try {
       await deletePost(post.id)
     } catch (error) {
@@ -828,6 +911,113 @@ export default function Board({
       return
     }
     onRefresh(true)
+  }
+
+  function updateReplies(postId, change) {
+    const key = String(postId)
+    if (replyPostIdRef.current === postId) {
+      // A reply load already in flight predates this change; drop its result.
+      replyRequest.current += 1
+      setReplies(change)
+    }
+    const cached = replyCache.get(key)?.result?.replies
+    if (cached) rememberReplies(key, { ...replyCache.get(key).result, replies: change(cached) })
+  }
+
+  function refreshOpenThread(post) {
+    if (replyPostIdRef.current === post.id) loadReplies(post, { background: true })
+  }
+
+  // Keep keyboard and screen-reader users in place when an editor or a reply
+  // they were acting on goes away.
+  function focusItem(postId, replyId) {
+    requestAnimationFrame(() => {
+      const target = (replyId && document.getElementById(`cn-reply-${replyId}`))
+        || document.getElementById(`cn-post-${postId}`)
+      target?.focus?.({ preventScroll: true })
+    })
+  }
+
+  async function doDeleteReply() {
+    const { post, reply } = deleteTarget
+    restoreDeleteFocus.current = false
+    setDeleteTarget(null)
+    updateReplies(post.id, (prior) => withoutReply(prior, reply.id))
+    focusItem(post.id)
+    replyDeletingRef.current += 1
+    try {
+      await deleteReply(post.id, reply.id)
+    } catch (error) {
+      updateReplies(post.id, (prior) => withRestoredReply(prior, reply))
+      showToast(error.message || 'This reply couldn’t be deleted.', 'error')
+      refreshOpenThread(post)
+      return
+    } finally {
+      replyDeletingRef.current -= 1
+    }
+    // A read that began before the delete may have restored it meanwhile.
+    updateReplies(post.id, (prior) => withoutReply(prior, reply.id))
+    refreshOpenThread(post)
+    onRefresh(true)
+  }
+
+  function closeEditor(postId, replyId) {
+    setEditing((current) => isEditTarget(current, postId, replyId) ? null : current)
+    focusItem(postId, replyId)
+  }
+
+  function startEdit(postId, reply, initial) {
+    // Another edit request must not discard text the author hasn't saved.
+    if (editorHasChanges(editing)) {
+      const field = editorFieldRef.current
+      field?.focus({ preventScroll: true })
+      field?.scrollIntoView?.({ block: 'nearest' })
+      return
+    }
+    setEditing({ postId, replyId: reply?.id || null, initial: initial || '', text: initial || '', saving: false })
+  }
+
+  function changeEdit(text) {
+    setEditing((current) => current ? { ...current, text } : current)
+  }
+
+  async function saveEdit(post, reply, text) {
+    const replyId = reply?.id || null
+    setEditing((current) => isEditTarget(current, post.id, replyId) ? { ...current, saving: true } : current)
+    try {
+      const result = await editBoardText(post.id, text, replyId)
+      const edit = { text: result.text ?? text, edited_at: result.edited_at }
+      if (reply) {
+        updateReplies(post.id, (prior) => withReplyEdit(prior, reply.id, edit))
+        refreshOpenThread(post)
+      } else if (typeof edit.edited_at === 'number') {
+        setPostEdits((prior) => ({ ...prior, [post.id]: edit }))
+      }
+      if (result.applied === false) {
+        showToast('A newer edit already exists, so this one wasn’t saved.', 'error')
+        onRefresh(true)
+      }
+      closeEditor(post.id, replyId)
+    } catch (error) {
+      showToast(error.message || 'Your edit couldn’t be saved.', 'error')
+      if (error.status === 410) {
+        // It was deleted meanwhile: there is nothing left to edit.
+        closeEditor(post.id, replyId)
+        if (reply) refreshOpenThread(post)
+        else onRefresh(true)
+        return
+      }
+      setEditing((current) => isEditTarget(current, post.id, replyId) ? { ...current, saving: false } : current)
+    }
+  }
+
+  function isEditing(postId, replyId = null) {
+    return isEditTarget(editing, postId, replyId)
+  }
+
+  function changeDraft(text) {
+    setDraft(text)
+    setPostMessageId(null)
   }
 
   function chooseImage(event) {
@@ -850,15 +1040,16 @@ export default function Board({
         previewUrl: URL.createObjectURL(file),
       })
     }
-    if (additions.length) setSelectedImages(prior => [...prior, ...additions])
+    if (additions.length) {
+      setSelectedImages(prior => [...prior, ...additions])
+      setPostMessageId(null)
+    }
   }
 
   function removeImage(index) {
+    setPostMessageId(null)
     setSelectedImages((prior) => {
-      const image = prior[index]
-      if (image?.file && image.previewUrl?.startsWith('blob:')) {
-        URL.revokeObjectURL(image.previewUrl)
-      }
+      revokeLocalPreviews([prior[index]])
       return prior.filter((_, i) => i !== index)
     })
   }
@@ -902,6 +1093,10 @@ export default function Board({
     const text = draft.trim()
     const images = selectedImages
     if (!text && !images.length) return
+    // Kept across a failure (the draft is restored unchanged) and cleared on
+    // success or any edit, like a reply's retry id.
+    const postId = postMessageId || crypto.randomUUID()
+    setPostMessageId(postId)
     markActivity()
     setPosting(true)
     const startedAt = Date.now() / 1000
@@ -937,9 +1132,12 @@ export default function Board({
       text, attachment, attachments, thumbnails,
     })
     try {
-      const receipt = await publishPost(text, attachment, attachments, thumbnails)
-      onPostConfirmed?.({
-        id: receipt.id,
+      const receipt = await publishPost(text, attachment, attachments, thumbnails, postId)
+      setPostMessageId(null)
+      // A retry of a post the feed already shows must not reset its counts,
+      // including one that landed while this request was in flight.
+      if (!feedRef.current.some((post) => post.id === (receipt.id || postId))) onPostConfirmed?.({
+        id: receipt.id || postId,
         host: me?.host,
         handle: me?.handle || '',
         text,
@@ -957,11 +1155,7 @@ export default function Board({
       onCompleteParticipation?.(completedIntent)
       // Release the local previews now that the post succeeded (on failure we
       // restore them for a retry, so only revoke on the happy path).
-      for (const image of images) {
-        if (image.file && image.previewUrl?.startsWith('blob:')) {
-          URL.revokeObjectURL(image.previewUrl)
-        }
-      }
+      revokeLocalPreviews(images)
     } catch (error) {
       setPending(null)
       setDraft(text)
@@ -1065,8 +1259,11 @@ export default function Board({
       )}
       {earlierError && <p className="cn-inline-error" role="alert">{earlierError} <button className="cn-btn cn-btn-secondary" type="button" onClick={loadEarlierPosts}>Try again</button></p>}
       <div className="cn-feed">
-        {chronologicalFeed.map((post) => {
+        {chronologicalFeed.map((feedPost) => {
+          const post = withPostEdit(feedPost, postEdits[feedPost.id])
           const replyCount = countFor(post)
+          const mine = canInteract && me?.host && post.host === me.host
+          const editingPost = isEditing(post.id)
           const threadOpen = replyPost?.id === post.id
           const togglePreview = canInteract
             ? () => setPreviewPost(previewPost?.id === post.id ? null : { id: post.id, host: post.host })
@@ -1083,16 +1280,12 @@ export default function Board({
                     <span className="cn-person-name">{post.handle ? `@${post.handle}` : 'Social member'}</span>
                     <span className="cn-post-dot" aria-hidden="true">·</span>
                     <span className="cn-meta">{postDateTime(post.created_at)}</span>
+                    <EditedMark editedAt={post.edited_at} />
                   </button>
-                  {canInteract && me?.host && post.host === me.host && (
-                    <button
-                      className="cn-post-delete"
-                      onClick={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }}
-                      aria-label="Delete message"
-                      title="Delete message"
-                    >
-                      <Trash aria-hidden="true" />
-                    </button>
+                  {mine && !editingPost && (
+                    <OwnActions kind="message" disabled={handoffBusy || participationBusy || Boolean(editing?.saving)}
+                      onEdit={authorEdits ? () => startEdit(post.id, null, post.text) : null}
+                      onDelete={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }} />
                   )}
                 </div>
                 <div className="cn-post-body">
@@ -1102,7 +1295,12 @@ export default function Board({
                                   onViewProfile={onOpenPerson} onMessage={onMessageUser}
                                   canMessage={canInteract && post.host !== me?.host} />
                 )}
-                {post.text && <RichText text={post.text} className="cn-post-copy" preview />}
+                {editingPost
+                  ? <InlineEditor kind="message" fieldRef={editorFieldRef} initial={editing.initial} value={editing.text} onChange={changeEdit}
+                      maxLength={TEXT_LIMITS.post} saving={editing.saving}
+                      allowEmpty={Boolean(post.attachment || post.attachments?.length)}
+                      onCancel={() => closeEditor(post.id, null)} onSave={(text) => saveEdit(post, null, text)} />
+                  : post.text && <RichText text={post.text} className="cn-post-copy" preview />}
                 <BoardImage
                   post={post}
                   onOpen={onOpenImage}
@@ -1142,7 +1340,11 @@ export default function Board({
                 {threadOpen && (
                   <section className="cn-inline-thread" id={`cn-thread-${post.id}`}
                            aria-label="Replies" onClick={(event) => event.stopPropagation()}>
-                    <div ref={replyScrollRef} className="cn-inline-replies" aria-live="polite">
+                    {/* Announce the count, not the rows: their relative times tick on every poll. */}
+                    <span className="cn-sr-only" role="status">
+                      {replyState === 'ready' ? `${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}` : ''}
+                    </span>
+                    <div ref={replyScrollRef} className="cn-inline-replies">
                       {replyState === 'loading' && <div className="cn-thread-loading" role="status">Loading replies…</div>}
                       {replyState === 'error' && (
                         <div className="cn-thread-loading">
@@ -1156,9 +1358,23 @@ export default function Board({
                           <div className="cn-reply-copy">
                             <div className="cn-reply-meta">
                               <strong>{reply.handle ? `@${reply.handle}` : 'Social member'}</strong>
-                              <span className="cn-time">{reply.pending ? 'Sending…' : timeAgo(reply.created_at)}</span>
+                              <span className="cn-time">
+                                {reply.pending ? 'Sending…' : timeAgo(reply.created_at)}
+                                <EditedMark editedAt={reply.edited_at} />
+                              </span>
+                              {canInteract && me?.host && reply.host === me.host && !reply.pending
+                                && !reply.id.startsWith('local-') && !isEditing(post.id, reply.id) && (
+                                <OwnActions kind="reply" compact disabled={handoffBusy || participationBusy || Boolean(editing?.saving)}
+                                  onEdit={authorEdits ? () => startEdit(post.id, reply, reply.text) : null}
+                                  onDelete={() => { restoreDeleteFocus.current = true; setDeleteTarget({ post, reply }) }} />
+                              )}
                             </div>
-                            <RichText text={reply.text} />
+                            {isEditing(post.id, reply.id)
+                              ? <InlineEditor kind="reply" fieldRef={editorFieldRef} initial={editing.initial} value={editing.text} onChange={changeEdit}
+                                  maxLength={TEXT_LIMITS.reply} saving={editing.saving}
+                                  allowEmpty={Boolean(reply.attachment)}
+                                  onCancel={() => closeEditor(post.id, reply.id)} onSave={(text) => saveEdit(post, reply, text)} />
+                              : <RichText text={reply.text} />}
                             <ReplyImage postId={post.id} reply={reply} onOpen={onOpenImage}
                               onUnavailable={(error) => showToast(error.message, 'error')} />
                             {replyReactions && !reply.pending && !reply.id.startsWith('local-') && <ReactionControls item={reply}
@@ -1179,7 +1395,7 @@ export default function Board({
                     <ComposerFooter scrollRef={replyScrollRef} className="cn-reply-footer">
                     <Composer className="cn-reply-composer" onSubmit={sendReply}
                       inputRef={replyInputRef} value={replyDraft} onChange={changeReplyDraft}
-                      maxLength={1000} placeholder="Post your reply" label="Post your reply"
+                      maxLength={TEXT_LIMITS.reply} placeholder="Post your reply" label="Post your reply"
                       disabled={replySending || handoffBusy || participationBusy || preparingReplyImage}
                       sendDisabled={replySending || handoffBusy || participationBusy || preparingReplyImage || (!replyDraft.trim() && !replyImage)}
                       attachmentAction={<ComposerAttachmentButton onClick={() => replyFileRef.current?.click()}
@@ -1235,8 +1451,8 @@ export default function Board({
           <input ref={fileRef} className="cn-file-input" type="file" accept="image/*" multiple
                  onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
           <Composer className="cn-board-composer" onSubmit={submitPost}
-            inputRef={composerInputRef} value={draft} onChange={setDraft}
-            maxLength={4000} placeholder="Message everyone…" label="Message everyone"
+            inputRef={composerInputRef} value={draft} onChange={changeDraft}
+            maxLength={TEXT_LIMITS.post} placeholder="Message everyone…" label="Message everyone"
             disabled={posting || handoffBusy || participationBusy}
             sendDisabled={!canInteract || posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length)}
             sendLabel={accountState === 'loading' ? 'Checking your account…' : 'Send message'}
@@ -1253,15 +1469,16 @@ export default function Board({
       </ComposerFooter>, composerMount)}
 
       {deleteTarget && (
-        <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="Delete message"
+        <div className="cn-scrim" role="dialog" aria-modal="true" aria-labelledby="cn-delete-title"
              onClick={() => setDeleteTarget(null)}>
           <div ref={deleteRef} tabIndex={-1} className="cn-sheet cn-confirm-sheet"
                onClick={(e) => e.stopPropagation()}>
             <div className="cn-grabber" aria-hidden="true" />
-            <h3 className="cn-sheet-title">Delete this message?</h3>
+            <h3 id="cn-delete-title" className="cn-sheet-title">{deleteTarget.reply ? 'Delete this reply?' : 'Delete this message?'}</h3>
             <p className="cn-sheet-body">
-              This removes your message from the community chat for everyone. This
-              can’t be undone.
+              {deleteTarget.reply
+                ? 'This removes your reply from the conversation for everyone. This can’t be undone.'
+                : 'This removes your message from the community chat for everyone. This can’t be undone.'}
             </p>
             <div className="cn-sheet-actions">
               <button className="cn-btn cn-btn-secondary" onClick={() => setDeleteTarget(null)}>

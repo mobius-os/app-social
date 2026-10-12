@@ -139,11 +139,102 @@ async def owner_profile() -> dict | None:
   return profile if isinstance(profile, dict) else None
 
 
+# Requests are forked from a preloaded process, so an in-memory cache would die
+# with each request. The installed-app list (~43 KB, p50 ~300 ms) changes only
+# on install/uninstall, while /me and every public /actor probe need two small
+# facts from it; keep just those facts on disk for a short freshness window.
+APP_DIRECTORY_CACHE_PATH = SERVER_ROOT / "cache" / "app-directory.json"
+APP_DIRECTORY_CACHE_TTL_SECONDS = 600
+
+
+def _published_apps(apps: list) -> list[dict]:
+  public_apps = []
+  for app in sorted(
+    (item for item in apps if isinstance(item, dict)),
+    key=lambda item: item.get("id") if isinstance(item.get("id"), int) else 0,
+  ):
+    distribution = app.get("distribution_manifest")
+    name = app.get("name")
+    description = app.get("description")
+    if (
+      not isinstance(distribution, dict)
+      or distribution.get("kind") != "published"
+      or not isinstance(name, str)
+      or not name.strip()
+    ):
+      continue
+    public_apps.append({
+      "name": name.strip()[:80],
+      "description": description[:140] if isinstance(description, str) else "",
+    })
+    if len(public_apps) == 8:
+      break
+  return public_apps
+
+
+def _read_app_directory_cache() -> dict | None:
+  try:
+    cached = json.loads(APP_DIRECTORY_CACHE_PATH.read_text())
+  except (OSError, ValueError):
+    return None
+  if not isinstance(cached, dict):
+    return None
+  fetched_at = cached.get("fetched_at")
+  if not isinstance(fetched_at, (int, float)):
+    return None
+  if not 0 <= time.time() - fetched_at < APP_DIRECTORY_CACHE_TTL_SECONDS:
+    return None
+  # A missing Identity app is not cached: the join flow must notice an install
+  # immediately rather than after the freshness window.
+  if not isinstance(cached.get("identity_app_id"), int):
+    return None
+  return cached
+
+
+async def app_directory_facts() -> dict | None:
+  """Return ``{identity_app_id, public_apps}`` from a fresh cache or the platform.
+
+  ``None`` means the platform list was unreachable; callers keep their prior
+  degraded behavior for that case. Failures are not cached.
+  """
+  cached = _read_app_directory_cache()
+  if cached is not None:
+    return cached
+  from service_io import atomic_write
+  try:
+    response = await platform_request("GET", "/api/apps/")
+  except httpx.HTTPError:
+    return None
+  if response.status_code >= 400:
+    return None
+  try:
+    apps = response.json()
+  except ValueError:
+    return None
+  if not isinstance(apps, list):
+    return None
+  identity = next(
+    (app for app in apps if isinstance(app, dict) and app.get("slug") == "identity"),
+    None,
+  )
+  identity_id = identity.get("id") if isinstance(identity, dict) else None
+  facts = {
+    "fetched_at": time.time(),
+    "identity_app_id": identity_id if isinstance(identity_id, int) else None,
+    "public_apps": _published_apps(apps),
+  }
+  try:
+    atomic_write(APP_DIRECTORY_CACHE_PATH, json.dumps(facts))
+  except OSError:
+    pass
+  return facts
+
+
 async def public_actor_metadata() -> dict:
   """Read public profile facts from the platform records that own them."""
-  identity_response, apps_response = await asyncio.gather(
+  identity_response, directory = await asyncio.gather(
     platform_request("GET", "/api/identity"),
-    platform_request("GET", "/api/apps/"),
+    app_directory_facts(),
     return_exceptions=True,
   )
   member_since = None
@@ -155,46 +246,17 @@ async def public_actor_metadata() -> dict:
     value = identity.get("member_since") if isinstance(identity, dict) else None
     if isinstance(value, str) and len(value) <= 64:
       member_since = value
-
-  public_apps = []
-  if isinstance(apps_response, httpx.Response) and apps_response.status_code < 400:
-    try:
-      apps = apps_response.json()
-    except ValueError:
-      apps = None
-    if isinstance(apps, list):
-      for app in sorted(
-        (item for item in apps if isinstance(item, dict)),
-        key=lambda item: item.get("id") if isinstance(item.get("id"), int) else 0,
-      ):
-        distribution = app.get("distribution_manifest")
-        name = app.get("name")
-        description = app.get("description")
-        if (
-          not isinstance(distribution, dict)
-          or distribution.get("kind") != "published"
-          or not isinstance(name, str)
-          or not name.strip()
-        ):
-          continue
-        public_apps.append({
-          "name": name.strip()[:80],
-          "description": description[:140] if isinstance(description, str) else "",
-        })
-        if len(public_apps) == 8:
-          break
-  return {"member_since": member_since, "apps": public_apps}
+  public_apps = directory.get("public_apps") if isinstance(directory, dict) else None
+  return {
+    "member_since": member_since,
+    "apps": public_apps if isinstance(public_apps, list) else [],
+  }
 
 
 async def identity_app_id() -> int | None:
-  response = await platform_request("GET", "/api/apps/")
-  if response.status_code >= 400:
-    return None
-  payload = response.json()
-  if not isinstance(payload, list):
-    return None
-  match = next((app for app in payload if app.get("slug") == "identity"), None)
-  return match.get("id") if isinstance(match, dict) else None
+  directory = await app_directory_facts()
+  value = directory.get("identity_app_id") if directory else None
+  return value if isinstance(value, int) else None
 
 
 async def resolve_handle_hosts(handle: str) -> list[str] | None:

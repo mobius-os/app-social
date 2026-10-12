@@ -42,20 +42,13 @@ function Quote({ reply }) {
 }
 
 export default function MessageBubble({
-  message, mine, tick, avatar, indent, conversationPath, onOpenImage, onImageUnavailable, onReply,
+  message, mine, author, tick, avatar, indent, conversationPath, onOpenImage, onImageUnavailable, onReply,
 }) {
-  const canReply = !!onReply && !String(message.id || '').startsWith('local-') && message.status !== 'sending'
-
-  const replyButton = canReply && (
-    <button className="cn-bubble-reply" type="button" onClick={onReply} aria-label="Reply to message">
-      <Reply aria-hidden="true" />
-    </button>
-  )
+  const canReply = !!onReply && message.status !== 'sending'
 
   return (
     <div className={`cn-message-line ${mine ? 'is-mine' : 'is-theirs'}${indent ? ' no-avatar' : ''}`}>
       {!mine && <span className="cn-message-avatar">{avatar}</span>}
-      {mine && replyButton}
       <div
         className={`cn-bubble ${mine ? 'is-mine' : 'is-theirs'}${message.status === 'failed' ? ' is-failed' : ''}${message.attachment ? ' has-attachment' : ''}`}
       >
@@ -65,7 +58,13 @@ export default function MessageBubble({
         {message.text && <RichText className="cn-bubble-copy" text={message.text} />}
         <span className="cn-bubble-time">{message.time}{tick}</span>
       </div>
-      {!mine && replyButton}
+      {/* One reading order for every bubble; CSS places your own reply first. */}
+      {canReply && (
+        <button className="cn-bubble-reply" type="button" onClick={onReply}
+                aria-label={mine ? 'Reply to your message' : author ? `Reply to ${handleLabel(author)}` : 'Reply to message'}>
+          <Reply aria-hidden="true" />
+        </button>
+      )}
     </div>
   )
 }

@@ -1116,6 +1116,21 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
         self.assertEqual(actor["member_since"], identity_payload["member_since"])
         self.assertEqual(actor["apps"], [{"name": "Shared", "description": "public app"}])
         self.assertEqual(set(seen_paths), {"/api/identity", "/api/apps/"})
+        # Peer probes reuse the cached app-directory facts instead of
+        # downloading the whole installed-app list again.
+        apps_payload.append({"id": 3, "slug": "identity", "name": "You"})
+        seen_paths.clear()
+        actor = self.call(
+          root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",
+        )["body"]
+        self.assertEqual(actor["apps"], [{"name": "Shared", "description": "public app"}])
+        # The two reads run concurrently, so only their set and count are stable.
+        self.assertEqual(sorted(seen_paths), ["/api/apps/", "/api/identity"])
+        seen_paths.clear()
+        self.call(
+          root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",
+        )
+        self.assertEqual(seen_paths, ["/api/identity"])
     finally:
       server.shutdown()
       thread.join()

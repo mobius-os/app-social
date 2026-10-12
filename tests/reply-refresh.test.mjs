@@ -310,3 +310,49 @@ test('a failed send removes only its optimistic row and restores the reply draft
   assert.equal(view.context.replySending, false)
   assert.deepEqual(view.errors, ['Reply could not be sent'])
 })
+
+test('a reply whose post or retry id was deleted clears its draft and refreshes', async () => {
+  let refreshed = 0
+  const view = thread({ image: photo, send: () => {
+    throw Object.assign(new Error('This reply was deleted.'), { status: 410 })
+  } })
+  view.context.onRefresh = async () => { refreshed += 1 }
+  view.context.replyMessageId = 'deleted-retry'
+  view.context.replyDrafts.current.set(view.post.id, { text: 'My reply', image: photo, id: 'deleted-retry' })
+  await view.send()
+  assert.equal(view.context.replyDraft, '')
+  assert.equal(view.context.replyImage, null)
+  assert.equal(view.context.replyMessageId, null)
+  assert.equal(view.context.replyDrafts.current.has(view.post.id), false)
+  assert.equal(refreshed, 1)
+  assert.equal(view.reads, 1, 'the open thread is read again')
+  assert.deepEqual(view.errors, ['This reply was deleted.'])
+})
+
+test('a forced read never joins a request that started before it', async () => {
+  let releaseFirst
+  const view = thread({ count: 1, read: (number) => number === 1
+    ? new Promise(resolve => { releaseFirst = resolve })
+    : { replies: [] } })
+  const first = view.load()
+  const forced = view.load({ background: true, force: true })
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve()
+  assert.equal(view.reads, 2)
+  releaseFirst({ replies: [reply('deleted')] })
+  await Promise.all([first, forced])
+  assert.deepEqual(view.ids, [], 'the stale read cannot bring the deleted reply back')
+})
+
+test('an ordinary background poll shares a read already in flight', async () => {
+  let release
+  const view = thread({ count: 1, read: (number) => number === 1
+    ? new Promise(resolve => { release = resolve })
+    : { replies: [] } })
+  const first = view.load()
+  const poll = view.load({ background: true })
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve()
+  assert.equal(view.reads, 1, 'polls do not add duplicate reply reads on the service lane')
+  release({ replies: [reply('kept')] })
+  await Promise.all([first, poll])
+  assert.deepEqual(view.ids, ['kept'])
+})

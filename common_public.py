@@ -493,6 +493,8 @@ class CommonPublicStore:
         break
     post["reply_authors"] = reply_authors
     post.pop("_reaction_replays", None)
+    post.pop("_deleted_replies", None)
+    post.pop("_edit_clock", None)
     return post
 
   def _read_board_files(
@@ -925,6 +927,9 @@ class CommonPublicStore:
     with self._mutation_lock(self._board_lock, "board"):
       path = self.board_dir() / f"{post['id']}.json"
       if path.is_file():
+        # A stable retry confirms its own post; an id is never shared.
+        if self._load_object(path).get("host") != post.get("host"):
+          raise HTTPException(status_code=409, detail="Post id already belongs to another author.")
         return False
       if self._board_count() >= BOARD_POST_LIMIT:
         raise HTTPException(status_code=507, detail="Board is full.")
@@ -946,10 +951,7 @@ class CommonPublicStore:
         record["attachment"] = {
           "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
         }
-      owns_dirty_marker = self._mark_board_index_dirty()
-      atomic_write(path, json.dumps(record))
-      if self._refresh_board_index(record, path) and owns_dirty_marker:
-        self._clear_board_index_dirty()
+      self._write_board_record(record, path)
       return True
 
   def toggle_like(
@@ -992,6 +994,20 @@ class CommonPublicStore:
       for emoji in BOARD_REACTION_EMOJIS if reactions.get(emoji)
     ]
 
+  @staticmethod
+  def _board_target(post: dict, reply_id: str | None) -> dict:
+    """The post itself, or the reply with ``reply_id`` inside it."""
+    if reply_id is None:
+      return post
+    replies = post.get("replies")
+    target = next(
+      (reply for reply in replies if isinstance(reply, dict) and reply.get("id") == reply_id),
+      None,
+    ) if isinstance(replies, list) else None
+    if target is None:
+      raise HTTPException(status_code=404, detail="Unknown reply.")
+    return target
+
   def toggle_reaction(
     self, post_id: str, host: str, emoji: str,
     *, reply_id: str | None = None, replay_token: str | None = None,
@@ -1008,15 +1024,7 @@ class CommonPublicStore:
       if not path.is_file():
         raise HTTPException(status_code=404, detail="Unknown post.")
       post = self._load_object(path)
-      target = post
-      if reply_id is not None:
-        replies = post.get("replies")
-        target = next(
-          (reply for reply in replies if isinstance(reply, dict) and reply.get("id") == reply_id),
-          None,
-        ) if isinstance(replies, list) else None
-        if target is None:
-          raise HTTPException(status_code=404, detail="Unknown reply.")
+      target = self._board_target(post, reply_id)
       reactions = self._reaction_hosts(target)
       hosts = reactions.setdefault(emoji, {})
       target["reactions"] = reactions
@@ -1052,10 +1060,7 @@ class CommonPublicStore:
         del hosts[host]
       else:
         hosts[host] = now
-      owns_dirty_marker = self._mark_board_index_dirty()
-      atomic_write(path, json.dumps(post))
-      if self._refresh_board_index(post, path) and owns_dirty_marker:
-        self._clear_board_index_dirty()
+      self._write_board_record(post, path)
       # Only a newly added reaction notifies the target's author, never a
       # removal or replay.
       return {
@@ -1102,8 +1107,10 @@ class CommonPublicStore:
       )
       if existing is not None:
         # A stable retry may confirm the same reply, never replace another
-        # author's text or media under its id.
-        if (existing.get("host") != host or existing.get("text") != text
+        # author's text or media under its id. Once the author has edited it,
+        # a retry of the original send differs only in that edited text.
+        if (existing.get("host") != host
+            or (existing.get("text") != text and "_edit_clock" not in existing)
             or existing.get("attachment_sha256") != digest
             or existing.get("attachment") != attachment_meta
             or existing.get("thumbnail_sha256") != thumbnail_digest):
@@ -1113,6 +1120,9 @@ class CommonPublicStore:
           "author_host": author_host, "activity": False,
           "id": reply_id, "attachment": existing.get("attachment"),
         }
+      tombstones = post.get("_deleted_replies")
+      if isinstance(tombstones, list) and reply_id in tombstones:
+        raise HTTPException(status_code=410, detail="This reply was deleted.")
       if len(replies) >= BOARD_REPLY_LIMIT:
         raise HTTPException(status_code=507, detail="Post reply limit reached.")
       if attachment is not None:
@@ -1147,15 +1157,99 @@ class CommonPublicStore:
         except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
           pass
       replies.append(record)
-      owns_dirty_marker = self._mark_board_index_dirty()
-      atomic_write(path, json.dumps(post))
-      if self._refresh_board_index(post, path) and owns_dirty_marker:
-        self._clear_board_index_dirty()
+      self._write_board_record(post, path)
       return {
         "status": "ok", "reply_count": len(replies),
         "author_host": author_host, "activity": True,
         "id": reply_id, "attachment": record.get("attachment"),
       }
+
+  def _write_board_record(self, post: dict, path: Path) -> None:
+    """Commit one post record and mirror it into the board index (lock held)."""
+    owns_dirty_marker = self._mark_board_index_dirty()
+    atomic_write(path, json.dumps(post))
+    if self._refresh_board_index(post, path) and owns_dirty_marker:
+      self._clear_board_index_dirty()
+
+  def delete_reply(self, post_id: str, reply_id: str, host: str) -> dict:
+    """Remove one reply its own author asked to delete, with its media.
+
+    Like `delete_post`, this is a deliberate author action and idempotent. The
+    id is remembered so a delayed retry of the original reply cannot bring the
+    deleted reply back. That list keeps only the newest BOARD_REPLY_LIMIT ids
+    per post, so a very old deleted id can be forgotten. An older host release
+    reading these records neither hides the list nor checks it: after a rollback,
+    a draft id the author's Social still holds could recreate the reply, because
+    the relay signs every retry afresh rather than replaying the old envelope.
+    """
+    try:
+      self._ensure_board_index()
+    except sqlite3.Error:
+      self._board_index_ready = False
+    with self._mutation_lock(self._board_lock, "board"):
+      path = self.board_dir() / f"{post_id}.json"
+      if not path.is_file():
+        return {"status": "deleted", "reply_count": 0}
+      post = self._load_object(path)
+      replies = post.get("replies")
+      if not isinstance(replies, list):
+        replies = []
+      target = next((reply for reply in replies if isinstance(reply, dict)
+                     and reply.get("id") == reply_id), None)
+      if target is None:
+        return {"status": "deleted", "reply_count": len(replies)}
+      if target.get("host") != host:
+        raise HTTPException(
+          status_code=403, detail="Only the author host may delete this reply.",
+        )
+      post["replies"] = [reply for reply in replies if reply is not target]
+      tombstones = post.get("_deleted_replies")
+      if not isinstance(tombstones, list):
+        tombstones = []
+      post["_deleted_replies"] = (tombstones + [reply_id])[-BOARD_REPLY_LIMIT:]
+      self._write_board_record(post, path)
+      for directory in (self.reply_media_dir(), self.reply_thumbnail_dir()):
+        for extension in ATTACHMENT_MIME_EXT.values():
+          (directory / post_id / f"{reply_id}.{extension}").unlink(missing_ok=True)
+      return {"status": "deleted", "reply_count": len(post["replies"])}
+
+  def edit_text(
+    self, post_id: str, reply_id: str | None, host: str, text: str, edited_at: float,
+  ) -> dict:
+    """Replace the text of one post or reply on behalf of its author.
+
+    Edits are ordered by their signed time: an older or replayed edit never
+    overwrites a newer one. Media is unchanged, so text may be empty only when
+    the post or reply carries an image.
+    """
+    try:
+      self._ensure_board_index()
+    except sqlite3.Error:
+      self._board_index_ready = False
+    with self._mutation_lock(self._board_lock, "board"):
+      path = self.board_dir() / f"{post_id}.json"
+      if not path.is_file():
+        raise HTTPException(status_code=404, detail="Unknown post.")
+      post = self._load_object(path)
+      target = self._board_target(post, reply_id)
+      if target.get("host") != host:
+        raise HTTPException(status_code=403, detail="Only the author may edit this.")
+      has_media = bool(target.get("attachment") or target.get("attachments"))
+      if not text.strip() and not has_media:
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+      # Order by signed time on every accepted edit, including one that leaves
+      # the text unchanged, so a delayed older edit can never win afterwards.
+      clock = target.get("_edit_clock", target.get("edited_at"))
+      if isinstance(clock, (int, float)) and edited_at <= clock:
+        return {"status": "ok", "applied": False, "text": target.get("text", ""),
+                "edited_at": target.get("edited_at")}
+      target["_edit_clock"] = edited_at
+      if target.get("text") != text:
+        target["text"] = text
+        target["edited_at"] = edited_at
+      self._write_board_record(post, path)
+      return {"status": "ok", "applied": True, "text": target.get("text", ""),
+              "edited_at": target.get("edited_at")}
 
   def get_replies(self, post_id: str, viewer: str | None = None) -> dict:
     path = self.board_dir() / f"{post_id}.json"
@@ -1173,6 +1267,7 @@ class CommonPublicStore:
       reactions = self._reaction_hosts(item)
       item.pop("likes", None)
       item.pop("_reaction_replays", None)
+      item.pop("_edit_clock", None)
       item.pop("attachment_sha256", None)
       item.pop("thumbnail_sha256", None)
       item["reactions"] = self._public_reactions(reactions, viewer)
@@ -1397,7 +1492,7 @@ def read_board_page(
     if position is not None:
       next_cursor = _encode_board_cursor(*position)
   return {
-    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True},
+    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True},
     "posts": posts,
     "next_cursor": next_cursor,
   }
@@ -1704,6 +1799,40 @@ def create_public_router(
     if not store.is_member(envelope["from"]):
       raise HTTPException(status_code=403, detail="Join Social first.")
     return store.delete_post(post_id, envelope["from"])
+
+  # Reply deletion and edits use their own envelope types so an older host
+  # rejects them (400/404) instead of reading them as a whole-post delete.
+  @router.post("/board/reply/delete")
+  async def delete_reply_from_board(request: Request):
+    envelope = await read_envelope(request)
+    if envelope.get("v") != 0 or envelope.get("type") != "board_reply_delete":
+      raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+    post_id = envelope.get("post_id")
+    reply_id = envelope.get("reply_id")
+    if not valid_id(post_id) or not valid_id(reply_id):
+      raise HTTPException(status_code=400, detail="Post or reply id is invalid.")
+    await verifier.verify_envelope(envelope)
+    if not store.is_member(envelope["from"]):
+      raise HTTPException(status_code=403, detail="Join Social first.")
+    return store.delete_reply(post_id, reply_id, envelope["from"])
+
+  @router.post("/board/edit")
+  async def edit_on_board(request: Request):
+    envelope = await read_envelope(request)
+    if envelope.get("v") != 0 or envelope.get("type") != "board_edit":
+      raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+    post_id = envelope.get("post_id")
+    reply_id = envelope.get("reply_id")
+    if not valid_id(post_id) or (reply_id is not None and not valid_id(reply_id)):
+      raise HTTPException(status_code=400, detail="Post or reply id is invalid.")
+    text = envelope.get("text")
+    max_chars = MAX_POST_TEXT_CHARS if reply_id is None else MAX_REPLY_TEXT_CHARS
+    if not isinstance(text, str) or len(text) > max_chars:
+      raise HTTPException(status_code=400, detail="Text is invalid.")
+    await verifier.verify_envelope(envelope)
+    if not store.is_member(envelope["from"]):
+      raise HTTPException(status_code=403, detail="Join Social first.")
+    return store.edit_text(post_id, reply_id, envelope["from"], text, envelope["sent_at"])
 
   @router.post("/board")
   async def post_to_board(request: Request):

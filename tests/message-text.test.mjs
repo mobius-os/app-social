@@ -16,3 +16,11 @@ test('message text and link descendants remain selectable with legible links on 
   assert.match(CSS, /\.cn-bubble-copy a \{ color: inherit; text-decoration: underline;/)
   assert.match(CSS, /\.cn-bubble-copy \{[^}]*margin: 0;/)
 })
+
+test('selected text stays visible, including inside accent-filled own bubbles', () => {
+  const root = CSS.slice(0, CSS.indexOf('/* /mobius-ui:Root */'))
+  assert.doesNotMatch(root, /::selection/, 'Social-specific selection rules stay below the shared Root block')
+  assert.match(CSS, /\.cn-root ::selection \{ background: color-mix\(in srgb, var\(--accent\) 48%, transparent\); color: var\(--text\); \}/)
+  // An accent tint would vanish on the accent fill, so own bubbles invert it.
+  assert.match(CSS, /\.cn-bubble\.is-mine ::selection \{ background: var\(--accent-fg\); color: var\(--accent\); \}/)
+})

@@ -120,6 +120,7 @@ PEER_AVATAR_BATCH_TIMEOUT_S = 12
 # Capability discovery and a signed Community write share one budget, leaving room for
 # service startup and a useful error before the 15-second process ceiling.
 COMMUNITY_WRITE_TIMEOUT_S = 13
+DIRECT_DELIVERY_TIMEOUT_S = 12.5
 # Peer avatars are re-encoded to a small validated raster before caching, so a
 # malicious raster never reaches the browser and cached blobs stay tiny.
 AVATAR_MAX_SIDE = 128
@@ -128,6 +129,12 @@ AVATAR_MAX_PIXELS = 8_000_000
 # case the post is deleted.
 OWNER_BOARD_IMAGE_CACHE = "private, max-age=86400"
 BOARD_MEDIA_CACHE_TTL_S = 24 * 3600
+# Peer board media is a regenerable cache. The TTL only decides when a cached
+# file is refreshed while its peer is reachable; an expired copy is still served
+# when the peer is offline, so age alone never evicts. The byte cap bounds
+# growth with the number of peers by evicting least-recently used full-size
+# originals first, then thumbnails (the board's fast path).
+BOARD_MEDIA_CACHE_MAX_BYTES = 16 * 1024 * 1024
 REQUEST_STATES = {"pending", "accepted", "declined", "blocked"}
 
 
@@ -299,6 +306,47 @@ def _peer_board_media_dir() -> Path:
 def _peer_board_media_name(host: str, post_id: str) -> str:
   safe_host = re.sub(r"[^a-z0-9.-]", "_", host)
   return f"{safe_host}-{post_id}"
+
+
+def _mark_board_media_used(path: Path) -> None:
+  """Record a cache hit for LRU eviction without touching freshness.
+
+  Recency lives in atime, set explicitly so relatime/noatime mounts don't hide
+  it; mtime stays the fetch time that the freshness TTL reads.
+  """
+  try:
+    stat = path.stat()
+    os.utime(path, (time.time(), stat.st_mtime))
+  except OSError:
+    pass
+
+
+def _evict_peer_board_media(cache_dir: Path, keep: Path) -> None:
+  """Bring the cache under its byte cap, never on age alone.
+
+  Full-size originals go before thumbnails, least recently used first, so an
+  offline peer's older photos keep serving from cache until space is needed.
+  """
+  entries = []
+  for path in cache_dir.iterdir():
+    if path.name.startswith(".") or not path.is_file() or path == keep:
+      continue
+    try:
+      stat = path.stat()
+    except OSError:
+      continue
+    last_used = max(stat.st_atime, stat.st_mtime)
+    is_thumbnail = path.stem.endswith("-thumb")
+    entries.append((is_thumbnail, last_used, stat.st_size, path))
+  try:
+    total = keep.stat().st_size + sum(entry[2] for entry in entries)
+  except OSError:
+    return
+  for _is_thumbnail, _last_used, size, path in sorted(entries):
+    if total <= BOARD_MEDIA_CACHE_MAX_BYTES:
+      break
+    path.unlink(missing_ok=True)
+    total -= size
 
 
 def _own_host() -> str:
@@ -856,63 +904,72 @@ async def _attempt_direct_delivery(app, peer_host: str, message_id: str) -> dict
   encrypted = bool(record.get("encrypted"))
   status = "failed"
   detail = "The peer could not be reached."
+  phase = "discovery"
   try:
-    attachment = _stored_attachment(app, peer_host, record)
-    actor = await _fetch_actor(peer_host)
-    identity = _load_identity()
-    envelope = {
-      "v": 0,
-      "type": "message",
-      "id": message_id,
-      "from": _own_host(),
-      "to": peer_host,
-      "text": record.get("text") or "",
-      # Transport signatures expire; renew this timestamp on every attempt
-      # while preserving the authored message id and local creation time.
-      "sent_at": time.time(),
-    }
-    encryption_key = actor.get("encryption_key")
-    peer_encrypts = (
-      isinstance(encryption_key, dict)
-      and encryption_key.get("alg") == "x25519"
-    )
-    if encrypted and not peer_encrypts:
-      raise ValueError("The peer no longer publishes its encryption key.")
-    if peer_encrypts:
-      recipient_key_b64 = encryption_key.get("key_b64")
-      if not isinstance(recipient_key_b64, str) or not recipient_key_b64:
-        raise ValueError("The peer published no valid encryption key.")
-      # Once an attempt selects encryption, persist that policy before the
-      # network side effect. A process exit after the peer accepts the message
-      # must never let an expired-lease retry downgrade it to plaintext.
-      record = await _require_encrypted_delivery(
-        app, peer_host, message_id, attempt_id,
+    # The platform allows 15 seconds for the whole service call. Discovery
+    # and signed write share one budget, leaving time to persist the outcome.
+    async with asyncio.timeout(DIRECT_DELIVERY_TIMEOUT_S):
+      attachment = _stored_attachment(app, peer_host, record)
+      actor = await _fetch_actor(peer_host)
+      identity = _load_identity()
+      envelope = {
+        "v": 0,
+        "type": "message",
+        "id": message_id,
+        "from": _own_host(),
+        "to": peer_host,
+        "text": record.get("text") or "",
+        # Transport signatures expire; renew this timestamp on every attempt
+        # while preserving the authored message id and local creation time.
+        "sent_at": time.time(),
+      }
+      encryption_key = actor.get("encryption_key")
+      peer_encrypts = (
+        isinstance(encryption_key, dict)
+        and encryption_key.get("alg") == "x25519"
       )
-      encrypted = True
-      envelope["enc"] = _seal_dm(
-        message_id, recipient_key_b64, text=envelope["text"],
-        attachment=attachment[0] if attachment is not None else None,
-        reply_to=record.get("reply_to"),
+      if encrypted and not peer_encrypts:
+        raise ValueError("The peer no longer publishes its encryption key.")
+      if peer_encrypts:
+        recipient_key_b64 = encryption_key.get("key_b64")
+        if not isinstance(recipient_key_b64, str) or not recipient_key_b64:
+          raise ValueError("The peer published no valid encryption key.")
+        # Once an attempt selects encryption, persist that policy before the
+        # network side effect. A process exit after the peer accepts the message
+        # must never let an expired-lease retry downgrade it to plaintext.
+        record = await _require_encrypted_delivery(
+          app, peer_host, message_id, attempt_id,
+        )
+        encrypted = True
+        envelope["enc"] = _seal_dm(
+          message_id, recipient_key_b64, text=envelope["text"],
+          attachment=attachment[0] if attachment is not None else None,
+          reply_to=record.get("reply_to"),
+        )
+        envelope["text"] = ""
+        encrypted = True
+      else:
+        if attachment is not None:
+          envelope["attachment"] = attachment[0]
+        if record.get("reply_to") is not None:
+          envelope["reply_to"] = record["reply_to"]
+      envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+      phase = "write"
+      response = await _post_signed_envelope(
+        _peer_service_url(peer_host, "inbox"), envelope,
+        max_response_bytes=MAX_ENVELOPE_BYTES,
       )
-      envelope["text"] = ""
-      encrypted = True
-    else:
-      if attachment is not None:
-        envelope["attachment"] = attachment[0]
-      if record.get("reply_to") is not None:
-        envelope["reply_to"] = record["reply_to"]
-    envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-    response = await _post_signed_envelope(
-      _peer_service_url(peer_host, "inbox"), envelope,
-      max_response_bytes=MAX_ENVELOPE_BYTES,
-    )
-    response.raise_for_status()
-    status = "delivered"
-    detail = None
+      response.raise_for_status()
+      status = "delivered"
+      detail = None
   except httpx.HTTPStatusError as exc:
     detail = f"The peer rejected the message ({exc.response.status_code})."
-  except httpx.TimeoutException:
-    detail = "The peer took too long to respond."
+  except (TimeoutError, httpx.TimeoutException):
+    detail = ("The peer’s actor could not be discovered in time." if phase == "discovery"
+              else "The peer took too long to confirm delivery; it may have arrived.")
+  except HTTPException as exc:
+    if phase == "discovery" and isinstance(exc.__cause__, httpx.TimeoutException):
+      detail = "The peer’s actor could not be discovered in time."
   except Exception:
     detail = "The peer could not be reached."
   return await _finish_delivery_attempt(
@@ -1278,6 +1335,8 @@ def _request_peer(peer_host: str) -> str:
 
 class PublishPost(BaseModel):
   text: str
+  # A stable id lets a retry after a lost confirmation land once.
+  id: str | None = None
   attachment: Any = None
   attachments: Any = None
   thumbnails: Any = None
@@ -1763,12 +1822,15 @@ async def publish_post(
   _validate_text_or_attachment(
     text, first, "Post text is invalid.", MAX_POST_TEXT_CHARS,
   )
+  post_id = post.id or str(uuid.uuid4())
+  if not _valid_id(post_id):
+    raise HTTPException(status_code=400, detail="Post id is invalid.")
   identity = _load_identity()
   _require_username(identity)
   envelope = {
     "v": 0,
     "type": "board_post",
-    "id": str(uuid.uuid4()),
+    "id": post_id,
     "from": _own_host(),
     "text": text,
     "sent_at": time.time(),
@@ -1799,7 +1861,7 @@ async def publish_post(
       response.raise_for_status()
       return {"status": "posted", "id": envelope["id"]}
   except (TimeoutError, httpx.TimeoutException) as exc:
-    detail = ("The post may have been sent, but confirmation timed out. Check the feed before sending again."
+    detail = ("The post may have been sent, but confirmation timed out. Send it again to confirm."
       if write_started else "Community GIF support could not be checked.")
     raise HTTPException(status_code=502, detail=detail) from exc
   except HTTPException:
@@ -1880,6 +1942,7 @@ async def _serve_owner_board_media(
     cached is not None
     and time.time() - cached[0].stat().st_mtime < BOARD_MEDIA_CACHE_TTL_S
   ):
+    _mark_board_media_used(cached[0])
     return _serve_image(cached)
   suffix = (
     _board_media_path("thumbnail", post_id, index, "webp") if thumbnail
@@ -1908,10 +1971,16 @@ async def _serve_owner_board_media(
       old = cache_dir / f"{stem}.{ext}"
       if old != target and old.is_file():
         old.unlink()
+    try:
+      _evict_peer_board_media(cache_dir, target)
+    except OSError:
+      pass
     cached = (target, mime)
   except Exception:
     if cached is None:
       raise HTTPException(status_code=404, detail="Board image not found.")
+    # The peer is unreachable: the expired copy is still the best answer.
+    _mark_board_media_used(cached[0])
   return _serve_image(cached)
 
 
@@ -2092,6 +2161,7 @@ async def _react_to_post(post_id_value, emoji, db, principal, reply_id=None):
     response.raise_for_status()
     return response.json()
   except Exception as exc:
+    _raise_if_board_target_gone(exc)
     raise HTTPException(
       status_code=502, detail=_community_write_error(exc, "reaction")
     ) from exc
@@ -2160,6 +2230,14 @@ async def reply_to_post(
     raise HTTPException(status_code=502, detail=detail) from exc
   except HTTPException:
     raise
+  except httpx.HTTPStatusError as exc:
+    if exc.response.status_code == 410:
+      # The author deleted this reply; a retry of it must stop, not repost.
+      raise HTTPException(status_code=410, detail="This reply was deleted.") from exc
+    _raise_if_board_target_gone(exc)
+    raise HTTPException(
+      status_code=502, detail=_community_write_error(exc, "reply")
+    ) from exc
   except Exception as exc:
     raise HTTPException(
       status_code=502, detail=_community_write_error(exc, "reply")
@@ -2168,6 +2246,79 @@ async def reply_to_post(
 
 class DeletePost(BaseModel):
   post_id: str
+
+
+class DeleteReply(BaseModel):
+  post_id: str
+  reply_id: str
+
+
+class EditBoardText(BaseModel):
+  post_id: str
+  reply_id: str | None = None
+  text: str = ""
+
+
+def _checked_board_id(value: str | None, label: str) -> str:
+  value = (value or "").strip()
+  if not re.fullmatch(r"[a-f0-9-]{8,64}", value):
+    raise HTTPException(status_code=400, detail=f"{label} id is invalid.")
+  return value
+
+
+# Host validation reasons worth showing as-is; anything else stays generic.
+_BOARD_AUTHOR_REASONS = {
+  "Text cannot be empty.": "Text can’t be empty.",
+  "Text is invalid.": "That’s too long.",
+}
+
+
+def _host_error_detail(exc: httpx.HTTPStatusError) -> object:
+  try:
+    return exc.response.json().get("detail")
+  except (ValueError, AttributeError):
+    return None
+
+
+def _raise_if_board_target_gone(exc: Exception) -> None:
+  """Report a deleted post or reply as gone (410), not as unsupported (404)."""
+  if (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404
+      and _host_error_detail(exc) in ("Unknown post.", "Unknown reply.")):
+    raise HTTPException(status_code=410, detail="That message no longer exists.") from exc
+
+
+async def _send_board_author_action(
+  path: str, envelope: dict, *, unsupported: str, forbidden: str, failed: str,
+) -> dict:
+  """Sign and send one author-only Board change to the community host."""
+  identity = _load_identity()
+  envelope = {**envelope, "from": _own_host(), "sent_at": time.time()}
+  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+  try:
+    response = await _post_signed_envelope(
+      _peer_service_url(COMMUNITY_HOST, path), envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+    )
+    response.raise_for_status()
+    return response.json()
+  except httpx.HTTPStatusError as exc:
+    # The host was reachable but refused. An older release has no route
+    # (FastAPI's own 404/405) or rejects the unknown envelope type (400); say
+    # plainly that it cannot do this yet instead of a misleading "unreachable".
+    _raise_if_board_target_gone(exc)
+    code = exc.response.status_code
+    detail = _host_error_detail(exc)
+    if code in (404, 405) or (code == 400 and detail == "Unsupported envelope type."):
+      raise HTTPException(status_code=501, detail=unsupported) from exc
+    if code == 403:
+      raise HTTPException(status_code=403, detail=forbidden) from exc
+    if code == 400 and detail in _BOARD_AUTHOR_REASONS:
+      raise HTTPException(status_code=400, detail=_BOARD_AUTHOR_REASONS[detail]) from exc
+    raise HTTPException(status_code=502, detail=failed) from exc
+  except Exception as exc:
+    raise HTTPException(
+      status_code=502, detail="Community host could not be reached."
+    ) from exc
 
 
 @router.post("/delete")
@@ -2179,48 +2330,61 @@ async def delete_own_post(
   """Delete one of the owner's own board posts from the community host."""
   require_nondelegated_owner_control(principal)
   _require_member(db, principal)
-  post_id = body.post_id.strip()
-  if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  identity = _load_identity()
-  host = COMMUNITY_HOST
+  post_id = _checked_board_id(body.post_id, "Post")
+  return await _send_board_author_action(
+    "board/delete", {"v": 0, "type": "board_delete", "post_id": post_id},
+    unsupported="This community server doesn’t support deleting posts yet.",
+    forbidden="You can only delete your own posts.",
+    failed="The post could not be deleted.",
+  )
+
+
+@router.post("/reply/delete")
+async def delete_own_reply(
+  body: DeleteReply,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Delete one of the owner's own replies from the community host."""
+  require_nondelegated_owner_control(principal)
+  _require_member(db, principal)
+  return await _send_board_author_action(
+    "board/reply/delete", {
+      "v": 0, "type": "board_reply_delete",
+      "post_id": _checked_board_id(body.post_id, "Post"),
+      "reply_id": _checked_board_id(body.reply_id, "Reply"),
+    },
+    unsupported="This community server doesn’t support deleting replies yet.",
+    forbidden="You can only delete your own replies.",
+    failed="The reply could not be deleted.",
+  )
+
+
+@router.post("/edit")
+async def edit_own_board_text(
+  body: EditBoardText,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Replace the text of one of the owner's own posts or replies."""
+  require_nondelegated_owner_control(principal)
+  _require_member(db, principal)
+  text = body.text.strip()
+  limit = MAX_POST_TEXT_CHARS if body.reply_id is None else MAX_REPLY_TEXT_CHARS
+  if len(text) > limit:
+    raise HTTPException(status_code=400, detail="That’s too long.")
   envelope = {
-    "v": 0,
-    "type": "board_delete",
-    "post_id": post_id,
-    "from": _own_host(),
-    "sent_at": time.time(),
+    "v": 0, "type": "board_edit",
+    "post_id": _checked_board_id(body.post_id, "Post"), "text": text,
   }
-  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-  try:
-    response = await federation_request(
-      "POST", _peer_service_url(host, "board/delete"), json=envelope,
-      max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
-    )
-    response.raise_for_status()
-    return response.json()
-  except httpx.HTTPStatusError as exc:
-    # The host was reachable but refused. An older release has no delete route
-    # (404) or rejects the unknown envelope (400); either way it cannot delete
-    # yet, so say that plainly instead of a misleading "unreachable". Our client
-    # only ever sends a valid id and envelope, so those codes are not our fault.
-    if exc.response.status_code in (400, 404):
-      raise HTTPException(
-        status_code=501,
-        detail="This community server doesn’t support deleting posts yet.",
-      ) from exc
-    if exc.response.status_code == 403:
-      raise HTTPException(
-        status_code=403, detail="You can only delete your own posts.",
-      ) from exc
-    raise HTTPException(
-      status_code=502, detail="The post could not be deleted.",
-    ) from exc
-  except Exception as exc:
-    raise HTTPException(
-      status_code=502, detail="Community host could not be reached."
-    ) from exc
+  if body.reply_id is not None:
+    envelope["reply_id"] = _checked_board_id(body.reply_id, "Reply")
+  return await _send_board_author_action(
+    "board/edit", envelope,
+    unsupported="This community server doesn’t support editing yet.",
+    forbidden="You can only edit your own posts and replies.",
+    failed="Your edit couldn’t be saved.",
+  )
 
 
 async def _people_payload(
