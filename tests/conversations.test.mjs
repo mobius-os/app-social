@@ -40,17 +40,20 @@ for (const [label, list, prefix] of [
   ['direct messages', listConversations, 'conversations/'],
 ]) {
   test(`${label} reload the server copy so a delivered message appears without a refresh`, async () => {
-    // A change-counter bump reloads the list; a cache-first read would repaint
-    // the previous metadata (unread 1) and hide the newly delivered message.
-    globalThis.window = { mobius: { storage: {
+    const cached = { unread: 1, last_text: 'older' }
+    const fresh = { unread: 2, last_text: 'just arrived' }
+    const storage = {
       async list() { return [{ name: 'one', type: 'directory' }] },
-      async get() { return { unread: 1, last_text: 'older' } },
+      async get() { return cached },
       async getWithVersion(path) {
         assert.equal(path, `${prefix}one/meta.json`)
-        return { value: { unread: 2, last_text: 'just arrived' }, version: 'v2' }
+        return { value: fresh, version: 'v2' }
       },
-    } } }
-    assert.deepEqual(await list(), [{ unread: 2, last_text: 'just arrived' }])
+    }
+    globalThis.window = { mobius: { storage } }
+    assert.deepEqual(await list(), [fresh])
+    storage.getWithVersion = async () => { throw new Error('server unreachable') }
+    assert.deepEqual(await list(), [cached])
   })
 }
 
