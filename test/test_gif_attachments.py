@@ -1349,6 +1349,71 @@ class GifValidationOwnershipTests(unittest.TestCase):
     stored = json.loads((store.board_dir() / "abcdef12.json").read_text())
     self.assertEqual(stored["host"], "member.example")
 
+  @staticmethod
+  @contextmanager
+  def committed_before_lock(store, commit):
+    """Land `commit` after the unlocked pre-read, just before the board lock."""
+    locked = store._mutation_lock
+    landed = []
+
+    @contextmanager
+    def interleaved(lock, name):
+      # Index reconciliation also takes the board lock, inside its own lock.
+      if not landed and not store._board_index_lock.locked():
+        landed.append(name)
+        commit()  # Its own lock is the real one: `landed` is already set.
+      with locked(lock, name):
+        yield
+
+    with patch.object(store, "_mutation_lock", interleaved):
+      yield
+    assert landed == ["board"], landed
+
+  def test_post_landing_after_preread_is_rechecked_under_the_lock(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store = CommonPublicStore(root)
+    data = animation()
+    theirs = {"id": "abcdef12", "host": "member.example", "text": "Theirs",
+              "created_at": 1, "replies": []}
+    with self.committed_before_lock(store, lambda: store.store_post(theirs)):
+      with self.assertRaises(HTTPException) as caught:
+        store.store_post({**theirs, "host": "other.example", "text": "Mine"},
+                         attachment=(wire(data), data))
+    self.assertEqual(caught.exception.status_code, 409)
+    stored = json.loads((store.board_dir() / "abcdef12.json").read_text())
+    self.assertEqual((stored["host"], stored["text"], "attachment" in stored),
+                     ("member.example", "Theirs", False))
+    self.assertIsNone(store.board_image("abcdef12"))
+
+  def test_reply_landing_after_preread_is_rechecked_under_the_lock(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store = CommonPublicStore(root)
+    post_id, reply_id, data = "abcdef12", "abcdef34", animation()
+    store.store_post({"id": post_id, "host": "member.example", "text": "Post",
+                      "created_at": 1, "replies": []})
+    send = lambda: store.add_reply(post_id, reply_id, "other.example", "other", "Mine", 3,
+                                   (wire(data), data))
+    # Another author's reply claims the id between the pre-read and the commit.
+    with self.committed_before_lock(store, lambda: store.add_reply(
+        post_id, reply_id, "member.example", "member", "Theirs", 2)):
+      with self.assertRaises(HTTPException) as caught:
+        send()
+    self.assertEqual(caught.exception.status_code, 409)
+    replies = store.get_replies(post_id)["replies"]
+    self.assertEqual([(r["host"], r["text"]) for r in replies], [("member.example", "Theirs")])
+    self.assertEqual(list((store.reply_media_dir() / post_id).glob("*")), [])
+    # The author deletes their reply meanwhile: its delayed retry stays gone.
+    reply_id = "abcdef56"
+    def land_then_delete():
+      store.add_reply(post_id, reply_id, "other.example", "other", "Mine", 3, (wire(data), data))
+      store.delete_reply(post_id, reply_id, "other.example")
+    with self.committed_before_lock(store, land_then_delete):
+      with self.assertRaises(HTTPException) as caught:
+        send()
+    self.assertEqual(caught.exception.status_code, 410)
+    self.assertEqual(len(store.get_replies(post_id)["replies"]), 1)
+    self.assertEqual(list((store.reply_media_dir() / post_id).glob(f"{reply_id}.*")), [])
+
   def test_post_deleted_during_reply_preread_is_unknown_without_writing_media(self):
     root = self.enterContext(tempfile.TemporaryDirectory())
     store = CommonPublicStore(root)

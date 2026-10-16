@@ -1860,7 +1860,7 @@ async def _require_community_media_support(
   envelope_bytes: int = 0,
 ):
   """Older hosts must explicitly support media before accepting its write."""
-  label = "reply photo" if reply else "GIF"
+  label = "reply photo" if reply else "media"
   try:
     response = await federation_request(
       "GET", _peer_service_url(host, "board"), params={"limit": 1},
@@ -1971,7 +1971,7 @@ async def publish_post(
       return {"status": "posted", "id": envelope["id"]}
   except (TimeoutError, httpx.TimeoutException) as exc:
     detail = ("The post may have been sent, but confirmation timed out. Send it again to confirm."
-      if write_started else "Community GIF support could not be checked.")
+      if write_started else "Community media support could not be checked.")
     raise HTTPException(status_code=502, detail=detail) from exc
   except HTTPException:
     raise
