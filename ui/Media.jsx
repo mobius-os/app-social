@@ -6,10 +6,10 @@ import {
   clampLightboxScale, pinchLightboxScale, wheelLightboxScale, gallerySwipeDirection,
 } from './interactionRules.js'
 import { useModalFocus } from './modalFocus.js'
+import { IMAGE_MAX_BYTES, GIF_MAX_BYTES, IMAGE_MAX_SIDE, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 
-const MAX_BYTES = 1024 * 1024
-const MAX_SIDE = 1600
-const THUMBNAIL_MAX_BYTES = 120 * 1024
+const MAX_BYTES = IMAGE_MAX_BYTES
+const MAX_SIDE = IMAGE_MAX_SIDE
 
 function canvasBlob(canvas, mime, quality) {
   return new Promise((resolve, reject) => {
@@ -38,15 +38,17 @@ function hasTransparency(context, width, height) {
   return false
 }
 
-export async function prepareImage(file, maxBytes = MAX_BYTES) {
+export async function prepareImage(file, maxBytes) {
   if (!file?.type?.startsWith('image/')) throw new Error('Choose an image file.')
   const header = await file.slice(0, 10).arrayBuffer()
   const signature = new TextDecoder().decode(header.slice(0, 6))
   const gif = file.type === 'image/gif' || signature === 'GIF87a' || signature === 'GIF89a'
+  const originalLimit = gif ? GIF_MAX_BYTES : MAX_BYTES
+  maxBytes = Math.min(maxBytes ?? originalLimit, originalLimit)
   // Never resize an animation by drawing its first frame as the original.
   // The signed service validates the complete container and decoded frames.
   if (gif && file.size > maxBytes) {
-    throw new Error('This GIF is too large. Choose a smaller GIF or attach it on its own.')
+    throw new Error(`This GIF is too large. Choose a smaller GIF, up to ${Math.floor(maxBytes / (1024 * 1024))} MB.`)
   }
   if (gif && header.byteLength === 10) {
     const dimensions = new DataView(header)

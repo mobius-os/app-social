@@ -31,17 +31,23 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
+from fastapi.routing import APIRoute
+from starlette.middleware.errors import ServerErrorMiddleware
 from PIL import Image, ImageOps
 
 from common_protocol import (
   ATTACHMENT_MIME_EXT,
   CLOCK_SKEW_S,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_ENVELOPE_BYTES,
+  MAX_STATIC_ATTACHMENT_BYTES,
+  MAX_THUMBNAIL_BYTES,
+  MAX_BOARD_TOTAL_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_DIMENSION,
   MAX_AVATAR_BYTES,
   MAX_BOARD_ATTACHMENTS,
@@ -53,6 +59,7 @@ from common_protocol import (
   NEEDS_USERNAME,
   OUTBOUND_TIMEOUT_S,
   ActorVerifier,
+  CheckedAttachment,
   canonical,
   peer_service_url,
   read_envelope,
@@ -72,6 +79,13 @@ BOARD_PAGE_LIMIT = 50
 BOARD_REPLY_LIMIT = 200
 BOARD_LIKE_LIMIT = 2000
 DIRECTORY_LIMIT = 2000
+MAX_PUBLIC_CONTENT_REQUESTS = 2
+MAX_PUBLIC_CONTROL_REQUESTS = 8
+# Named-member verification can fetch five times when a key/handle changes and
+# the cache is full: two initial, one named-card refresh, two re-verification.
+# 12s receiving + five existing 10s fetch grants leaves 13s for bounded local
+# validation and response sending. Do not shorten any existing network grant.
+MAX_PUBLIC_REQUEST_SECONDS = 75.0
 # A member avatar URL is its content hash, so it never changes. A board image
 # never changes either, but its post can be deleted or moderated: a browser may
 # keep what it already showed for a day, while shared caches such as the site's
@@ -152,7 +166,7 @@ def _validate_image_header(
 
 
 def image_thumbnail_bytes(
-  data: bytes, max_side: int = BOARD_THUMBNAIL_MAX_SIDE,
+  data: bytes | CheckedAttachment, max_side: int = BOARD_THUMBNAIL_MAX_SIDE,
   max_pixels: int = BOARD_THUMBNAIL_MAX_PIXELS,
 ) -> tuple[str, bytes]:
   """Create a small, display-ready, header-validated rendition.
@@ -160,7 +174,21 @@ def image_thumbnail_bytes(
   `max_side` bounds the long edge (board timelines use the default; avatars pass
   a smaller cap). The same header/decompression-bomb guards run either way, so
   every caller re-encodes untrusted image bytes through one validated path.
+  A CheckedAttachment renders from the GIF decode view its check already made;
+  raw bytes, such as a stored original being backfilled, are checked here.
   """
+  if isinstance(data, CheckedAttachment):
+    original = CheckedAttachment.of(data)
+    data = original.gif_view or original[1]
+  elif data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+    # Pillow concatenates comment metadata quadratically for a large legal
+    # comment chain. Validate the original, then render a comment-free view;
+    # the stored original and its signed bytes are never rewritten.
+    data = validate_gif_bytes({
+      "mime": "image/gif",
+      "w": int.from_bytes(data[6:8], "little"),
+      "h": int.from_bytes(data[8:10], "little"),
+    }, data)
   with _open_board_image(data) as opened:
     # Reject oversized inputs from their header before EXIF transposition or
     # decoding can allocate the full raster.
@@ -174,13 +202,23 @@ def image_thumbnail_bytes(
       image.mode == "P" and "transparency" in image.info
     )
     prepared = image.convert("RGBA" if has_alpha else "RGB")
-    output = io.BytesIO()
-    prepared.save(output, format="WEBP", quality=72, method=4)
-    return "image/webp", output.getvalue()
+    while True:
+      output = io.BytesIO()
+      prepared.save(output, format="WEBP", quality=72, method=4)
+      if output.tell() <= MAX_THUMBNAIL_BYTES:
+        return "image/webp", output.getvalue()
+      if max(prepared.size) <= 96:
+        raise ValueError("Board thumbnail is too detailed.")
+      prepared.thumbnail(
+        (max(1, int(prepared.width * 0.84)), max(1, int(prepared.height * 0.84))),
+        Image.Resampling.LANCZOS,
+      )
 
 
 def validate_thumbnail_bytes(wire: dict, data: bytes) -> None:
   """Verify a client-made thumbnail before it becomes served media."""
+  if len(data) > MAX_THUMBNAIL_BYTES:
+    raise HTTPException(status_code=413, detail="Board thumbnail is too large.")
   with _open_board_image(data) as image:
     _validate_image_header(image)
     if image.format == "GIF":
@@ -194,12 +232,18 @@ def validate_thumbnail_bytes(wire: dict, data: bytes) -> None:
     image.verify()
 
 
-def validate_reply_original_bytes(wire: dict, data: bytes) -> None:
-  """Admit only a complete image whose bytes agree with its reply metadata."""
-  if wire["mime"] == "image/gif":
-    validate_gif_bytes(wire, data)
-    return
-  if len(data) > MAX_ATTACHMENT_BYTES:
+def check_reply_original(original: tuple[dict, bytes]) -> CheckedAttachment:
+  """Admit only a complete image whose bytes agree with its reply metadata.
+
+  A GIF (or GIF bytes behind a static MIME) gets the shared protocol check,
+  reused when validate_attachment already ran it; a static photo is fully
+  decoded here because the wire check does not inspect its raster.
+  """
+  checked = CheckedAttachment.of(original)
+  if checked.gif_view is not None:
+    return checked
+  wire, data = checked
+  if len(data) > MAX_STATIC_ATTACHMENT_BYTES:
     raise HTTPException(status_code=413, detail="Reply photo is too large.")
   try:
     with _open_board_image(data) as image:
@@ -218,6 +262,19 @@ def validate_reply_original_bytes(wire: dict, data: bytes) -> None:
     raise HTTPException(status_code=400, detail=str(exc)) from exc
   except (OSError, ValueError, SyntaxError, EOFError, Image.UnidentifiedImageError) as exc:
     raise HTTPException(status_code=400, detail="Reply photo is invalid.") from exc
+  return checked
+
+
+def optional_rendition(source: bytes | CheckedAttachment) -> bytes | None:
+  """Render a WebP poster, or None when this optional rendition fails.
+
+  The durable original stays valid without it: serving falls back to the
+  original and later requests backfill the rendition from stored bytes.
+  """
+  try:
+    return image_thumbnail_bytes(source)[1]
+  except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
+    return None
 
 
 class CommonPublicStore:
@@ -619,6 +676,8 @@ class CommonPublicStore:
       return {}
     try:
       value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+      return {}  # A concurrent deletion is ordinary absence, not corrupt data.
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
       raise HTTPException(status_code=500, detail="Public data record is invalid.") from exc
     if not isinstance(value, dict):
@@ -865,27 +924,6 @@ class CommonPublicStore:
     except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
       return None
 
-  def _store_thumbnail(
-    self, post_id: str, index: int, original: bytes,
-    supplied: tuple[dict, bytes] | None,
-  ) -> None:
-    """Keep every thumbnail as WebP, the one type peers ask for by link."""
-    if supplied is not None and supplied[0]["mime"] == "image/webp":
-      atomic_write(self.board_thumbnail_dir() / f"{post_id}-{index}.webp", supplied[1])
-    else:
-      # Re-encode a small supplied thumbnail of another type, or make one.
-      self._write_board_thumbnail(post_id, index, supplied[1] if supplied else original)
-
-  def _write_board_thumbnail(self, post_id: str, index: int, data: bytes) -> None:
-    try:
-      mime, thumbnail = image_thumbnail_bytes(data)
-      target = self.board_thumbnail_dir() / f"{post_id}-{index}.{ATTACHMENT_MIME_EXT[mime]}"
-      atomic_write(target, thumbnail)
-    except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
-      # The durable full image remains valid even if its optional rendition
-      # cannot be generated; the serving path falls back to that original.
-      return
-
   def store_post(
     self, post: dict, attachment: tuple[dict, bytes] | None = None,
     attachments: list[tuple[dict, bytes]] | None = None,
@@ -897,60 +935,85 @@ class CommonPublicStore:
     ``<id>-<index>.<ext>``; a legacy single `attachment` is written as
     ``<id>.<ext>``. `attachments` also records a single `attachment` (its first
     image) so a reader that only understands one image still shows something.
+
+    Every original is checked, and every rendition rendered, before the board
+    lock. Pairs from validate_attachment reuse their GIF check and decode view;
+    plain pairs from direct callers are checked here, once each.
     """
+    if attachment is not None and attachments and attachment[0] != attachments[0][0]:
+      raise HTTPException(status_code=400, detail="First post image does not match its gallery copy.")
+    if sum(len(data) for _, data in (attachments or ([attachment] if attachment else []))) > MAX_BOARD_TOTAL_ATTACHMENT_BYTES:
+      raise HTTPException(status_code=413, detail="Post images are too large together.")
     # Inspect all original headers before writing any media. Optional
     # thumbnail failures still preserve ordinary legacy image posts, but an
     # oversized raster must not leave an orphan image or become a fallback.
-    for wire, data in attachments or ([attachment] if attachment else []):
-      if wire["mime"] == "image/gif" or data[:6] in (b"GIF87a", b"GIF89a"):
-        validate_gif_bytes(wire, data)
+    originals = []
+    for item in attachments or ([attachment] if attachment else []):
+      original = CheckedAttachment.of(item)
+      originals.append(original)
+      if original.gif_view is not None:
         continue
       try:
-        with _open_board_image(data) as image:
+        with _open_board_image(original[1]) as image:
           _validate_image_header(image)
       except BoardImageTooLarge as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
       except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
         pass
-    image_count = len(attachments) if attachments else (1 if attachment else 0)
-    if thumbnails and len(thumbnails) != image_count:
+    if thumbnails and len(thumbnails) != len(originals):
       raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
     try:
       for wire, data in thumbnails or []:
         validate_thumbnail_bytes(wire, data)
     except (OSError, ValueError, Image.UnidentifiedImageError) as exc:
       raise HTTPException(status_code=400, detail="Post thumbnail is invalid.") from exc
+    path = self.board_dir() / f"{post['id']}.json"
+
+    def stored_retry() -> bool:
+      """A stable retry confirms its own post; an id is never shared."""
+      stored = self._load_object(path)
+      if not stored:
+        return False  # Absent, or deleted concurrently.
+      if stored.get("host") != post.get("host"):
+        raise HTTPException(status_code=409, detail="Post id already belongs to another author.")
+      return True
+
+    if stored_retry():
+      return False  # A stored post never changes, so its retry renders nothing.
+    # Keep every thumbnail as WebP, the one type peers ask for by link: a
+    # supplied WebP is stored as sent; another supplied type is re-encoded,
+    # or the original's poster made, as an optional rendition.
+    renditions = [
+      (supplied[1], True) if supplied and supplied[0]["mime"] == "image/webp"
+      else (optional_rendition(supplied[1] if supplied else original), False)
+      for original, supplied in zip(originals, thumbnails or [None] * len(originals))
+    ]
     try:
       self._ensure_board_index()
     except sqlite3.Error:
       self._board_index_ready = False
     with self._mutation_lock(self._board_lock, "board"):
-      path = self.board_dir() / f"{post['id']}.json"
-      if path.is_file():
-        # A stable retry confirms its own post; an id is never shared.
-        if self._load_object(path).get("host") != post.get("host"):
-          raise HTTPException(status_code=409, detail="Post id already belongs to another author.")
+      if stored_retry():
         return False
       if self._board_count() >= BOARD_POST_LIMIT:
         raise HTTPException(status_code=507, detail="Board is full.")
       record = dict(post)
+      metas = []
+      for index, ((wire, data), (rendition, supplied)) in enumerate(zip(originals, renditions)):
+        target = (self.board_media_index_path(post["id"], index, wire["mime"]) if attachments
+                  else self.board_media_path(post["id"], wire["mime"]))
+        atomic_write(target, data)
+        if rendition is not None:
+          try:
+            atomic_write(self.board_thumbnail_dir() / f"{post['id']}-{index}.webp", rendition)
+          except OSError:
+            if supplied:  # Only a made rendition is optional.
+              raise
+        metas.append({"mime": wire["mime"], "w": wire["w"], "h": wire["h"]})
       if attachments:
-        metas = []
-        for index, (wire, data) in enumerate(attachments):
-          atomic_write(self.board_media_index_path(post["id"], index, wire["mime"]), data)
-          self._store_thumbnail(
-            post["id"], index, data, thumbnails[index] if thumbnails else None,
-          )
-          metas.append({"mime": wire["mime"], "w": wire["w"], "h": wire["h"]})
         record["attachments"] = metas
+      if metas:
         record["attachment"] = metas[0]
-      elif attachment is not None:
-        wire, data = attachment
-        atomic_write(self.board_media_path(post["id"], wire["mime"]), data)
-        self._store_thumbnail(post["id"], 0, data, thumbnails[0] if thumbnails else None)
-        record["attachment"] = {
-          "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
-        }
       self._write_board_record(record, path)
       return True
 
@@ -1083,28 +1146,22 @@ class CommonPublicStore:
         validate_thumbnail_bytes(*thumbnail)
       except (OSError, ValueError, Image.UnidentifiedImageError) as exc:
         raise HTTPException(status_code=400, detail="Reply thumbnail is invalid.") from exc
-    try:
-      self._ensure_board_index()
-    except sqlite3.Error:
-      self._board_index_ready = False
-    with self._mutation_lock(self._board_lock, "board"):
-      path = self.board_dir() / f"{post_id}.json"
-      if not path.is_file():
-        raise HTTPException(status_code=404, detail="Unknown post.")
-      post = self._load_object(path)
-      author_host = post.get("host")
+    path = self.board_dir() / f"{post_id}.json"
+    digest = hashlib.sha256(attachment[1]).hexdigest() if attachment else None
+    thumbnail_digest = hashlib.sha256(thumbnail[1]).hexdigest() if thumbnail else None
+    attachment_meta = (
+      {key: attachment[0][key] for key in ("mime", "w", "h")}
+      if attachment else None
+    )
+
+    def settle(post: dict) -> dict | None:
+      """Answer a known post's retry, conflict or limit; None admits a new reply."""
       replies = post.get("replies")
       if not isinstance(replies, list):
         replies = []
         post["replies"] = replies
       existing = next((reply for reply in replies if isinstance(reply, dict)
                        and reply.get("id") == reply_id), None)
-      digest = hashlib.sha256(attachment[1]).hexdigest() if attachment else None
-      thumbnail_digest = hashlib.sha256(thumbnail[1]).hexdigest() if thumbnail else None
-      attachment_meta = (
-        {key: attachment[0][key] for key in ("mime", "w", "h")}
-        if attachment else None
-      )
       if existing is not None:
         # A stable retry may confirm the same reply, never replace another
         # author's text or media under its id. Once the author has edited it,
@@ -1117,7 +1174,7 @@ class CommonPublicStore:
           raise HTTPException(status_code=409, detail="Reply id already belongs to different content.")
         return {
           "status": "ok", "reply_count": len(replies),
-          "author_host": author_host, "activity": False,
+          "author_host": post.get("host"), "activity": False,
           "id": reply_id, "attachment": existing.get("attachment"),
         }
       tombstones = post.get("_deleted_replies")
@@ -1125,8 +1182,34 @@ class CommonPublicStore:
         raise HTTPException(status_code=410, detail="This reply was deleted.")
       if len(replies) >= BOARD_REPLY_LIMIT:
         raise HTTPException(status_code=507, detail="Post reply limit reached.")
-      if attachment is not None:
-        validate_reply_original_bytes(*attachment)
+      return None
+
+    # Records are replaced atomically, so this unlocked read answers retries,
+    # conflicts and limits before any media work. Only an admitted new reply
+    # pays for the full photo check and poster, still outside the board lock;
+    # the locked commit below settles the same questions again authoritatively.
+    if not path.is_file():
+      raise HTTPException(status_code=404, detail="Unknown post.")
+    settled = settle(self._load_object(path))
+    if settled is not None:
+      return settled
+    rendition = None
+    if attachment is not None:
+      attachment = check_reply_original(attachment)
+      rendition = optional_rendition(thumbnail[1] if thumbnail else attachment)
+    try:
+      self._ensure_board_index()
+    except sqlite3.Error:
+      self._board_index_ready = False
+    with self._mutation_lock(self._board_lock, "board"):
+      if not path.is_file():
+        raise HTTPException(status_code=404, detail="Unknown post.")
+      post = self._load_object(path)
+      settled = settle(post)
+      if settled is not None:
+        return settled
+      author_host = post.get("host")
+      replies = post["replies"]
       # No reply owns this identity yet. A crashed or failed earlier commit
       # may have left media behind; none may become this new reply's rendition.
       for directory in (self.reply_media_dir(), self.reply_thumbnail_dir()):
@@ -1148,14 +1231,13 @@ class CommonPublicStore:
         record["attachment_sha256"] = digest
         if thumbnail_digest is not None:
           record["thumbnail_sha256"] = thumbnail_digest
-        try:
-          thumb_data = thumbnail[1] if thumbnail else data
-          _mime, rendered = image_thumbnail_bytes(thumb_data)
-          thumb_dir = self.reply_thumbnail_dir() / post_id
-          thumb_dir.mkdir(parents=True, exist_ok=True)
-          atomic_write(thumb_dir / f"{reply_id}.webp", rendered)
-        except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
-          pass
+        if rendition is not None:
+          try:
+            thumb_dir = self.reply_thumbnail_dir() / post_id
+            thumb_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write(thumb_dir / f"{reply_id}.webp", rendition)
+          except OSError:
+            pass
       replies.append(record)
       self._write_board_record(post, path)
       return {
@@ -1493,6 +1575,14 @@ def read_board_page(
       next_cursor = _encode_board_cursor(*position)
   return {
     "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True},
+    "media_limits": {
+      "gif_bytes": MAX_ATTACHMENT_BYTES,
+      "static_bytes": MAX_STATIC_ATTACHMENT_BYTES,
+      "combined_bytes": MAX_BOARD_TOTAL_ATTACHMENT_BYTES,
+      "thumbnail_bytes": MAX_THUMBNAIL_BYTES,
+      "max_images": MAX_BOARD_ATTACHMENTS,
+      "envelope_bytes": MAX_ATTACHMENT_ENVELOPE_BYTES,
+    },
     "posts": posts,
     "next_cursor": next_cursor,
   }
@@ -1569,6 +1659,51 @@ async def verify_named_member(
   return actor
 
 
+class _PublicEnvelopeAdmission:
+  """Reserve bounded wire capacity without queuing bodies awaiting identity.
+
+  Each public router owns two 60 MiB content reservations and eight independent
+  32 KiB control reservations. Hold the reservation through ASGI response send,
+  not merely decoding: peer verification can await while retaining the envelope.
+  A lock makes the nonwaiting accounting safe across threads and event loops.
+  """
+
+  def __init__(self):
+    self._lock = threading.Lock()
+    self._limits = {
+      MAX_ATTACHMENT_ENVELOPE_BYTES: MAX_PUBLIC_CONTENT_REQUESTS,
+      MAX_ENVELOPE_BYTES: MAX_PUBLIC_CONTROL_REQUESTS,
+    }
+    self._used = dict.fromkeys(self._limits, 0)
+
+  @asynccontextmanager
+  async def reserve(self, body_limit: int):
+    with self._lock:
+      if self._used[body_limit] >= self._limits[body_limit]:
+        raise HTTPException(
+          status_code=503, detail="Community request capacity is busy.",
+          headers={"Retry-After": "1"},
+        )
+      self._used[body_limit] += 1
+    lifetime = asyncio.timeout(MAX_PUBLIC_REQUEST_SECONDS)
+    try:
+      try:
+        async with lifetime:
+          yield
+      except TimeoutError:
+        if not lifetime.expired():
+          raise
+        # The absolute reservation budget is exhausted. Cancellation has already
+        # unwound the endpoint/response and freed its envelope. Return without
+        # another app error send or a media-retaining exception traceback.
+        # This bounds app data, not the server connection: Uvicorn may attempt
+        # its small fallback500 if response.start never completed. That server
+        # task holds neither our envelope nor a reservation; no app retry occurs.
+    finally:
+      with self._lock:
+        self._used[body_limit] -= 1
+
+
 def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
   on_activity=None, on_register=None,
@@ -1581,7 +1716,36 @@ def create_public_router(
   changes the peer-facing response. ``on_register(host)`` is likewise awaited
   after each directory registration (the host refreshes the member's avatar).
   """
-  router = APIRouter(prefix=prefix, tags=["common-public"])
+  admission = _PublicEnvelopeAdmission()
+  content_paths = {f"{prefix}/board", f"{prefix}/board/reply"}
+
+  class AdmittedEnvelopeRoute(APIRoute):
+    async def handle(self, scope, receive, send):
+      if scope["method"] != "POST" or "POST" not in (self.methods or ()):
+        return await super().handle(scope, receive, send)
+      body_limit = (MAX_ATTACHMENT_ENVELOPE_BYTES if self.path in content_paths
+                    else MAX_ENVELOPE_BYTES)
+      async with admission.reserve(body_limit):
+        state = scope.setdefault("state", {})
+        state["common_envelope_max_bytes"] = body_limit
+        try:
+          # Unhandled exceptions otherwise retain the decoded envelope in an
+          # outer 500-response traceback after releasing this reservation.
+          # Keep Community's default 500 send inside the reservation;
+          # Starlette re-raises after sending, so failures are not suppressed
+          # and the outer middleware will not send an already-started response.
+          # This host has no custom 500 hooks. Adding one requires moving the
+          # admission outside the app's outer error layer to avoid a second call.
+          # Native debug rendering is preserved, but outer HTML re-rendering
+          # after release is outside this frozen debug=False resource contract.
+          await ServerErrorMiddleware(
+            super().handle, debug=scope["app"].debug,
+          )(scope, receive, send)
+        finally:
+          state.pop("common_envelope_max_bytes", None)
+
+  router = APIRouter(prefix=prefix, tags=["common-public"],
+                     route_class=AdmittedEnvelopeRoute)
 
   @router.get("/directory")
   def reject_public_directory():
@@ -1768,12 +1932,12 @@ def create_public_router(
       raise HTTPException(status_code=400, detail="Post id is invalid.")
     if not valid_id(reply_id):
       raise HTTPException(status_code=400, detail="Reply id is invalid.")
-    text = envelope.get("text")
-    attachment = validate_attachment(envelope.get("attachment"))
-    thumbnail = validate_attachment(envelope.get("thumbnail"))
-    validate_text_or_attachment(text, attachment, "Reply text is invalid.", MAX_REPLY_TEXT_CHARS)
     validate_attachment_envelope_size(envelope)
     actor = await verify_named_member(store, verifier, envelope)
+    text = envelope.get("text")
+    attachment = validate_attachment(envelope.get("attachment"))
+    thumbnail = validate_attachment(envelope.get("thumbnail"), thumbnail=True)
+    validate_text_or_attachment(text, attachment, "Reply text is invalid.", MAX_REPLY_TEXT_CHARS)
     result = store.add_reply(
       post_id, reply_id, envelope["from"], actor["handle"],
       text, envelope["sent_at"], attachment, thumbnail,
@@ -1839,9 +2003,22 @@ def create_public_router(
     envelope = await read_envelope(request)
     if envelope.get("v") != 0 or envelope.get("type") != "board_post":
       raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-    attachment = validate_attachment(envelope.get("attachment"))
-    attachments = validate_attachments(envelope.get("attachments"))
-    thumbnails = validate_attachments(envelope.get("thumbnails"))
+    post_id = envelope.get("id")
+    if not valid_id(post_id):
+      raise HTTPException(status_code=400, detail="Post id is invalid.")
+    actor = await verify_named_member(store, verifier, envelope)
+    first_wire, gallery = envelope.get("attachment"), envelope.get("attachments")
+    if first_wire is not None and isinstance(gallery, list) and gallery and first_wire == gallery[0]:
+      # The legacy first-image copy repeats the gallery's first wire; decode
+      # and check those bytes once rather than twice.
+      attachments = validate_attachments(gallery)
+      attachment = attachments[0]
+    else:
+      attachment = validate_attachment(first_wire)
+      attachments = validate_attachments(gallery)
+    if attachment is not None and attachments and attachment[0] != attachments[0][0]:
+      raise HTTPException(status_code=400, detail="First post image does not match its gallery copy.")
+    thumbnails = validate_attachments(envelope.get("thumbnails"), thumbnail=True)
     image_count = len(attachments) if attachments else (1 if attachment else 0)
     if thumbnails and len(thumbnails) != image_count:
       raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
@@ -1850,10 +2027,6 @@ def create_public_router(
     validate_text_or_attachment(
       text, first, "Post text is invalid.", MAX_POST_TEXT_CHARS,
     )
-    post_id = envelope.get("id")
-    if not valid_id(post_id):
-      raise HTTPException(status_code=400, detail="Post id is invalid.")
-    actor = await verify_named_member(store, verifier, envelope)
     store.store_post({
       "id": post_id,
       "host": envelope["from"],

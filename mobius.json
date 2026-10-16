@@ -18,6 +18,11 @@
     "id": "social",
     "entry": "service.py",
     "access": "public",
+    "max_bytes": 62914560,
+    "route_limits": [
+      { "method": "GET", "path": "/actor", "max_bytes": 1048576 },
+      { "method": "POST", "path": "/activity", "max_bytes": 1048576 }
+    ],
     "aliases": [
       "common"
     ]
@@ -31,6 +36,7 @@
     "community.js",
     "participation.js",
     "board_payload.js",
+    "media_limits.js",
     "profile.js",
     "links.js",
     "emoji_art.js",

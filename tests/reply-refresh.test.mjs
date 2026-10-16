@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 import { randomUUID } from 'node:crypto'
-import { createParticipationIntent } from '../participation.js'
+import { completedParticipationIntent } from '../participation.js'
+import { attachmentBytes, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 import { reconcileReplies, upsertReplyAttempt } from '../reconciliation.js'
 
 const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
@@ -35,7 +36,7 @@ function thread({ count = 0, read, send, image = null } = {}) {
   const errors = []
   const context = vm.createContext({
     Date, Map, Set, String, Number, Promise, crypto: { randomUUID },
-    createParticipationIntent, reconcileReplies, upsertReplyAttempt,
+    completedParticipationIntent, attachmentBytes, THUMBNAIL_MAX_BYTES, reconcileReplies, upsertReplyAttempt,
     replyRequest: { current: 0 }, replySendingRef: { current: false },
     replyPost: post, replyDraft: 'My reply', replySending: false,
     replyImage: image, replyMessageId: null, preparingReplyImage: false,

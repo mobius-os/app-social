@@ -1,6 +1,11 @@
 
 export const PARTICIPATION_INTENT_PATH = 'drafts/board-participation.json'
 
+import {
+  attachmentBytes, galleryFitsMediaLimits, GIF_MAX_BYTES, IMAGE_MAX_BYTES,
+  THUMBNAIL_MAX_BYTES,
+} from './media_limits.js'
+
 const INTENT_VERSION = 1
 export const TEXT_LIMITS = { post: 4000, reply: 1000 }
 const INTENT_KINDS = new Set(['post', 'reply', 'like'])
@@ -13,33 +18,36 @@ const REACTION_EMOJIS = new Set([
 
 const MAX_INTENT_ATTACHMENTS = 4
 
-function normalizedAttachment(value) {
+function normalizedAttachment(value, thumbnailLimit = null) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const { mime, data_b64: data, w, h } = value
   if (
-    !IMAGE_MIME_TYPES.has(mime)
+    !(thumbnailLimit == null ? mime === 'image/gif' || IMAGE_MIME_TYPES.has(mime) : IMAGE_MIME_TYPES.has(mime))
     || typeof data !== 'string'
-    || data.length > 1_400_000
+    || !data.length
+    || data.length % 4 !== 0
+    || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)
+    || attachmentBytes(value) > (thumbnailLimit ?? (mime === 'image/gif' ? GIF_MAX_BYTES : IMAGE_MAX_BYTES))
     || !Number.isInteger(w) || w < 1 || w > 8192
     || !Number.isInteger(h) || h < 1 || h > 8192
   ) return null
   return { mime, data_b64: data, w, h }
 }
 
-function normalizedAttachments(value) {
+function normalizedAttachments(value, thumbnailLimit = null) {
   if (!Array.isArray(value) || !value.length || value.length > MAX_INTENT_ATTACHMENTS) {
     return null
   }
   const out = []
   for (const item of value) {
-    const one = normalizedAttachment(item)
+    const one = normalizedAttachment(item, thumbnailLimit)
     if (!one) return null
     out.push(one)
   }
   return out
 }
 
-export function createParticipationIntent(kind, values = {}) {
+function normalizedIntent(kind, values = {}, legacyThumbnail = false) {
   if (!INTENT_KINDS.has(kind)) return null
   const intent = { version: INTENT_VERSION, kind }
 
@@ -56,30 +64,57 @@ export function createParticipationIntent(kind, values = {}) {
     intent.emoji = REACTION_EMOJIS.has(values.emoji) ? values.emoji : '❤️'
   }
   if (kind === 'post') {
-    const thumbnails = normalizedAttachments(values.thumbnails)
+    // Older saved drafts used a 1.4M-character thumbnail ceiling. Continue
+    // reading those exact drafts, but require the current 120 KiB limit for
+    // anything newly created or saved.
+    const thumbnailLimit = legacyThumbnail ? 1_050_000 : THUMBNAIL_MAX_BYTES
+    const hasThumbnails = values.thumbnails != null
+      && !(Array.isArray(values.thumbnails) && values.thumbnails.length === 0)
+    const thumbnails = hasThumbnails ? normalizedAttachments(values.thumbnails, thumbnailLimit) : null
+    if (hasThumbnails && !thumbnails) return null
     if (thumbnails) intent.thumbnails = thumbnails
-    const attachments = normalizedAttachments(values.attachments)
+    const attachments = values.attachments == null ? null : normalizedAttachments(values.attachments)
+    if (values.attachments != null && !attachments) return null
     if (attachments) {
+      if (!galleryFitsMediaLimits(attachments)) return null
       intent.attachments = attachments
     } else {
-      const attachment = normalizedAttachment(values.attachment)
+      const attachment = values.attachment == null ? null : normalizedAttachment(values.attachment)
+      if (values.attachment != null && !attachment) return null
       if (attachment) intent.attachment = attachment
     }
   }
   if (kind === 'reply') {
-    const attachment = normalizedAttachment(values.attachment)
+    const attachment = values.attachment == null ? null : normalizedAttachment(values.attachment)
+    if (values.attachment != null && !attachment) return null
     if (attachment) {
       intent.attachment = attachment
-      const thumbnail = normalizedAttachment(values.thumbnail)
+      const thumbnail = values.thumbnail == null ? null : normalizedAttachment(
+        values.thumbnail, legacyThumbnail ? 1_050_000 : THUMBNAIL_MAX_BYTES,
+      )
+      if (values.thumbnail != null && !thumbnail) return null
       if (thumbnail) intent.thumbnail = thumbnail
+    } else if (values.thumbnail != null) {
+      return null
     }
   }
   return intent
 }
 
+export function createParticipationIntent(kind, values = {}) {
+  return normalizedIntent(kind, values)
+}
+
+// Completion describes what was explicitly sent, including an accepted older
+// draft's local previews. It cannot create/save a new oversized preview, and
+// clearing still requires exact saved-intent matching and a conditional write.
+export function completedParticipationIntent(kind, values = {}) {
+  return normalizedIntent(kind, values, true)
+}
+
 export function parseParticipationIntent(value) {
   if (!value || value.version !== INTENT_VERSION) return null
-  return createParticipationIntent(value.kind, value)
+  return normalizedIntent(value.kind, value, true)
 }
 
 export function participationIntentMatches(first, second) {
@@ -94,16 +129,23 @@ export async function loadParticipationIntent(storage) {
   return parseParticipationIntent(await storage.get(PARTICIPATION_INTENT_PATH))
 }
 
+// Saving is idempotent for the exact draft already stored. Only an intent that
+// meets current limits may be written; an accepted older draft (for example a
+// legacy oversized preview) can be confirmed as already saved, never written
+// anew, and is refused if the stored record changed or disappeared.
 export async function saveParticipationIntent(storage, intent) {
-  const safe = parseParticipationIntent(intent)
-  if (!safe || !storage?.getWithVersion || !storage?.durableWrite) return false
+  if (intent?.version !== INTENT_VERSION || !storage?.getWithVersion || !storage?.durableWrite) return false
+  const writable = normalizedIntent(intent.kind, intent)
+  const accepted = writable || parseParticipationIntent(intent)
+  if (!accepted) return false
   const { value, version, offline } = await storage.getWithVersion(PARTICIPATION_INTENT_PATH)
   if (offline) throw new Error('Reconnect before leaving Social so your draft can be saved safely.')
+  if (participationIntentMatches(value, accepted)) return true
+  if (!writable) return false
   if (value != null) {
-    if (participationIntentMatches(value, safe)) return true
     throw new Error('You already have a saved action. Finish that draft before starting another; it has not been replaced.')
   }
-  await storage.durableWrite(PARTICIPATION_INTENT_PATH, safe,
+  await storage.durableWrite(PARTICIPATION_INTENT_PATH, writable,
     version == null ? { ifNoneMatch: true } : { ifMatch: version })
   return true
 }

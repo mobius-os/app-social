@@ -233,7 +233,7 @@ class ReplyPhotoTests(unittest.TestCase):
         store.register("outsider.example", "outsider", "")
         invalid = {**body, "attachment": {**body["attachment"], "w": 9000}}
         self.assertEqual(client.post("/api/common/board/reply", json=_signed(key, invalid)).status_code, 400)
-        oversized = {**body, "attachment": wire(b"x" * (1024 * 1024 + 1))}
+        oversized = {**body, "attachment": wire(b"x" * (5 * 1024 * 1024 + 1))}
         self.assertEqual(client.post("/api/common/board/reply", json=_signed(key, oversized)).status_code, 413)
         self.assertEqual(store.get_replies(post_id)["replies"], [])
 

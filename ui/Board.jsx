@@ -25,14 +25,14 @@ import {
 } from '../avatarCache.js'
 import ReactionControls, { useBoardReactions } from './ReactionControls.jsx'
 import { boardPostFitsWireLimit } from '../board_payload.js'
+import { attachmentBytes, galleryFitsMediaLimits, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 import Composer, { ComposerAttachmentButton, ComposerFooter } from './Composer.jsx'
 import { prependedScrollTop } from './interactionRules.js'
 import { reachedEarlierHistory } from './historyScroll.js'
 
 const MAX_POST_IMAGES = 4
-const GALLERY_BUDGET_BYTES = 960 * 1024
 import {
-  createParticipationIntent, participationActionLabel, participationStep, TEXT_LIMITS,
+  completedParticipationIntent, createParticipationIntent, participationActionLabel, participationStep, TEXT_LIMITS,
 } from '../participation.js'
 
 const profileCache = new Map()
@@ -722,7 +722,7 @@ export default function Board({
 
   async function sendReply(event) {
     event.preventDefault()
-    const completedIntent = createParticipationIntent('reply', {
+    const completedIntent = completedParticipationIntent('reply', {
       postId: replyPost?.id, text: replyDraft, attachment: replyImage?.payload,
       thumbnail: replyImage?.thumbnailPayload,
     })
@@ -751,7 +751,11 @@ export default function Board({
     setReplies((prior) => upsertReplyAttempt(prior, optimistic))
     try {
       const receipt = await postReply(post.id, text, {
-        id: localId, attachment: image?.payload, thumbnail: image?.thumbnailPayload,
+        id: localId, attachment: image?.payload,
+        // Older saved previews are local draft data, not today's wire format.
+        // Omit an oversized rendition; the server derives it from the original.
+        thumbnail: image?.thumbnailPayload && attachmentBytes(image.thumbnailPayload) <= THUMBNAIL_MAX_BYTES
+          ? image.thumbnailPayload : undefined,
       })
       const confirmed = { ...optimistic, id: receipt.id || localId, pending: false }
       if (replyPostIdRef.current === post.id) {
@@ -814,17 +818,16 @@ export default function Board({
     return toggleItemReaction(item, emoji, target)
   }
 
-  async function continueParticipation(kind, values) {
+  // Continuing hands the accepted saved intent through unchanged. Rebuilding it
+  // under current limits would reject an older saved draft (such as a legacy
+  // oversized preview); the save seam confirms that exact stored record and
+  // never writes such a preview anew.
+  async function continueParticipation(intent) {
     if (handoffBusy || participationBusy) return
     // The board paints from cache before the profile arrives. Until it does,
     // a member's tap must not be saved as a draft and sent to sign-up.
     if (!me) {
       showToast('Social is still loading your profile. Try again in a moment.', 'error')
-      return
-    }
-    const intent = createParticipationIntent(kind, values)
-    if (!intent) {
-      showToast('This draft couldn’t be prepared. Check it and try again.', 'error')
       return
     }
     setHandoffBusy(true)
@@ -841,15 +844,7 @@ export default function Board({
     const intent = participationIntent
     if (!intent) return
     if (!canInteract) {
-      void continueParticipation(intent.kind, {
-        postId: intent.post_id,
-        text: intent.text,
-        attachment: intent.attachment,
-        thumbnail: intent.thumbnail,
-        attachments: intent.attachments,
-        thumbnails: intent.thumbnails,
-        emoji: intent.emoji,
-      })
+      void continueParticipation(intent)
       return
     }
     if (intent.kind === 'post') {
@@ -1054,23 +1049,20 @@ export default function Board({
     })
   }
 
-  // Compress each selected image now, sharing a byte budget so the whole
-  // gallery (plus the first image kept for old hosts) fits one federation
-  // envelope. Items resumed from a saved draft already carry a payload.
+  // Photos each have their own compression budget; GIFs retain their bytes.
+  // The gallery's original-byte limit does not count the compatibility copy
+  // on the wire. Items resumed from a saved draft already carry a payload.
   async function collectImagePayloads(images, text = '') {
     if (!images.length) return {
       attachment: undefined, attachments: undefined, thumbnails: undefined, previews: [],
     }
-    const budget = images.length <= 1
-      ? undefined
-      : Math.floor(GALLERY_BUDGET_BYTES / (images.length + 1))
     const payloads = []
     const thumbnails = []
     const previews = []
     for (const image of images) {
       const prepared = image.payload
         ? { payload: image.payload, thumbnailPayload: image.thumbnailPayload, previewUrl: image.previewUrl }
-        : await prepareImage(image.file, budget)
+        : await prepareImage(image.file)
       payloads.push(prepared.payload)
       if (prepared.thumbnailPayload) thumbnails.push(prepared.thumbnailPayload)
       previews.push({
@@ -1083,14 +1075,15 @@ export default function Board({
     const result = payloads.length === 1
       ? { attachment: payloads[0], attachments: undefined, thumbnails, previews }
       : { attachment: undefined, attachments: payloads, thumbnails, previews }
-    if (!boardPostFitsWireLimit({ text, ...result })) {
-      throw new Error('These photos are too large to send together. Remove one or choose smaller images.')
+    if (!galleryFitsMediaLimits(payloads) || !boardPostFitsWireLimit({ text, ...result })) {
+      throw new Error('These attachments exceed the 20 MB combined limit. Remove one or choose smaller images.')
     }
     return result
   }
 
   async function publish() {
-    const text = draft.trim()
+    const draftText = draft
+    const text = draftText.trim()
     const images = selectedImages
     if (!text && !images.length) return
     // Kept across a failure (the draft is restored unchanged) and cleared on
@@ -1121,18 +1114,25 @@ export default function Board({
       setPending((current) => current ? { ...current, phase: 'sending' } : current)
     } catch (error) {
       setPending(null)
-      setDraft(text)
+      setDraft(draftText)
       setSelectedImages(images)
       setComposing(true)
       setPosting(false)
       showToast(error.message || 'An image couldn’t be prepared.', 'error')
       return
     }
-    const completedIntent = createParticipationIntent('post', {
-      text, attachment, attachments, thumbnails,
+    const completedIntent = completedParticipationIntent('post', {
+      text: draftText, attachment, attachments, thumbnails,
     })
     try {
-      const receipt = await publishPost(text, attachment, attachments, thumbnails, postId)
+      // A restored gallery can have old or missing previews. Send either a
+      // complete current-budget set or none; originals remain byte-exact and
+      // the server generates missing renditions. Keep local previews in the
+      // completion identity so a different saved draft cannot be consumed.
+      const wireThumbnails = thumbnails?.length === images.length
+        && thumbnails.every(item => attachmentBytes(item) <= THUMBNAIL_MAX_BYTES)
+        ? thumbnails : undefined
+      const receipt = await publishPost(text, attachment, attachments, wireThumbnails, postId)
       setPostMessageId(null)
       // A retry of a post the feed already shows must not reset its counts,
       // including one that landed while this request was in flight.
@@ -1158,7 +1158,7 @@ export default function Board({
       revokeLocalPreviews(images)
     } catch (error) {
       setPending(null)
-      setDraft(text)
+      setDraft(draftText)
       setSelectedImages(images)
       setComposing(true)
       window.mobius?.signal?.('error', { message: error.message, source: 'publish' })

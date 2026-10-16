@@ -40,6 +40,7 @@ test('a post that lands while its publish is in flight is not confirmed a second
       setDraft: () => {}, setSelectedImages: () => {}, setComposing: () => {}, showToast: () => {},
       collectImagePayloads: async () => ({ previews: [] }),
       createParticipationIntent: () => ({}),
+      completedParticipationIntent: () => ({}),
       publishPost: async (_text, _a, _b, _c, id) => {
         // A feed refresh delivers the post before this response returns.
         if (landsDuringRequest) deps.feedRef.current = [{ id }]

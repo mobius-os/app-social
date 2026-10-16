@@ -6,6 +6,7 @@ import test from 'node:test'
 import { renderLayout } from './helpers/layoutBrowser.mjs'
 
 const chrome = process.env.CHROME_BIN
+const limits = (await readFile(new URL('../media_limits.js', import.meta.url), 'utf8')).replaceAll('export ', '')
 const source = (await readFile(new URL('../ui/Media.jsx', import.meta.url), 'utf8'))
   .split('const MAX_BYTES')[1].split('function ManagedImage')[0]
   .replace('export async function prepareImage', 'async function prepareImage')
@@ -16,7 +17,7 @@ test('GIF preparation preserves every original byte while making a still poster 
   const directory = await mkdtemp(join(tmpdir(), 'social-gif-'))
   try {
     const file = join(directory, 'fixture.html')
-    await writeFile(file, `<pre id="result"></pre><script>const MAX_BYTES${source}
+    await writeFile(file, `<pre id="result"></pre><script>${limits};const MAX_BYTES${source}
       (async()=>{try {
         const bytes = Uint8Array.from(atob('${animation}'), c=>c.charCodeAt(0));
         const gif = new File([bytes], 'animation.gif', {type:'image/gif'});
@@ -49,6 +50,49 @@ test('GIF preparation preserves every original byte while making a still poster 
   } finally { await rm(directory, {recursive:true, force:true}) }
 })
 
+test('a real 20 MiB GIF retains original bytes while larger files fail before decoding', { skip: !chrome }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'social-large-gif-'))
+  try {
+    const file = join(directory, 'fixture.html')
+    await writeFile(file, `<pre id="result"></pre><script>${limits};const MAX_BYTES${source}
+      (async()=>{try {
+        const original=Uint8Array.from(atob('${animation}'),c=>c.charCodeAt(0));
+        // A bounded comment extension enlarges the container without adding
+        // frames or decoded canvas work. Both frames remain unchanged.
+        const bytes=new Uint8Array(GIF_MAX_BYTES);bytes.set(original.subarray(0,-1));
+        let at=original.length-1,total=bytes.length-original.length-3;
+        if(total%256===1){bytes.set([0x21,0xfe,0],at);at+=3;total-=3}
+        bytes.set([0x21,0xfe],at);at+=2;
+        while(total>=256){bytes[at++]=255;bytes.fill(65,at,at+255);at+=255;total-=256}
+        if(total){bytes[at++]=total-1;bytes.fill(65,at,at+total-1);at+=total-1}
+        bytes[at++]=0;bytes[at++]=0x3b;
+        if(at!==bytes.length)throw new Error('Invalid comment fixture size');
+        const prepared=await prepareImage(new File([bytes],'large.gif',{type:'image/gif'}));
+        const returned=await fetch(prepared.previewUrl).then(r=>r.arrayBuffer());
+        const hash=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',value))).join(',');
+        const matches=await hash(bytes)===await hash(returned);
+        let oversized;try{await prepareImage(new File([bytes,new Uint8Array(1)],'too-large.gif',{type:'image/gif'}))}catch(e){oversized=e.message}
+        const canvas=document.createElement('canvas');canvas.width=1600;canvas.height=1600;
+        const context=canvas.getContext('2d'),pixels=context.createImageData(1600,1600);
+        for(let i=0;i<pixels.data.length;i+=65536)crypto.getRandomValues(pixels.data.subarray(i,Math.min(i+65536,pixels.data.length)));
+        context.putImageData(pixels,0,0);
+        const photo=await prepareImage(new File([await canvasBlob(canvas,'image/png')],'detailed.png',{type:'image/png'}));
+        document.querySelector('#result').textContent=JSON.stringify({matches,size:returned.byteLength,mime:prepared.payload.mime,oversized,
+          posterMime:prepared.thumbnailPayload.mime,photoBytes:attachmentBytes(photo.payload),photoWidth:photo.payload.w});
+      }catch(e){document.querySelector('#result').textContent=JSON.stringify({error:e.stack})}})();</script>`)
+    const result = await renderLayout(chrome, file)
+    assert.equal(result.error, undefined)
+    assert.equal(result.size, 20 * 1024 * 1024)
+    assert.equal(result.matches, true)
+    assert.equal(result.mime, 'image/gif')
+    assert.equal(result.posterMime, 'image/webp')
+    assert.match(result.oversized, /up to 20 MB/)
+    assert.ok(result.photoBytes > 1024 * 1024)
+    assert.ok(result.photoBytes <= 5 * 1024 * 1024)
+    assert.ok(result.photoWidth > 320)
+  } finally { await rm(directory, {recursive:true,force:true}) }
+})
+
 const media = await readFile(new URL('../ui/Media.jsx', import.meta.url), 'utf8')
 const effect = media.split('function ManagedImage')[1].split('useEffect(() => {')[1].split('  }, [directUrl')[0]
 const click = media.split('function ManagedImage')[1].split('onClick={async () => {')[1].split('      }}')[0]
@@ -56,7 +100,7 @@ test('quiet GIF previews open intact originals and release URLs when media unmou
   const directory = await mkdtemp(join(tmpdir(), 'social-gif-display-'))
   try {
     const file = join(directory, 'fixture.html')
-    await writeFile(file, `<pre id="result"></pre><script>const MAX_BYTES${source}
+    await writeFile(file, `<pre id="result"></pre><script>${limits};const MAX_BYTES${source}
       (async()=>{try {
         const attachment={mime:'image/gif'},directUrl=null,gif=true,index=undefined,storagePath='private/original.gif';
         let postId=null,replyId=null,url=null,fullUrl=null,alt='photo attachment',opened=null,cleanup;

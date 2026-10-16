@@ -8,6 +8,7 @@ implementation.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -22,7 +23,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 from common_transport import federation_request
-from service_io import atomic_write, read_capped_body
+from service_io import atomic_write
 
 PROTOCOL = "common/0"
 PUBLIC_SERVICE_PATH = "/api/app-services/social"
@@ -39,14 +40,30 @@ MAX_REPLY_TEXT_CHARS = 1000
 MAX_NAME_CHARS = 80
 MAX_BIO_CHARS = 400
 MAX_ENVELOPE_BYTES = 32_768
-MAX_ATTACHMENT_ENVELOPE_BYTES = 2 * 1024 * 1024
-MAX_ATTACHMENT_BYTES = 1024 * 1024
+MAX_ATTACHMENT_ENVELOPE_BYTES = 60 * 1024 * 1024
+# Match the existing signed-write allowance, as a total receive budget rather
+# than an idle timeout that an unauthenticated drip stream can keep refreshing.
+MAX_ENVELOPE_RECEIVE_SECONDS = 12.0
+# Media grows scalar strings, not JSON structure. Bound container/entry
+# amplification independently of the wire-byte allowance, including extras.
+MAX_ENVELOPE_STRUCTURE_TOKENS = 32_768
+MAX_ENVELOPE_DEPTH = 64
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_STATIC_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_BOARD_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_THUMBNAIL_BYTES = 120 * 1024
 MAX_ATTACHMENT_DIMENSION = 8192
 MAX_GIF_DIMENSION = 1600
 MAX_GIF_FRAMES = 300
 MAX_GIF_CANVAS_PIXELS = 32_000_000
-# One board post may carry a small gallery. The whole envelope still obeys
-# MAX_ATTACHMENT_ENVELOPE_BYTES, so callers keep the images small enough to fit.
+# Every extension, image descriptor and data sub-block is one interpreted GIF
+# block, walked synchronously in Python. Encoders write full 255-byte data
+# sub-blocks, so a maximum-size original or comment-padded file needs about
+# 82,000 blocks. The cap leaves room for short text/XMP sub-blocks while bounding
+# the walk of a container built from millions of tiny blocks or repeated
+# controls, which the byte limit alone would still admit.
+MAX_GIF_BLOCKS = 524_288
+# One board post may carry four images within a separate raw-byte budget.
 MAX_BOARD_ATTACHMENTS = 4
 MAX_REPLY_AUTHOR_CHARS = 80
 MAX_REPLY_EXCERPT_CHARS = 140
@@ -74,6 +91,7 @@ ATTACHMENT_MIME_EXT = {
 _CONTENT_ENVELOPE_TYPES = {
   "message", "group_post", "group_message", "board_post", "board_reply",
 }
+_JSON_STRUCTURE_RE = re.compile(r'["{}\[\]:,]')
 
 
 def valid_host(host: Any) -> bool:
@@ -174,7 +192,28 @@ def verify(payload: dict, sig_b64: str, public_key_b64: str) -> bool:
     return False
 
 
-def validate_gif_bytes(wire: dict, data: bytes) -> None:
+_GIF_TOO_COMPLEX = "GIF structure is too complex."
+
+
+def _skip_gif_subblocks(data: bytes, position: int, blocks: int) -> tuple[int, int]:
+  """Step over one data sub-block chain, counting each against MAX_GIF_BLOCKS.
+
+  Dense chains are the hot path: lengths are read without slicing payloads, and
+  the walk stops at the cap rather than after the whole container.
+  """
+  end = len(data)
+  while position < end:
+    size = data[position]
+    position += size + 1
+    if not size:
+      return position, blocks
+    blocks += 1
+    if blocks > MAX_GIF_BLOCKS:
+      raise HTTPException(status_code=413, detail=_GIF_TOO_COMPLEX)
+  raise ValueError("Truncated GIF block.")
+
+
+def validate_gif_bytes(wire: dict, data: bytes) -> bytes:
   """Preflight complete GIF framing/budgets, then decode every raster.
 
   Pillow tolerates a missing trailer and can enlarge its canvas for an image
@@ -187,6 +226,7 @@ def validate_gif_bytes(wire: dict, data: bytes) -> None:
   if len(data) > MAX_ATTACHMENT_BYTES:
     raise HTTPException(status_code=413, detail="Attachment is too large.")
   position = 0
+  blocks = 0  # Every interpreted block, bounded by MAX_GIF_BLOCKS.
 
   def take(size: int) -> bytes:
     nonlocal position
@@ -196,10 +236,6 @@ def validate_gif_bytes(wire: dict, data: bytes) -> None:
     block = data[position:end]
     position = end
     return block
-
-  def subblocks() -> None:
-    while size := take(1)[0]:
-      take(size)
 
   try:
     if take(6) not in (b"GIF87a", b"GIF89a") or wire["mime"] != "image/gif":
@@ -214,28 +250,56 @@ def validate_gif_bytes(wire: dict, data: bytes) -> None:
     global_palette = bool(screen[4] & 0x80)
     if global_palette:
       take(3 * (2 ** ((screen[4] & 7) + 1)))
+    # Non-GCE extension metadata may be large but cannot alter LZW rasters.
+    # Validate its framing while excluding it from Pillow's slower metadata
+    # aggregation; the original bytes remain untouched for storage.
+    # Spans of kept blocks, copied into one view only after every cap passes.
+    decoded_spans = [(0, position)]
+    # GIF89a allows one graphic control per rendering block, but decoders
+    # tolerate a run of them. Pillow folds a run before one image: the last
+    # delay, the last transparency index and the last non-zero disposal win.
+    # Keeping just the controls that supply those values (in original order)
+    # decodes exactly like keeping all of them, with at most three per frame.
+    controls: dict[str, tuple[int, int]] = {}
     frames = 0
     while True:
+      block_start = position
       marker = take(1)[0]
       if marker == 0x3b:  # Trailer: it must terminate the entire container.
         if not frames or position != len(data):
           raise ValueError("GIF trailer is invalid.")
+        # Controls after the last image precede no raster.
+        decoded_spans.append((block_start, position))
         break
+      blocks += 1
+      if blocks > MAX_GIF_BLOCKS:
+        raise HTTPException(status_code=413, detail=_GIF_TOO_COMPLEX)
       if marker == 0x21:  # Extension; unknown labels are safely skippable.
         label = take(1)[0]
-        if label in (0xf9, 0xff, 0x01):
+        if label == 0xf9:
+          # Size, packed fields, delay, transparency index, terminator.
+          control = take(6)
+          packed = control[1]
+          if control[0] != 4 or control[5] or packed & 0xe0 or ((packed >> 2) & 7) > 3:
+            raise ValueError("GIF graphic control is invalid.")
+          span = (block_start, position)
+          controls["delay"] = span
+          if packed & 0x01:
+            controls["transparency"] = span
+          if packed & 0x1c:
+            controls["disposal"] = span
+          continue
+        if label in (0xff, 0x01):  # Application and plain-text headers.
           size = take(1)[0]
-          if size != {0xf9: 4, 0xff: 11, 0x01: 12}[label]:
+          if size != (11 if label == 0xff else 12):
             raise ValueError("GIF extension size is invalid.")
-          block = take(size)
-          if label == 0xf9:
-            if block[0] & 0xe0 or ((block[0] >> 2) & 7) > 3 or take(1) != b"\x00":
-              raise ValueError("GIF graphic control is invalid.")
-            continue
-        subblocks()
+          take(size)
+        position, blocks = _skip_gif_subblocks(data, position, blocks)
         continue
       if marker != 0x2c:
         raise ValueError("GIF block is invalid.")
+      decoded_spans.extend(sorted(set(controls.values())))
+      controls.clear()
       descriptor = take(9)
       left, top, frame_width, frame_height = (
         int.from_bytes(descriptor[i:i + 2], "little") for i in (0, 2, 4, 6)
@@ -253,9 +317,15 @@ def validate_gif_bytes(wire: dict, data: bytes) -> None:
         raise ValueError("GIF frame has no color table.")
       if not 2 <= take(1)[0] <= 8:
         raise ValueError("GIF LZW code size is invalid.")
-      subblocks()
+      position, blocks = _skip_gif_subblocks(data, position, blocks)
+      decoded_spans.append((block_start, position))
     # No Pillow seek/load happens until the complete container fits every cap.
-    with Image.open(io.BytesIO(data)) as image:
+    if sum(end - start for start, end in decoded_spans) == len(data):
+      decode_view = data  # Nothing was omitted, so the view is the original.
+    else:
+      source = memoryview(data)
+      decode_view = b"".join(source[start:end] for start, end in decoded_spans)
+    with Image.open(io.BytesIO(decode_view)) as image:
       if image.format != "GIF" or image.size != (width, height):
         raise ValueError("GIF header is invalid.")
       for index in range(frames):
@@ -267,11 +337,54 @@ def validate_gif_bytes(wire: dict, data: bytes) -> None:
         pass
       else:
         raise ValueError("GIF frame count is invalid.")
+    return decode_view
   except (OSError, ValueError, SyntaxError, EOFError, Image.DecompressionBombError) as exc:
     raise HTTPException(status_code=400, detail="GIF attachment is invalid.") from exc
 
 
-def validate_attachment(value: Any) -> tuple[dict, bytes] | None:
+class CheckedAttachment(tuple):
+  """A decoded ``(wire, data)`` original whose bytes passed the media check.
+
+  It unpacks, indexes and compares exactly like the plain pair every caller
+  already uses. Constructing one runs the check (GIF framing, budgets and
+  every raster, including bytes behind a false static MIME), and a checked GIF
+  keeps the bounded decode view that check produced. Storage can then render
+  a poster without walking the same original again. Static rasters are only
+  identified here; their header and decode checks stay with each consumer.
+  """
+
+  def __new__(cls, wire: dict, data: bytes):
+    gif_view = None
+    if wire["mime"] == "image/gif" or data[:6] in (b"GIF87a", b"GIF89a"):
+      gif_view = validate_gif_bytes(wire, data)
+    checked = super().__new__(cls, (wire, data))
+    checked._checked_shape = (wire["mime"], wire["w"], wire["h"])
+    checked._gif_view = gif_view
+    return checked
+
+  @classmethod
+  def of(cls, item: tuple[dict, bytes]) -> CheckedAttachment:
+    """Reuse an earlier check of this exact item, or check a plain pair now.
+
+    A wire edited after its check is checked again. Only an instance whose
+    own check proved this unchanged wire skips the walk; no flag can.
+    """
+    if isinstance(item, cls):
+      wire = item[0]
+      if (wire.get("mime"), wire.get("w"), wire.get("h")) == getattr(item, "_checked_shape", None):
+        return item
+    wire, data = item
+    return cls(wire, data)
+
+  @property
+  def gif_view(self) -> bytes | None:
+    """The checked GIF's metadata-free decode view, or None for a static image."""
+    return getattr(self, "_gif_view", None)
+
+
+def validate_attachment(
+  value: Any, *, thumbnail: bool = False,
+) -> CheckedAttachment | None:
   """Validate and decode the protocol's one supported attachment shape."""
   if value is None:
     return None
@@ -291,30 +404,34 @@ def validate_attachment(value: Any) -> tuple[dict, bytes] | None:
     or not 1 <= height <= MAX_ATTACHMENT_DIMENSION
   ):
     raise HTTPException(status_code=400, detail="Attachment is invalid.")
-  max_b64_chars = 4 * ((MAX_ATTACHMENT_BYTES + 2) // 3)
+  limit = (MAX_THUMBNAIL_BYTES if thumbnail else
+           MAX_ATTACHMENT_BYTES if mime == "image/gif" else
+           MAX_STATIC_ATTACHMENT_BYTES)
+  max_b64_chars = 4 * ((limit + 2) // 3)
   if len(data_b64) > max_b64_chars:
     raise HTTPException(status_code=413, detail="Attachment is too large.")
   try:
     data = base64.b64decode(data_b64, validate=True)
   except Exception as exc:
     raise HTTPException(status_code=400, detail="Attachment data is invalid.") from exc
-  if len(data) > MAX_ATTACHMENT_BYTES:
+  if len(data) > limit:
     raise HTTPException(status_code=413, detail="Attachment is too large.")
   if not data:
     raise HTTPException(status_code=400, detail="Attachment data is empty.")
   # A false static MIME must not bypass animation budgets or capability gates.
-  if mime == "image/gif" or data[:6] in (b"GIF87a", b"GIF89a"):
-    validate_gif_bytes(value, data)
-  return value, data
+  if thumbnail and (mime == "image/gif" or data[:6] in (b"GIF87a", b"GIF89a")):
+    raise HTTPException(status_code=400, detail="Thumbnail must be static.")
+  return CheckedAttachment(value, data)
 
 
 def validate_attachments(
   value: Any, *, max_count: int = MAX_BOARD_ATTACHMENTS,
-) -> list[tuple[dict, bytes]] | None:
+  thumbnail: bool = False,
+) -> list[CheckedAttachment] | None:
   """Validate the multi-image shape: a bounded list of single attachments.
 
-  Each item is validated exactly like a lone attachment; the surrounding
-  envelope cap (MAX_ATTACHMENT_ENVELOPE_BYTES) bounds the combined size.
+  The gallery's original bytes have a separate combined limit. Thumbnails
+  are bounded individually and do not count as originals.
   """
   if value is None:
     return None
@@ -324,12 +441,14 @@ def validate_attachments(
     raise HTTPException(
       status_code=400, detail=f"At most {max_count} images are allowed.",
     )
-  decoded: list[tuple[dict, bytes]] = []
+  decoded: list[CheckedAttachment] = []
   for item in value:
-    one = validate_attachment(item)
+    one = validate_attachment(item, thumbnail=thumbnail)
     if one is None:
       raise HTTPException(status_code=400, detail="Attachments are invalid.")
     decoded.append(one)
+    if not thumbnail and sum(len(data) for _, data in decoded) > MAX_BOARD_TOTAL_ATTACHMENT_BYTES:
+      raise HTTPException(status_code=413, detail="Post images are too large together.")
   return decoded
 
 
@@ -364,11 +483,89 @@ def validate_text_or_attachment(
     raise HTTPException(status_code=400, detail=detail)
 
 
-async def read_envelope(request: Request) -> dict:
-  """Read one bounded envelope without letting Starlette buffer it first."""
-  body = await read_capped_body(request, MAX_ATTACHMENT_ENVELOPE_BYTES)
+def _preflight_envelope_structure(document: str) -> None:
+  """Bound JSON allocation shape, without decoding containers or rewriting source.
+
+  Count the six structural punctuation characters outside quoted strings.
+  Commas/colons also bound scalar entries and object keys (including duplicates),
+  not just containers. Stdlib's string scanner advances over quoted strings in
+  C, including arbitrary escaping; its temporary scalar is discarded immediately.
+  This avoids Python work per escape without narrowing legitimate media/text
+  encodings or materializing any containers. No source slices or token list are
+  made. Grammar, escapes, Unicode and value semantics remain stdlib JSON's job.
+  Resource overruns take precedence over any later malformed-JSON error.
+  """
+  position = tokens = depth = strings = 0
+  while match := _JSON_STRUCTURE_RE.search(document, position):
+    token = match[0]
+    position = match.end()
+    if token == '"':
+      strings += 1
+      if strings > MAX_ENVELOPE_STRUCTURE_TOKENS:
+        # Valid entries already spend punctuation. Malformed adjacent strings
+        # must not buy unbounded Python/C calls by omitting those separators.
+        raise HTTPException(status_code=413, detail="Envelope JSON is too complex.")
+      try:
+        position = json.decoder.scanstring(document, position)[1]
+      except ValueError:
+        # Parsing must fail at this string before any later containers. The
+        # bounded prefix is safe; let json.loads report the ordinary JSON400.
+        return
+      continue
+    tokens += 1
+    if token in "{[":
+      depth += 1
+    elif token in "}]":
+      depth -= 1
+    if tokens > MAX_ENVELOPE_STRUCTURE_TOKENS or depth > MAX_ENVELOPE_DEPTH:
+      raise HTTPException(status_code=413, detail="Envelope JSON is too complex.")
+
+
+def loads_bounded_json(data: bytes) -> Any:
+  """Decode JSON bytes like ``json.loads(bytes)``, admitting structure first.
+
+  Wire envelopes and authenticated plaintext revealed only after decryption
+  share this one primitive; neither has a trusted shape. Encoding detection
+  matches stdlib's UTF-8/16/32 handling and retains one decoded source. A
+  resource overrun raises HTTPException(413) before any container exists; any
+  other exception means the bytes are not JSON. Callers own their wire errors.
+  """
+  document = data.decode(json.detect_encoding(data), "surrogatepass")
+  _preflight_envelope_structure(document)
+  return json.loads(document)
+
+
+async def read_envelope(
+  request: Request, *, max_bytes: int = MAX_ATTACHMENT_ENVELOPE_BYTES,
+) -> dict:
+  """Read within the route's wire cap, narrowed by any public reservation."""
+  # The public router reserves this allowance for the complete request lifetime.
+  # Its route-owned state also caps control streams before JSON materialization;
+  # neither an untrusted Content-Length nor the document's type grants room.
+  state = getattr(request, "state", None)
+  limit = min(max_bytes, getattr(state, "common_envelope_max_bytes", max_bytes))
+  body = bytearray()
+  receive_budget = asyncio.timeout(MAX_ENVELOPE_RECEIVE_SECONDS)
   try:
-    envelope = json.loads(body)
+    async with receive_budget:
+      async for chunk in request.stream():
+        # Also enforce the absolute budget for immediately-ready chunks, which
+        # need not suspend to deliver asyncio's deadline cancellation.
+        if asyncio.get_running_loop().time() >= receive_budget.when():
+          raise HTTPException(status_code=408, detail="Envelope receive deadline exceeded.")
+        # Reject even one oversized chunk before copying it into our body buffer.
+        if len(chunk) > limit - len(body):
+          raise HTTPException(status_code=413, detail="Request body is too large.")
+        body.extend(chunk)
+  except TimeoutError:
+    if not receive_budget.expired():
+      raise
+    raise HTTPException(status_code=408, detail="Envelope receive deadline exceeded.") from None
+  body = bytes(body)
+  try:
+    envelope = loads_bounded_json(body)
+  except HTTPException:
+    raise
   except Exception as exc:
     raise HTTPException(status_code=400, detail="Envelope is not JSON.") from exc
   if not isinstance(envelope, dict):
@@ -521,12 +718,16 @@ class ActorVerifier:
 __all__ = [
   "ACTOR_CACHE_LIMIT", "ACTOR_CACHE_TTL_S", "ACTOR_FETCH_TIMEOUT_S",
   "ATTACHMENT_MIME_EXT", "ActorVerifier",
-  "CLOCK_SKEW_S", "MAX_ATTACHMENT_BYTES", "MAX_ATTACHMENT_DIMENSION",
+  "CLOCK_SKEW_S", "MAX_ATTACHMENT_BYTES", "MAX_STATIC_ATTACHMENT_BYTES",
+  "MAX_BOARD_TOTAL_ATTACHMENT_BYTES", "MAX_THUMBNAIL_BYTES", "MAX_ATTACHMENT_DIMENSION",
   "MAX_ATTACHMENT_ENVELOPE_BYTES", "MAX_AVATAR_BYTES", "MAX_BIO_CHARS",
   "MAX_BOARD_ATTACHMENTS", "validate_attachments",
   "MAX_ENVELOPE_BYTES", "MAX_NAME_CHARS", "MAX_REPLY_TEXT_CHARS",
+  "MAX_ENVELOPE_STRUCTURE_TOKENS", "MAX_ENVELOPE_DEPTH",
+  "MAX_ENVELOPE_RECEIVE_SECONDS",
   "MAX_MESSAGE_TEXT_CHARS", "MAX_POST_TEXT_CHARS",
   "MAX_GIF_DIMENSION", "MAX_GIF_FRAMES", "MAX_GIF_CANVAS_PIXELS",
+  "MAX_GIF_BLOCKS",
   "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
   "COMMUNITY_HOST", "NEEDS_USERNAME", "PROTOCOL", "PUBLIC_SERVICE_PATH",
   "new_signing_key", "signing_public_key",
@@ -534,7 +735,7 @@ __all__ = [
   "read_envelope", "sign",
   "valid_host", "valid_id",
   "validate_attachment", "validate_attachment_envelope_size",
-  "validate_gif_bytes",
+  "validate_gif_bytes", "CheckedAttachment",
   "validate_reply_to", "validate_text_or_attachment",
   "wire_json_size",
   "verify",

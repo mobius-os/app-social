@@ -61,6 +61,7 @@ import os
 import re
 import time
 import uuid
+import weakref
 from pathlib import Path
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
@@ -72,13 +73,15 @@ from pydantic import BaseModel
 
 from common_protocol import (
   ATTACHMENT_MIME_EXT as _ATTACHMENT_MIME_EXT,
-  MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
+  MAX_ATTACHMENT_BYTES, MAX_STATIC_ATTACHMENT_BYTES, MAX_THUMBNAIL_BYTES,
+  MAX_AVATAR_BYTES, MAX_BIO_CHARS,
   COMMUNITY_HOST, MAX_BOARD_ATTACHMENTS as _MAX_BOARD_ATTACHMENTS,
   MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_POST_TEXT_CHARS, MAX_REPLY_TEXT_CHARS,
   CLOCK_SKEW_S,
   NEEDS_USERNAME, OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
   canonical as _canonical, peer_service_url as _peer_service_url,
   post_signed_envelope as _post_signed_envelope,
+  loads_bounded_json as _loads_bounded_json,
   new_signing_key, read_envelope as _read_envelope, sign as _sign,
   signing_public_key,
   valid_host as _valid_host, valid_id as _valid_id,
@@ -87,6 +90,7 @@ from common_protocol import (
   validate_attachments as _validate_attachments,
   validate_reply_to as _validate_reply_to,
   validate_text_or_attachment as _validate_text_or_attachment,
+  wire_json_size as _wire_json_size,
 )
 from common_public import (
   AVATAR_DIGEST, BOARD_REACTION_EMOJIS, CommonPublicStore, image_thumbnail_bytes,
@@ -160,6 +164,47 @@ def _serve_image(found):
   # Social's own sandboxed frame gets a fresh browser cache per launch, so it
   # also keeps thumbnails in app storage (boardMediaCache.js).
   return CommonPublicStore.serve_image(found, cache_control=OWNER_BOARD_IMAGE_CACHE)
+
+
+class _PinnedBoardMediaResponse(FileResponse):
+  """Keep native file/range responses bound to the opened cache inode."""
+
+  def __init__(self, found: tuple[Path, str]):
+    path, mime = found
+    opened = path.open("rb")
+    try:
+      stat = os.fstat(opened.fileno())
+      self.fetched_at = stat.st_mtime
+      super().__init__(
+        f"/proc/self/fd/{opened.fileno()}", media_type=mime,
+        stat_result=stat,
+        headers={
+          "cache-control": OWNER_BOARD_IMAGE_CACHE,
+          "etag": f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"',
+          "x-content-type-options": "nosniff",
+        },
+      )
+    except BaseException:
+      opened.close()
+      raise
+    self._opened = opened
+    # An uninvoked response has no ASGI lifecycle to release its descriptor.
+    self._finalizer = weakref.finalize(self, opened.close)
+
+  def close(self) -> None:
+    self._finalizer()
+
+  async def __call__(self, scope, receive, send):
+    try:
+      # pathsend can defer opening until after this response releases its fd.
+      if "http.response.pathsend" in scope.get("extensions", {}):
+        scope = {**scope, "extensions": {
+          key: value for key, value in scope["extensions"].items()
+          if key != "http.response.pathsend"
+        }}
+      await super().__call__(scope, receive, send)
+    finally:
+      self.close()
 
 
 def _identity_path() -> Path:
@@ -303,6 +348,23 @@ def _peer_board_media_dir() -> Path:
   return path
 
 
+@asynccontextmanager
+async def _peer_board_media_lock(cache_dir: Path):
+  """Serialize cache writes, eviction, and pinning across service processes."""
+  # Never unlink this inode: two processes could otherwise lock different files.
+  with (cache_dir / ".media.lock").open("a+b") as handle:
+    while True:
+      try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+      except BlockingIOError:
+        await asyncio.sleep(0.02)
+    try:
+      yield
+    finally:
+      fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _peer_board_media_name(host: str, post_id: str) -> str:
   safe_host = re.sub(r"[^a-z0-9.-]", "_", host)
   return f"{safe_host}-{post_id}"
@@ -326,6 +388,7 @@ def _evict_peer_board_media(cache_dir: Path, keep: Path) -> None:
 
   Full-size originals go before thumbnails, least recently used first, so an
   offline peer's older photos keep serving from cache until space is needed.
+  Runtime callers hold _peer_board_media_lock through eviction and response pin.
   """
   entries = []
   for path in cache_dir.iterdir():
@@ -368,10 +431,12 @@ async def _download_avatar(url: str) -> bytes:
   return response.content
 
 
-async def _download_board_media(url: str) -> tuple[str, bytes]:
+async def _download_board_media(url: str, *, thumbnail: bool = False) -> tuple[str, bytes]:
   """Fetch one hosted board image without buffering more than the wire cap."""
   response = await federation_request(
-    "GET", url, max_response_bytes=MAX_ATTACHMENT_BYTES,
+    # Existing hosts stored posters up to 1 MiB. Read that bounded legacy
+    # allowance, then re-encode to the current thumbnail output budget.
+    "GET", url, max_response_bytes=(1024 * 1024 if thumbnail else MAX_ATTACHMENT_BYTES),
     response_format="binary", timeout_seconds=OUTBOUND_TIMEOUT_S,
   )
   response.raise_for_status()
@@ -459,7 +524,10 @@ def _open_dm(message_id: str, enc: Any, private_key_b64: str) -> dict:
     plaintext = ChaCha20Poly1305(
       _dm_key(private.exchange(ephemeral))
     ).decrypt(nonce, ciphertext, message_id.encode("utf-8"))
-    payload = json.loads(plaintext)
+    # Authentication proves the sender, not a safe JSON shape. Admit the
+    # revealed bytes through the same structure budget as wire envelopes;
+    # an overrun stays the generic decryption failure below.
+    payload = _loads_bounded_json(plaintext)
     if not isinstance(payload, dict) or set(payload) != {
       "text", "attachment", "reply_to",
     }:
@@ -787,6 +855,8 @@ def _stored_attachment(app, peer_host: str, record: dict) -> tuple[dict, bytes] 
   path = (conversation / relative).resolve()
   if not path.is_relative_to(conversation) or not path.is_file():
     raise ValueError("Stored attachment is unavailable.")
+  if path.stat().st_size > MAX_ATTACHMENT_BYTES:
+    raise ValueError("Stored attachment is too large.")
   data = path.read_bytes()
   wire = {
     "mime": metadata.get("mime"),
@@ -1227,7 +1297,7 @@ def _finish_activity(token: str, claim: str, delivered: bool) -> None:
 @router.post("/activity")
 async def receive_board_activity(request: Request):
   """Accept a signed notice that one of the owner's posts got a like or reply."""
-  envelope = await _read_envelope(request)
+  envelope = await _read_envelope(request, max_bytes=MAX_ENVELOPE_BYTES)
   if envelope.get("v") != 0 or envelope.get("type") != "board_activity":
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   if envelope.get("to") != _own_host():
@@ -1783,16 +1853,23 @@ async def retry_direct_message(
   }
 
 
-async def _require_community_media_support(host: str, *, reply: bool = False, gif: bool = False):
+async def _require_community_media_support(
+  host: str, *, reply: bool = False, gif: bool = False,
+  originals: list[tuple[dict, bytes]] | None = None,
+  thumbnails: list[tuple[dict, bytes]] | None = None,
+  envelope_bytes: int = 0,
+):
   """Older hosts must explicitly support media before accepting its write."""
-  label = "reply photo" if reply else "GIF"
+  label = "reply photo" if reply else "media"
   try:
     response = await federation_request(
       "GET", _peer_service_url(host, "board"), params={"limit": 1},
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
-    capabilities = response.json().get("capabilities", {})
+    feed = response.json()
+    capabilities = feed.get("capabilities", {})
+    limits = feed.get("media_limits")
   except Exception as exc:
     raise HTTPException(status_code=502,
       detail=f"Community {label} support could not be checked.") from exc
@@ -1800,6 +1877,32 @@ async def _require_community_media_support(host: str, *, reply: bool = False, gi
     raise HTTPException(status_code=409, detail="Community host does not support reply photos yet.")
   if gif and capabilities.get("gif_attachments") is not True:
     raise HTTPException(status_code=409, detail="Community host does not support animated GIFs yet. Your draft is unchanged.")
+  # Older hosts advertise only booleans. Their real caps are 1 MiB per
+  # original and 2 MiB per signed envelope, even if gif_attachments is true.
+  if not isinstance(limits, dict):
+    limits = {"gif_bytes": 1024 * 1024, "static_bytes": 1024 * 1024,
+              "combined_bytes": 2 * 1024 * 1024, "thumbnail_bytes": 1024 * 1024,
+              "envelope_bytes": 2 * 1024 * 1024, "max_images": 4}
+  try:
+    if any(not isinstance(limits[key], int) or isinstance(limits[key], bool) or limits[key] <= 0
+           for key in ("gif_bytes", "static_bytes", "combined_bytes",
+                       "thumbnail_bytes", "envelope_bytes", "max_images")):
+      raise ValueError()
+    if len(originals or []) > limits["max_images"]:
+      raise ValueError()
+    for wire, data in originals or []:
+      key = "gif_bytes" if wire["mime"] == "image/gif" else "static_bytes"
+      if len(data) > limits[key]:
+        raise ValueError()
+    if sum(len(data) for _, data in originals or []) > limits["combined_bytes"]:
+      raise ValueError()
+    if any(len(data) > limits["thumbnail_bytes"] for _, data in thumbnails or []):
+      raise ValueError()
+    if envelope_bytes > limits["envelope_bytes"]:
+      raise ValueError()
+  except (KeyError, TypeError, ValueError):
+    raise HTTPException(status_code=409, detail="Community host media limit is smaller than this draft. Your draft is unchanged.")
+  return limits
 
 
 @router.post("/publish")
@@ -1814,7 +1917,9 @@ async def publish_post(
   text = post.text.strip()
   attachment = _validate_attachment(post.attachment)
   attachments = _validate_attachments(post.attachments)
-  thumbnails = _validate_attachments(post.thumbnails)
+  if attachment is not None and attachments and attachment[0] != attachments[0][0]:
+    raise HTTPException(status_code=400, detail="First post image does not match its gallery copy.")
+  thumbnails = _validate_attachments(post.thumbnails, thumbnail=True)
   image_count = len(attachments) if attachments else (1 if attachment else 0)
   if thumbnails and len(thumbnails) != image_count:
     raise HTTPException(status_code=400, detail="Post thumbnails are invalid.")
@@ -1851,8 +1956,12 @@ async def publish_post(
   write_started = False
   try:
     async with asyncio.timeout(COMMUNITY_WRITE_TIMEOUT_S):
-      if has_gif:
-        await _require_community_media_support(host, gif=True)
+      if first is not None:
+        await _require_community_media_support(
+          host, gif=has_gif,
+          originals=attachments or [attachment], envelope_bytes=_wire_json_size(envelope),
+          thumbnails=thumbnails,
+        )
       write_started = True
       response = await _post_signed_envelope(
         _peer_service_url(host, "board"), envelope,
@@ -1862,7 +1971,7 @@ async def publish_post(
       return {"status": "posted", "id": envelope["id"]}
   except (TimeoutError, httpx.TimeoutException) as exc:
     detail = ("The post may have been sent, but confirmation timed out. Send it again to confirm."
-      if write_started else "Community GIF support could not be checked.")
+      if write_started else "Community media support could not be checked.")
     raise HTTPException(status_code=502, detail=detail) from exc
   except HTTPException:
     raise
@@ -1937,13 +2046,19 @@ async def _serve_owner_board_media(
   stem = base_stem if index is None else f"{base_stem}-{index}"
   if thumbnail:
     stem = f"{stem}-thumb"
-  cached = _find_image(cache_dir, stem)
-  if (
-    cached is not None
-    and time.time() - cached[0].stat().st_mtime < BOARD_MEDIA_CACHE_TTL_S
-  ):
-    _mark_board_media_used(cached[0])
-    return _serve_image(cached)
+  cached = None
+  cached_response = None
+  async with _peer_board_media_lock(cache_dir):
+    cached = _find_image(cache_dir, stem)
+    if cached is not None:
+      try:
+        cached_response = _PinnedBoardMediaResponse(cached)
+      except OSError:
+        cached = None
+      else:
+        if time.time() - cached_response.fetched_at < BOARD_MEDIA_CACHE_TTL_S:
+          _mark_board_media_used(cached[0])
+          return cached_response
   suffix = (
     _board_media_path("thumbnail", post_id, index, "webp") if thumbnail
     else _board_media_path(
@@ -1952,7 +2067,7 @@ async def _serve_owner_board_media(
   )
   try:
     try:
-      mime, data = await _download_board_media(_peer_service_url(host, suffix))
+      mime, data = await _download_board_media(_peer_service_url(host, suffix), thumbnail=thumbnail)
     except Exception:
       # A full image's typed link names what the host stored, so a miss means
       # it is gone; only a thumbnail has something else to fall back to.
@@ -1966,22 +2081,30 @@ async def _serve_owner_board_media(
       # Re-encode after the header-size guard before caching or serving them.
       mime, data = image_thumbnail_bytes(data)
     target = cache_dir / f"{stem}.{_ATTACHMENT_MIME_EXT[mime]}"
-    atomic_write(target, data)
-    for _old_mime, ext in _ATTACHMENT_MIME_EXT.items():
-      old = cache_dir / f"{stem}.{ext}"
-      if old != target and old.is_file():
-        old.unlink()
-    try:
-      _evict_peer_board_media(cache_dir, target)
-    except OSError:
-      pass
-    cached = (target, mime)
+    async with _peer_board_media_lock(cache_dir):
+      atomic_write(target, data)
+      for _old_mime, ext in _ATTACHMENT_MIME_EXT.items():
+        old = cache_dir / f"{stem}.{ext}"
+        if old != target and old.is_file():
+          old.unlink()
+      try:
+        _evict_peer_board_media(cache_dir, target)
+      except OSError:
+        pass
+      response = _PinnedBoardMediaResponse((target, mime))
+  except asyncio.CancelledError:
+    if cached_response is not None:
+      cached_response.close()
+    raise
   except Exception:
-    if cached is None:
+    if cached_response is None:
       raise HTTPException(status_code=404, detail="Board image not found.")
     # The peer is unreachable: the expired copy is still the best answer.
     _mark_board_media_used(cached[0])
-  return _serve_image(cached)
+    return cached_response
+  if cached_response is not None:
+    cached_response.close()
+  return response
 
 
 @router.get("/board-media/{post_id}")
@@ -2040,7 +2163,9 @@ async def get_reply_media_for_owner(
   if extension:
     path += f".{extension}"
   try:
-    found_mime, data = await _download_board_media(_peer_service_url(COMMUNITY_HOST, path))
+    found_mime, data = await _download_board_media(
+      _peer_service_url(COMMUNITY_HOST, path), thumbnail=thumbnail,
+    )
     if thumbnail:
       found_mime, data = image_thumbnail_bytes(data)
   except Exception as exc:
@@ -2181,7 +2306,7 @@ async def reply_to_post(
     raise HTTPException(status_code=400, detail="Post id is invalid.")
   text = body.text.strip()
   attachment = _validate_attachment(body.attachment)
-  thumbnail = _validate_attachment(body.thumbnail)
+  thumbnail = _validate_attachment(body.thumbnail, thumbnail=True)
   _validate_text_or_attachment(text, attachment, "Reply text is invalid.", MAX_REPLY_TEXT_CHARS)
   if thumbnail is not None and attachment is None:
     raise HTTPException(status_code=400, detail="Reply thumbnail needs a photo.")
@@ -2194,11 +2319,14 @@ async def reply_to_post(
   write_started = False
   try:
     async with asyncio.timeout(COMMUNITY_WRITE_TIMEOUT_S):
+      limits = None
       if attachment is not None:
-        # Older hosts may accept board_reply but ignore its new media fields.
-        # Refuse the write until the shared host explicitly advertises support.
-        await _require_community_media_support(host, reply=True,
-          gif=attachment[0]["mime"] == "image/gif")
+        # Check compatibility before building a signed reply. This also
+        # preserves the old-host rejection path when no local host is set.
+        limits = await _require_community_media_support(
+          host, reply=True, gif=attachment[0]["mime"] == "image/gif",
+          originals=[attachment], thumbnails=[thumbnail] if thumbnail else None,
+        )
       sent_at = time.time()
       envelope = {
         "v": 0,
@@ -2215,6 +2343,8 @@ async def reply_to_post(
         envelope["thumbnail"] = thumbnail[0]
       envelope["sig"] = _sign(envelope, identity["private_key_b64"])
       _validate_attachment_envelope_size(envelope)
+      if limits is not None and _wire_json_size(envelope) > limits["envelope_bytes"]:
+        raise HTTPException(status_code=409, detail="Community host media limit is smaller than this draft. Your draft is unchanged.")
       write_started = True
       response = await _post_signed_envelope(
         _peer_service_url(host, "board/reply"), envelope,

@@ -1,4 +1,4 @@
-const BOARD_ENVELOPE_MAX_BYTES = 2 * 1024 * 1024
+import { BOARD_ENVELOPE_MAX_BYTES } from './media_limits.js'
 
 // The browser does not know its final federation hostname, id, timestamp, or
 // signature. Use their largest valid shapes so passing here guarantees that
