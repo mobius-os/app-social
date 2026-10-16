@@ -4,7 +4,16 @@ import {
   clampLightboxScale, MAX_LIGHTBOX_SCALE, MIN_LIGHTBOX_SCALE,
   isTouchPrimary, pinchLightboxScale, prependedScrollTop, shouldSubmitMessageKey,
   TOUCH_PRIMARY_QUERY, wheelLightboxScale,
+  gallerySwipeDirection,
 } from '../ui/interactionRules.js'
+
+test('gallery swipes require deliberate horizontal movement, not taps or vertical scrolling', () => {
+  assert.equal(gallerySwipeDirection(-80, 12), 1)
+  assert.equal(gallerySwipeDirection(80, -12), -1)
+  assert.equal(gallerySwipeDirection(49, 0), 0)
+  assert.equal(gallerySwipeDirection(-80, 100), 0)
+  assert.equal(gallerySwipeDirection(0, 0), 0)
+})
 
 test('message keyboard rules match Möbius Chat across physical and touch keyboards', () => {
   assert.equal(TOUCH_PRIMARY_QUERY, '(hover: none) and (pointer: coarse)')

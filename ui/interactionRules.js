@@ -45,6 +45,13 @@ export function pinchLightboxScale(startScale, startDistance, currentDistance) {
   return clampLightboxScale(Number(startScale) * (Number(currentDistance) / initial))
 }
 
+// Only deliberate horizontal drags browse images; vertical movement and
+// pinch/pan gestures are left to the viewer's own zoom surface.
+export function gallerySwipeDirection(dx, dy) {
+  return Math.abs(dx) >= 50 && Math.abs(dx) > Math.abs(dy) * 1.5
+    ? dx < 0 ? 1 : -1 : 0
+}
+
 // Clipboard images use the same preparation path as the photo picker. Text-only
 // pastes remain native; chat supports one photo per outgoing message.
 export function clipboardImageFile(clipboardData) {

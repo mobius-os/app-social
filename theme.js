@@ -8,7 +8,6 @@ export const CSS = `
   background: var(--bg); color: var(--text); font-family: var(--font);
   -webkit-font-smoothing: antialiased;
 }
-.cn-root ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
 .cn-root :where(input, textarea) { caret-color: var(--accent); }
 .cn-scroll {
   flex: 1; min-height: 0;
@@ -17,6 +16,7 @@ export const CSS = `
   word-break: break-word; overflow-wrap: anywhere;
 }
 /* /mobius-ui:Root */
+.cn-root ::selection { background: color-mix(in srgb, var(--accent) 48%, transparent); color: var(--text); }
 .cn-scroll { order: 1; padding: 0 16px 24px; }
 .cn-scroll.is-board { padding-bottom: 0; }
 .cn-content { width: 100%; max-width: 720px; margin: 0 auto; }
@@ -141,17 +141,63 @@ export const CSS = `
 .cn-post > .cn-avatar, .cn-post > .cn-avatar-btn { grid-column: 1; grid-row: 1; align-self: start; }
 .cn-post-main { grid-column: 2; min-width: 0; }
 .cn-post-head { min-height: 22px; display: flex; align-items: flex-start; }
-.cn-post.is-mine .cn-post-head { padding-right: 44px; }
-.cn-post-delete {
-  position: absolute; top: 7px; right: 0;
-  width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%;
+.cn-post.is-mine .cn-post-head { padding-right: 84px; }
+.cn-own-actions {
+  position: absolute; top: 7px; right: 0; display: flex; gap: 0;
+  transition: opacity .14s ease;
+}
+.cn-own-actions.is-compact { position: static; margin-left: auto; align-self: center; }
+.cn-own-action {
+  width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   background: transparent; color: var(--muted); cursor: pointer;
   transition: background .14s ease, color .14s ease, transform .1s ease;
 }
-.cn-post-delete:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
-.cn-post-delete:active { transform: scale(.94); }
-.cn-post-delete svg { width: 17px; height: 17px; }
+.cn-own-actions.is-compact .cn-own-action { width: 32px; height: 32px; margin: -6px 0; }
+.cn-own-action:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
+.cn-own-action.is-danger:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.cn-own-action:active { transform: scale(.94); }
+.cn-own-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cn-own-action:disabled { opacity: .4; cursor: default; }
+.cn-own-action svg { width: 17px; height: 17px; }
+.cn-own-actions.is-compact .cn-own-action svg { width: 15px; height: 15px; }
+@media (hover: hover) and (pointer: fine) {
+  .cn-own-actions { opacity: 0; }
+  .cn-reply-row:hover .cn-own-actions,
+  .cn-own-actions:focus-within { opacity: 1; }
+  /* Separate rule: a browser without :has() drops only this one. */
+  .cn-post:hover:not(:has(.cn-inline-replies:hover, .cn-reply-composer:hover)) .cn-post-head > .cn-own-actions { opacity: 1; }
+}
+.cn-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.cn-edited { margin-left: 5px; font-size: 12px; color: var(--muted); font-weight: 400; }
+.cn-inline-edit { margin-top: 4px; }
+.cn-inline-edit-field {
+  display: block; width: 100%; min-height: 40px; max-height: 320px; resize: none; overflow-y: auto;
+  padding: 9px 12px; border-radius: 12px; border: 1px solid var(--accent);
+  background: var(--surface); color: var(--text);
+  font: inherit; font-size: 15px; line-height: 1.45;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.cn-inline-edit-field:focus { outline: none; }
+.cn-inline-edit-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.cn-inline-edit-hint { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
+.cn-inline-edit-hint kbd {
+  font: inherit; font-size: 11px; padding: 1px 5px; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.cn-btn.cn-btn-small { min-height: 36px; padding: 0 14px; font-size: 13.5px; }
+@media (hover: none) {
+  .cn-own-action, .cn-own-actions.is-compact .cn-own-action { width: 44px; height: 44px; }
+  .cn-own-actions.is-compact .cn-own-action { margin: -12px 0; }
+  .cn-post.is-mine .cn-post-head { padding-right: 92px; }
+}
+@media (hover: none) {
+  .cn-inline-edit-hint { visibility: hidden; }
+  .cn-btn.cn-btn-small { min-height: 44px; }
+}
 .cn-person {
   padding: 0; border: 0; background: transparent; text-align: left; color: inherit;
   font-family: var(--font); cursor: pointer; min-height: 24px; min-width: 0;
@@ -366,13 +412,15 @@ export const CSS = `
 .cn-view-heading p { margin: 4px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .cn-view-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
 .cn-view-actions svg { width: 18px; height: 18px; }
+/* Each toggle is a 44px target; its transparent border keeps the inset pill. */
 .cn-message-tabs {
-  display: inline-flex; min-height: 44px; margin: 0 0 10px; padding: 3px; gap: 2px;
+  display: inline-flex; min-height: 44px; margin: 0 0 10px; padding: 0 2px; gap: 0;
   border-radius: 13px; background: var(--surface-2, var(--surface));
   box-shadow: none;
 }
 .cn-message-tabs button {
-  min-height: 38px; padding: 7px 14px; border: 0; border-radius: 10px;
+  min-height: 44px; padding: 7px 14px; border: solid transparent; border-width: 3px 1px;
+  border-radius: 13px; background-clip: padding-box;
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   background: transparent; color: var(--muted); font: 650 13.5px var(--font);
   cursor: pointer; transition: background 0.15s ease, color 0.15s ease;
@@ -463,8 +511,9 @@ export const CSS = `
   flex: 1; min-height: 0; overflow-y: auto; padding: 18px 16px;
   display: flex; flex-direction: column; gap: 8px;
 }
+.cn-message-log { display: flex; flex-direction: column; gap: 8px; }
 .cn-history-more {
-  align-self: center; min-height: 34px; padding: 7px 13px; margin-bottom: 4px;
+  align-self: center; min-height: 44px; padding: 7px 13px; margin-bottom: 4px;
   border: 1px solid var(--border); border-radius: 999px;
   background: var(--surface); color: var(--muted); font: inherit;
   font-size: 12.5px; font-weight: 650; cursor: pointer;
@@ -522,15 +571,29 @@ export const CSS = `
   color: var(--accent-fg); border-color: transparent;
   align-self: flex-end; border-bottom-right-radius: 7px;
 }
+/* Own bubbles are filled with the accent, so an accent-tinted selection would
+   vanish there: invert it instead. */
+.cn-root .cn-bubble.is-mine ::selection { background: var(--accent-fg); color: var(--accent); }
 .cn-bubble.is-theirs { border-bottom-left-radius: 7px; }
-.cn-bubble-time { display: block; margin-top: 3px; font-size: 10.5px; opacity: 0.62; text-align: right; }
-.cn-bubble.is-failed { border-color: var(--danger); }
-.cn-failed-note {
-  appearance: none; border: 0; background: transparent; padding: 0;
-  font: inherit; font-size: 11px; color: var(--danger); cursor: pointer;
-  align-self: flex-end; margin-top: -4px;
+.cn-bubble-time {
+  display: block; margin-top: 3px; font-size: 10.5px; opacity: 0.62; text-align: right;
+  user-select: none; -webkit-user-select: none;
 }
+.cn-bubble.is-mine .cn-bubble-time { opacity: 1; }
+.cn-bubble.is-failed { border-color: var(--danger); }
+/* Readable text beside a danger icon. The 44px target reaches into the 8px
+   list gaps on both sides but never over the bubble or reply button. */
+.cn-failed-note {
+  appearance: none; border: 0; background: transparent; padding: 0 4px;
+  min-height: 44px; display: inline-flex; align-items: center; gap: 4px;
+  font: inherit; font-size: 12px; font-weight: 650; color: var(--text); cursor: pointer;
+  align-self: flex-end; margin: -8px 0;
+}
+.cn-failed-note svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--danger); }
 .cn-failed-note:disabled { cursor: default; opacity: 0.65; }
+.cn-delivery-note { display: flex; flex-direction: column; align-items: flex-end; align-self: flex-end; max-width: min(100%, 440px); }
+.cn-delivery-note .cn-failed-note { margin: 0; }
+.cn-delivery-reason { color: var(--muted); font-size: 14px; line-height: 1.45; padding: 0 8px 6px; text-align: right; overflow-wrap: anywhere; }
 .cn-message-line {
   width: 92%; display: flex; align-items: flex-end; gap: 6px; align-self: flex-start;
 }
@@ -558,6 +621,7 @@ export const CSS = `
   opacity: 0; pointer-events: none; transition: opacity 0.14s ease, background 0.14s ease;
 }
 .cn-bubble-reply svg { width: 17px; height: 17px; }
+.cn-message-line.is-mine .cn-bubble-reply { order: -1; }
 .cn-message-line:hover .cn-bubble-reply,
 .cn-bubble-reply:focus-visible { opacity: 1; pointer-events: auto; }
 .cn-bubble-reply:hover { background: var(--surface-2, var(--surface)); color: var(--text); }
@@ -579,6 +643,7 @@ export const CSS = `
   margin-top: 2px; font-size: 12px; line-height: 1.35;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.78;
 }
+.cn-bubble.is-mine .cn-quote span { opacity: 1; }
 .cn-file-input { display: none; }
 .cn-reply-target button {
   width: 44px; height: 44px; border: 0; border-radius: 50%; flex: 0 0 auto;
@@ -862,6 +927,23 @@ export const CSS = `
 .cn-lightbox-controls button:disabled { opacity: .35; cursor: default; }
 .cn-lightbox-controls svg { width: 19px; height: 19px; }
 .cn-lightbox-reset { min-width: 58px !important; font-variant-numeric: tabular-nums; }
+.cn-lightbox-gallery {
+  position: absolute; z-index: 2; top: max(12px, var(--mobius-safe-top, 0px)); left: 12px;
+  display: flex; align-items: center; gap: 4px; padding: 2px;
+  border: 1px solid rgba(255,255,255,.2); border-radius: 25px;
+  background: rgba(18,18,22,.9); color: #fff;
+}
+.cn-lightbox-gallery button, .cn-lightbox-status button {
+  min-width: 44px; min-height: 44px; border: 0; border-radius: 22px;
+  background: transparent; color: inherit; cursor: pointer;
+}
+.cn-lightbox-gallery button:hover, .cn-lightbox-status button:hover { background: rgba(255,255,255,.1); }
+.cn-lightbox-gallery button:disabled { opacity: .35; cursor: default; }
+.cn-lightbox-gallery svg { width: 22px; height: 22px; }
+.cn-lightbox-gallery span { min-width: 44px; text-align: center; font: 650 14px var(--font); font-variant-numeric: tabular-nums; }
+.cn-lightbox-status { display: grid; gap: 12px; text-align: center; color: #fff; font-size: 16px; }
+.cn-lightbox-status button { padding: 0 16px; border: 1px solid rgba(255,255,255,.3); font: inherit; }
+.cn-lightbox button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 @keyframes cn-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes cn-lightbox-image-in { from { opacity: .7; } to { opacity: 1; } }
 
@@ -1112,13 +1194,18 @@ export const CSS = `
 }
 .cn-composer-input-line textarea:focus-visible { outline: none; }
 .cn-composer-input-line textarea::placeholder { color: var(--muted); }
+/* A 44px target drawing a 40px circle; the margin keeps the pill's height. */
 .cn-composer-send {
-  width: 40px; height: 40px; flex: 0 0 auto; align-self: flex-end; padding: 0;
+  position: relative; width: 44px; height: 44px; margin: -2px; flex: 0 0 auto; align-self: flex-end; padding: 0;
   display: grid; place-items: center; border: 0; border-radius: 50%;
-  background: var(--accent); color: var(--accent-fg); cursor: pointer;
+  background: transparent; color: var(--accent-fg); cursor: pointer;
   transition: filter .14s, transform .1s, opacity .14s;
 }
-.cn-composer-send svg { width: 24px; height: 24px; }
+.cn-composer-send::before {
+  content: ''; position: absolute; inset: 2px; border-radius: 50%; pointer-events: none;
+  background: var(--accent);
+}
+.cn-composer-send svg { position: relative; width: 24px; height: 24px; }
 .cn-composer-send svg path { stroke: currentColor; stroke-width: .24; stroke-linejoin: round; }
 .cn-composer-send:hover { filter: brightness(1.07); }
 .cn-composer-send:active { transform: scale(.92); }
@@ -1144,14 +1231,9 @@ export const CSS = `
 .cn-reply-composer .cn-composer-pill { min-height: 44px; padding: 0; border-radius: 22px; }
 .cn-reply-composer .cn-composer-input-line textarea { padding: 4px 2px 4px 10px; line-height: 1.3; }
 .cn-reply-composer .cn-composer-attach { width: 46px; height: 46px; }
-.cn-reply-composer .cn-composer-send {
-  position: relative; width: 44px; height: 44px; background: transparent; border: 0;
-}
-.cn-reply-composer .cn-composer-send::before {
-  content: ''; position: absolute; inset: 6px; border-radius: 50%; pointer-events: none;
-  background: var(--accent);
-}
-.cn-reply-composer .cn-composer-send svg { position: relative; width: 18px; height: 18px; }
+.cn-reply-composer .cn-composer-send { margin: 0; }
+.cn-reply-composer .cn-composer-send::before { inset: 6px; }
+.cn-reply-composer .cn-composer-send svg { width: 18px; height: 18px; }
 
 /* Mobile navigation sits inline with the brand and account, not in a dock. */
 @media (max-width: 719px) {

@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  addUnseenMessages, isDefinitePrecommitRejection, mergeMessages, reconcileLatestPage,
-  reconcileOlderPage, settleMessage, settleOptimistic,
+  addUnseenMessages, isDefinitePrecommitRejection, markDeliveryUnknown, mergeMessages, reconcileLatestPage,
+  reconcileOlderPage, settleMessage,
 } from '../message_ui_state.js'
 
 const message = (id, sentAt, status = 'delivered') => ({
@@ -86,29 +86,43 @@ test('a pending identity overlap cannot hide an intervening history gap', () => 
   assert.deepEqual(result.messages.map(({ id }) => id), ['new', 'same'])
 })
 
-test('settling a group send replaces its one optimistic identity', () => {
-  const result = settleOptimistic([
-    message('before', 1), message('local-one', 2, 'sending'),
-  ], 'local-one', { id: 'server-one', status: 'delivered' })
+test('a send settles in place under its one client identity, direct or group', () => {
+  const result = settleMessage([
+    message('before', 1),
+    { ...message('one', 2, 'sending'), _client_retry: true, _retry_attachment: { mime: 'image/png' } },
+  ], 'one', { id: 'one', status: 'delivered', failed_members: [] })
   assert.deepEqual(result.map(({ id, status }) => [id, status]), [
-    ['before', 'delivered'], ['server-one', 'delivered'],
+    ['before', 'delivered'], ['one', 'delivered'],
   ])
-  assert.equal(mergeMessages(result, [message('server-one', 2)]).length, 2)
+  assert.equal(result[1]._retry_attachment, undefined)
+  // The server row has the same id, so a refresh replaces rather than duplicates it.
+  assert.equal(mergeMessages(result, [message('one', 2)]).length, 2)
 })
 
-test('settling a group send deduplicates an early polled server row', () => {
-  const result = settleOptimistic([
-    message('local-one', 2, 'sending'), message('server-one', 2, 'delivered'),
-  ], 'local-one', { id: 'server-one', status: 'delivered' })
-  assert.deepEqual(result.map(({ id, status }) => [id, status]), [
-    ['server-one', 'delivered'],
-  ])
+test('an interrupted send already polled from the server never shows twice', () => {
+  const pending = [{ ...message('one', 2, 'sending'), _client_retry: true, _client_unconfirmed_history: true }]
+  const polled = addUnseenMessages(pending, { messages: [message('one', 2, 'delivered')] })
+  assert.equal(polled.length, 1)
+  const refreshed = reconcileLatestPage(polled, { messages: [message('one', 2, 'delivered')], next_cursor: null })
+  assert.deepEqual(refreshed.messages, [message('one', 2, 'delivered')])
 })
 
 test('only a definite local rejection restores a draft for a new send', () => {
   assert.equal(isDefinitePrecommitRejection({ status: 409 }), true)
   assert.equal(isDefinitePrecommitRejection({ status: 500 }), false)
   assert.equal(isDefinitePrecommitRejection(new TypeError('lost response')), false)
+})
+
+test('an unconfirmed send keeps its id and attachment for a safe retry', () => {
+  const photo = { mime: 'image/png', data_b64: 'cGhvdG8=' }
+  const pending = [{ id: 'one', status: 'sending', _client_retry: true, _retry_attachment: photo }]
+  const [unknown] = markDeliveryUnknown(pending, 'one', 'Confirmation interrupted')
+  assert.equal(unknown.id, 'one')
+  assert.equal(unknown.status, 'sending')
+  assert.equal(unknown.failure, 'Confirmation interrupted')
+  assert.equal(unknown._retry_attachment, photo)
+  assert.equal(unknown._client_retry, true)
+  assert.equal(markDeliveryUnknown([{ id: 'one', status: 'delivered' }], 'one', 'lost')[0].status, 'delivered')
 })
 
 test('retry settles an older loaded row without depending on the newest page', () => {
@@ -152,24 +166,6 @@ test('settled local send cannot falsely prove newest-page continuity', () => {
   })
   assert.equal(result.resetCursor, true)
   assert.equal(result.nextCursor, 'restart-at-999')
-  assert.deepEqual(result.messages, [
-    message('remote', 999), message('same', 1000, 'delivered'),
-  ])
-})
-
-test('settled group send cannot falsely prove newest-page continuity', () => {
-  const settled = settleOptimistic([
-    message('old', 1), {
-      ...message('local', 1000, 'sending'),
-      _client_pending: true,
-      _client_unconfirmed_history: true,
-    },
-  ], 'local', { id: 'same', status: 'delivered' })
-  const result = reconcileLatestPage(settled, {
-    messages: [message('remote', 999), message('same', 1000, 'delivered')],
-    next_cursor: 'restart-at-999',
-  })
-  assert.equal(result.resetCursor, true)
   assert.deepEqual(result.messages, [
     message('remote', 999), message('same', 1000, 'delivered'),
   ])

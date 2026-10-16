@@ -571,8 +571,8 @@ export default function App({ appId, token }) {
     loadConversations()
   }
 
-  function openLightbox(url, alt, cleanup) {
-    setLightbox({ url, alt, cleanup })
+  function openLightbox(url, alt, cleanup, gallery) {
+    setLightbox({ url, alt, cleanup, gallery })
   }
 
   // ── onboarding: join with the shared Möbius identity ──────────────────────
@@ -669,7 +669,7 @@ export default function App({ appId, token }) {
             foreground={foreground}
             onBack={closeThread}
             showToast={showToast}
-            onOpenImage={(url, alt) => setLightbox({ url, alt })}
+            onOpenImage={openLightbox}
           />
         ) : (
           <Thread
@@ -682,7 +682,7 @@ export default function App({ appId, token }) {
             request={thread.request}
             onBack={closeThread}
             showToast={showToast}
-            onOpenImage={(url, alt) => setLightbox({ url, alt })}
+            onOpenImage={openLightbox}
           />
         )}
         {toast && <div className={`cn-toast${toast.kind ? ` is-${toast.kind}` : ''}`} role="status">{toast.text}</div>}
@@ -745,6 +745,7 @@ export default function App({ appId, token }) {
                  onJoin={beginJoin} joinBusy={saving || meState === 'loading'}
                  emojiReactions={Boolean(feedCapabilities.emoji_reactions)}
                  replyReactions={Boolean(feedCapabilities.reply_reactions)}
+                 authorEdits={Boolean(feedCapabilities.author_edits)}
                  replyAttachments={Boolean(feedCapabilities.reply_attachments)}
                  boardTarget={boardTarget} onTargetHandled={finishBoardTarget}
                  composerMount={composerMount} scrollRef={boardScrollRef}

@@ -14,7 +14,6 @@ export function reconcileLatestPage(prior, page, { replace = false } = {}) {
   const priorIds = new Set((prior || [])
     .filter((message) => (
       !message._client_retry
-      && !message._client_pending
       && !message._client_unconfirmed_history
     ))
     .map((message) => message.id))
@@ -22,7 +21,7 @@ export function reconcileLatestPage(prior, page, { replace = false } = {}) {
     !incoming.some((message) => priorIds.has(message.id))
   const resetCursor = replace || prior == null || prior.length === 0 || lostContinuity
   const pendingLocal = (prior || []).filter((message) =>
-    message._client_retry || message._client_pending || message._client_unconfirmed_history)
+    message._client_retry || message._client_unconfirmed_history)
   return {
     // When a pending id has already reached the server, its authoritative row
     // must replace the optimistic copy rather than be overwritten by it.
@@ -54,25 +53,6 @@ export function reconcileOlderPage(
   }
 }
 
-export function settleOptimistic(messages, optimisticId, result) {
-  const prior = messages || []
-  const optimistic = prior.find((message) => message.id === optimisticId)
-  if (!optimistic) return prior
-  const remaining = prior.filter((message) => message.id !== optimisticId)
-  const resultId = result.id || optimistic.id
-  // Polling may have already inserted the server row before the POST reply.
-  // In that case retain that authoritative copy and remove only the local one.
-  if (remaining.some((message) => message.id === resultId)) {
-    return mergeMessages(remaining)
-  }
-  const { _client_pending, ...saved } = optimistic
-  return mergeMessages(remaining, [{
-    ...saved,
-    id: resultId,
-    status: result.status || 'delivered',
-  }])
-}
-
 export function isDefinitePrecommitRejection(error) {
   return Number.isInteger(error?.status) && error.status >= 400 && error.status < 500
 }
@@ -87,4 +67,17 @@ export function settleMessage(messages, messageId, result) {
       ...(result.detail ? { failure: result.detail } : {}),
     }
   })
+}
+
+// A lost response is not proof of rejection: keep the same retryable identity
+// until a server record or a later retry establishes the delivery outcome.
+export function markDeliveryUnknown(messages, messageId, reason) {
+  return (messages || []).map((message) => message.id === messageId && message.status !== 'delivered'
+    ? { ...message, status: 'sending', failure: reason, _client_unconfirmed_history: true }
+    : message)
+}
+
+// Screen readers hear what the delivery tick means, not a raw status word.
+export function deliveryLabel(status) {
+  return status === 'sending' ? 'Sending' : status === 'failed' ? 'Delivery failed' : 'Delivered'
 }

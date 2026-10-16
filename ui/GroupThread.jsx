@@ -1,200 +1,58 @@
-import { useEffect, useRef, useState } from 'react'
-import {
-  ArrowLeft, Check, Clock, Warning,
-} from '@openai/apps-sdk-ui/components/Icon'
+import { useEffect, useState } from 'react'
+import { ArrowLeft } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptGroupInvitation, clearGroupUnread, clockTime, declineGroupInvitation,
-  getGroup, listGroupMessages, requestStatus, sendGroupMessage,
+  getGroup, listGroupMessages, requestStatus, retryGroupMessage, sendGroupMessage,
   watchLatestGroupMessages,
 } from '../api.js'
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
-import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
-import Composer, { ComposerAttachmentButton, ComposerFooter } from './Composer.jsx'
+import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
 import GroupDetails from './GroupDetails.jsx'
-import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import {
-  addUnseenMessages, isDefinitePrecommitRejection, reconcileLatestPage,
-  reconcileOlderPage, settleOptimistic,
-} from '../message_ui_state.js'
-import { reachedEarlierHistory } from './historyScroll.js'
+  DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
+  withDayDividers,
+} from './useMessageTimeline.jsx'
 
 export default function GroupThread({
   group, me, version, foreground, onBack, showToast, onOpenImage,
 }) {
   const [details, setDetails] = useState(false)
   const [currentGroup, setCurrentGroup] = useState(group)
-  const [loadError, setLoadError] = useState('')
-  const refreshRequest = useRef(0)
-  const latestPage = useRef(null)
-  const paginationGeneration = useRef(0)
-  const conversationEpoch = useRef(0)
-  const seenVersion = useRef(version)
-  const [messages, setMessages] = useState(null)
-  const [nextCursor, setNextCursor] = useState(null)
-  const [loadingEarlier, setLoadingEarlier] = useState(false)
-  const earlierInFlight = useRef(false)
-  const earlierFailed = useRef(false)
-  const lastScrollTop = useRef(null)
-  const [draft, setDraft] = useState('')
-  const [sending, setSending] = useState(false)
-  const [processingImage, setProcessingImage] = useState(false)
-  const [selectedImage, setSelectedImage] = useState(null)
-  const [replyTarget, setReplyTarget] = useState(null)
   const [requestBusy, setRequestBusy] = useState('')
   const [requestError, setRequestError] = useState('')
-  const scrollRef = useRef(null)
-  const messagesRef = useRef(null)
-  const stickToBottom = useRef(true)
-  const inputRef = useRef(null)
-  const fileRef = useRef(null)
   const gid = group.gid
-
-  function updateMessages(next) {
-    const value = typeof next === 'function' ? next(messagesRef.current) : next
-    messagesRef.current = value
-    setMessages(value)
-  }
-
-  async function refresh({ replace = false, background = false } = {}) {
-    const request = ++refreshRequest.current
-    try {
-      const [page, metadata] = await Promise.all([
-        listGroupMessages(gid, null, { background }), getGroup(gid),
-      ])
-      if (request !== refreshRequest.current) return false
-      const reconciled = reconcileLatestPage(messagesRef.current, page, { replace })
-      updateMessages(reconciled.messages)
-      if (reconciled.resetCursor) {
-        paginationGeneration.current += 1
-        setNextCursor(reconciled.nextCursor)
+  const pending = requestStatus(currentGroup) === 'pending'
+  const timeline = useMessageTimeline({
+    version,
+    showToast,
+    loadPage: (cursor, options) => listGroupMessages(gid, cursor, options),
+    watchLatest: (onPage) => watchLatestGroupMessages(gid, onPage),
+    refreshExtra: () => getGroup(gid),
+    onRefreshed: setCurrentGroup,
+    pinnedTop: pending,
+    sendBlocked: !!currentGroup.deleted_at,
+    signals: { created: 'group_message', error: 'group_send' },
+    deliver: ({ id, text, attachment, reply }) =>
+      sendGroupMessage(id, gid, text, attachment, reply),
+    onSent: (result) => {
+      if (result.status === 'failed') {
+        showToast(result.detail || 'The group host couldn’t be reached.', 'error')
+      } else if (result.failed_members?.length) {
+        const count = result.failed_members.length
+        showToast(`Sent — ${count} ${count === 1 ? 'person is' : 'people are'} unreachable right now.`, 'error')
       }
-      setCurrentGroup(metadata)
-      if (!earlierFailed.current) setLoadError('')
-      return true
-    } catch (error) {
-      if (request === refreshRequest.current && !earlierFailed.current) setLoadError('Messages couldn’t be refreshed. Your saved history hasn’t been removed.')
-      return false
-    }
-  }
+    },
+    retrySaved: (id) => retryGroupMessage(gid, id),
+    retryFailedText: 'The group host still couldn’t be reached.',
+  })
+  const { messages } = timeline
 
-  useEffect(() => {
-    seenVersion.current = version
-    paginationGeneration.current += 1
-    conversationEpoch.current += 1
-    earlierInFlight.current = false
-    earlierFailed.current = false
-    lastScrollTop.current = null
-    setLoadError('')
-    setLoadingEarlier(false)
-    updateMessages(null)
-    setNextCursor(null)
-    const watch = watchLatestGroupMessages(gid, (page) => {
-      if (messagesRef.current === null) {
-        if (!page.messages.length) return
-        const reconciled = reconcileLatestPage(null, page, { replace: true })
-        updateMessages(reconciled.messages)
-        setNextCursor(reconciled.nextCursor)
-        return
-      }
-      updateMessages((prior) => addUnseenMessages(prior, page))
-    })
-    latestPage.current = watch
-    refresh({ replace: true })
-    return () => {
-      watch.stop()
-      latestPage.current = null
-      refreshRequest.current += 1
-      paginationGeneration.current += 1
-      conversationEpoch.current += 1
-      earlierInFlight.current = false
-    }
-  }, [gid])
   // Messages are read only while this pane is actually visible to the owner.
   const isMember = requestStatus(currentGroup) === 'accepted'
   useEffect(() => {
     if (foreground && isMember) clearGroupUnread(gid).catch(() => {})
   }, [gid, version, foreground, isMember])
-  useEffect(() => {
-    if (version > 0 && version !== seenVersion.current) {
-      seenVersion.current = version
-      // See Thread: the published page shows new messages at once.
-      latestPage.current?.recheck()
-      refresh({ background: true })
-    }
-  }, [version])
-  async function loadEarlier() {
-    if (!nextCursor || earlierInFlight.current) return
-    earlierInFlight.current = true
-    earlierFailed.current = false
-    setLoadError('')
-    const el = scrollRef.current
-    const previousHeight = el?.scrollHeight || 0
-    stickToBottom.current = false
-    setLoadingEarlier(true)
-    const generation = paginationGeneration.current
-    const epoch = conversationEpoch.current
-    try {
-      const page = await listGroupMessages(gid, nextCursor)
-      const reconciled = reconcileOlderPage(
-        messagesRef.current, page, generation, paginationGeneration.current,
-      )
-      if (!reconciled) return
-      updateMessages(reconciled.messages)
-      setNextCursor(reconciled.nextCursor)
-      setLoadError('')
-      requestAnimationFrame(() => {
-        if (el && el === scrollRef.current && generation === paginationGeneration.current) {
-          el.scrollTop += el.scrollHeight - previousHeight
-          lastScrollTop.current = el.scrollTop
-        }
-      })
-    } catch {
-      if (generation === paginationGeneration.current) {
-        earlierFailed.current = true
-        setLoadError('Earlier messages couldn’t be loaded. Your saved history hasn’t been removed.')
-      }
-    } finally {
-      if (epoch === conversationEpoch.current) {
-        earlierInFlight.current = false
-        setLoadingEarlier(false)
-      }
-    }
-  }
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    if (requestStatus(currentGroup) === 'pending') el.scrollTop = 0
-    else if (stickToBottom.current) el.scrollTop = el.scrollHeight
-  }, [messages?.length, selectedImage, replyTarget, currentGroup.request_status])
-
-  function trackScroll() {
-    const el = scrollRef.current
-    if (!el || requestStatus(currentGroup) === 'pending') return
-    const shouldLoad = reachedEarlierHistory(lastScrollTop.current, el)
-    lastScrollTop.current = el.scrollTop
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 72
-    if (shouldLoad && nextCursor && !earlierFailed.current) loadEarlier()
-  }
-
-  async function chooseImage(event) {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    await selectImage(file)
-  }
-
-  async function selectImage(file) {
-    if (!file) return
-    setProcessingImage(true)
-    try {
-      setSelectedImage(await prepareImage(file))
-    } catch (error) {
-      showToast(error.message, 'error')
-    } finally {
-      setProcessingImage(false)
-      inputRef.current?.focus()
-    }
-  }
 
   async function decideInvitation(action) {
     if (requestBusy) return
@@ -217,112 +75,26 @@ export default function GroupThread({
     }
   }
 
-  async function send(event) {
-    event.preventDefault()
-    const text = draft.trim()
-    const image = selectedImage
-    const reply = replyTarget
-    if ((!text && !image) || sending || processingImage || currentGroup.deleted_at) return
-
-    setSending(true)
-    const optimisticId = `local-${crypto.randomUUID()}`
-    updateMessages((prior) => [...(prior || []), {
-      id: optimisticId,
-      dir: 'out',
-      text,
-      sent_at: Date.now() / 1000,
-      status: 'sending',
-      _client_pending: true,
-      _client_unconfirmed_history: true,
-      ...(image ? {
-        attachment: {
-          mime: image.payload.mime,
-          w: image.payload.w,
-          h: image.payload.h,
-          preview_url: image.previewUrl,
-        },
-      } : {}),
-      ...(reply ? { reply_to: reply } : {}),
-    }])
-    setDraft('')
-    setSelectedImage(null)
-    setReplyTarget(null)
-    try {
-      const result = await sendGroupMessage(gid, text, image?.payload, reply)
-      updateMessages((prior) => settleOptimistic(prior, optimisticId, result))
-      window.mobius?.signal?.('item_created', { type: 'group_message' })
-      if (result.status === 'failed') {
-        showToast(result.detail || 'The group host couldn’t be reached.', 'error')
-      } else if (result.failed_members?.length) {
-        const count = result.failed_members.length
-        showToast(`Sent — ${count} ${count === 1 ? 'person is' : 'people are'} unreachable right now.`, 'error')
-      }
-      await refresh()
-    } catch (error) {
-      window.mobius?.signal?.('error', { message: error.message, source: 'group_send' })
-      const rejectedBeforeSave = isDefinitePrecommitRejection(error)
-      if (rejectedBeforeSave) {
-        updateMessages((prior) => (prior || []).filter((message) => message.id !== optimisticId))
-        setDraft((current) => (current.trim() ? `${text}\n${current}` : text))
-        setSelectedImage(image)
-        setReplyTarget(reply)
-        showToast(
-          (error.status === 400 || error.status === 404) && (image || reply)
-            ? 'Photo attachments and quoted replies aren’t available on this server yet.'
-            : error.message,
-          'error',
-        )
-      } else {
-        updateMessages((prior) => (prior || []).map((message) =>
-          message.id === optimisticId ? { ...message, status: 'unknown' } : message))
-        showToast('Delivery is uncertain. Check the conversation before sending again.', 'error')
-      }
-      await refresh()
-    } finally {
-      setSending(false)
-      inputRef.current?.focus()
-    }
-  }
-
   const memberCount = (currentGroup.members || []).length
-  let lastDay = ''
   let lastAuthor = null
-  const rendered = []
-  for (const message of messages || []) {
-    const day = new Date(message.sent_at * 1000).toDateString()
-    if (day !== lastDay) {
-      lastDay = day
-      lastAuthor = null
-      const today = new Date().toDateString() === day
-      rendered.push(
-        <div className="cn-day" key={`day-${day}`}>
-          <span>{today ? 'Today' : new Date(message.sent_at * 1000).toLocaleDateString(undefined, { month: 'long', day: 'numeric' })}</span>
-        </div>,
-      )
-    }
+  const rendered = withDayDividers(messages, (message, startsDay) => {
+    if (startsDay) lastAuthor = null
     const mine = message.dir === 'out'
     const firstOfCluster = !mine && message.author !== lastAuthor
-    if (firstOfCluster) {
-      rendered.push(
+    lastAuthor = mine ? null : message.author
+    const author = mine ? me?.handle : message.author_handle
+    return [
+      firstOfCluster && (
         <span className="cn-author" key={`author-${message.id}`}>
           {message.author_handle ? `@${message.author_handle}` : 'Social member'}
-        </span>,
-      )
-    }
-    lastAuthor = mine ? null : message.author
-    const tick = mine && (
-      <span className="cn-tick" aria-label={message.status || 'delivered'}>
-        {message.status === 'sending' ? <Clock aria-hidden="true" />
-          : ['failed', 'unknown'].includes(message.status) ? <Warning aria-hidden="true" />
-          : <Check aria-hidden="true" />}
-      </span>
-    )
-    rendered.push(
+        </span>
+      ),
       <MessageBubble
         key={message.id}
         message={{ ...message, time: clockTime(message.sent_at) }}
         mine={mine}
-        tick={tick}
+        author={author}
+        tick={mine && <DeliveryTick status={message.status} />}
         avatar={!mine && firstOfCluster
           ? <Avatar name={message.author_handle} host={requestStatus(currentGroup) === 'pending' ? undefined : message.author} size="small" remote />
           : null}
@@ -330,18 +102,42 @@ export default function GroupThread({
         conversationPath={`groups/${gid}`}
         onOpenImage={onOpenImage}
         onImageUnavailable={() => showToast('This photo couldn’t be loaded.', 'error')}
-        onReply={requestStatus(currentGroup) === 'pending' ? undefined : () => setReplyTarget(replyTargetFor(
-          message,
-          mine ? me?.handle : message.author_handle || 'Social member',
+        onReply={pending ? undefined : () => timeline.replyTo(replyTargetFor(
+          message, author || 'Social member',
         ))}
       />,
-    )
-    if (message.status === 'failed' || message.status === 'unknown') {
-      rendered.push(<span className="cn-failed-note" key={`fail-${message.id}`}>
-        {message.status === 'failed' ? 'Not delivered' : 'Delivery uncertain · Check before sending again'}
-      </span>)
-    }
-  }
+      <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline} />,
+    ]
+  })
+
+  const invitationPanel = pending && (
+    <section className="cn-request-panel" aria-labelledby="cn-group-request-title">
+      <div>
+        <strong id="cn-group-request-title">Group invitation</strong>
+        <p>
+          {currentGroup.invited_by_handle ? `@${currentGroup.invited_by_handle}` : currentGroup.host} invited you to join.
+          Messages stay quiet, and previewing them doesn’t join the group.
+        </p>
+      </div>
+      {requestError && <p className="cn-request-error" role="alert">{requestError}</p>}
+      <div className="cn-request-actions">
+        <button className="cn-btn cn-btn-primary" type="button" disabled={!!requestBusy}
+                onClick={() => decideInvitation('accept')}>
+          {requestBusy === 'accept' ? 'Joining…' : 'Accept and join'}
+        </button>
+        <button className="cn-btn cn-btn-secondary" type="button" disabled={!!requestBusy}
+                onClick={() => decideInvitation('decline')}>Decline</button>
+      </div>
+    </section>
+  )
+  const emptyState = (
+    <div className="cn-empty">
+      <div className="cn-empty-title">Say hello</div>
+      <p className="cn-empty-text">
+        Messages go to the group’s home server and on to every member’s own server.
+      </p>
+    </div>
+  )
 
   return (
     <div className={`cn-thread cn-screen${details ? ' has-dialog' : ''}`}>
@@ -356,61 +152,14 @@ export default function GroupThread({
         </span>
         <button className="cn-btn cn-btn-secondary" onClick={() => setDetails(true)} aria-label="Group details">Details</button>
       </div>
-      <div className="cn-thread-msgs" ref={scrollRef} onScroll={trackScroll}>
-        {requestStatus(currentGroup) === 'pending' && <section className="cn-request-panel" aria-labelledby="cn-group-request-title">
-          <div>
-            <strong id="cn-group-request-title">Group invitation</strong>
-            <p>
-              {currentGroup.invited_by_handle ? `@${currentGroup.invited_by_handle}` : currentGroup.host} invited you to join.
-              Messages stay quiet, and previewing them doesn’t join the group.
-            </p>
-          </div>
-          {requestError && <p className="cn-request-error" role="alert">{requestError}</p>}
-          <div className="cn-request-actions">
-            <button className="cn-btn cn-btn-primary" type="button" disabled={!!requestBusy}
-                    onClick={() => decideInvitation('accept')}>
-              {requestBusy === 'accept' ? 'Joining…' : 'Accept and join'}
-            </button>
-            <button className="cn-btn cn-btn-secondary" type="button" disabled={!!requestBusy}
-                    onClick={() => decideInvitation('decline')}>Decline</button>
-          </div>
-        </section>}
-        {nextCursor && (
-          <button className="cn-history-more" type="button" disabled={loadingEarlier}
-                  onClick={loadEarlier}>
-            {loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
-          </button>
-        )}
-        {loadError && <div className="cn-directory-error" role="alert"><p>{loadError}</p><button className="cn-btn cn-btn-secondary" onClick={() => earlierFailed.current ? loadEarlier() : refresh()}>Try again</button></div>}
-        {messages === null && !loadError && <div className="cn-center cn-history-loading" role="status"><div className="cn-spinner" /><span>Loading messages…</span></div>}
-        {messages !== null && messages.length === 0 && (
-          <div className="cn-empty">
-            <div className="cn-empty-title">Say hello</div>
-            <p className="cn-empty-text">
-              Messages go to the group’s home server and on to every member’s own server.
-            </p>
-          </div>
-        )}
+      <MessageTimeline timeline={timeline} header={invitationPanel} empty={emptyState}>
         {rendered}
-      </div>
+      </MessageTimeline>
       {currentGroup.deleted_at ? <div className="cn-group-closed" role="status">This group has been closed. You can still read its earlier messages.</div>
-        : requestStatus(currentGroup) === 'pending' ? <div className="cn-request-quiet" role="status">Accept this invitation to send messages.</div>
-        : <ComposerFooter scrollRef={scrollRef}>
-        <input ref={fileRef} className="cn-file-input" type="file" accept="image/*"
-               onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
-        <Composer inputRef={inputRef} value={draft} onChange={setDraft} onSubmit={send}
-                  disabled={processingImage} onImagePaste={sending ? undefined : selectImage}
-                  sendDisabled={sending || processingImage || (!draft.trim() && !selectedImage)}
-                  attachmentAction={<ComposerAttachmentButton onClick={() => fileRef.current?.click()}
-                    disabled={sending || processingImage} />}>
-          {(replyTarget || selectedImage) && <>
-            <ReplyTarget reply={replyTarget} onDismiss={() => setReplyTarget(null)} />
-            <SelectedImageStrip selected={selectedImage} onRemove={() => setSelectedImage(null)} onOpen={onOpenImage} />
-          </>}
-        </Composer>
-      </ComposerFooter>}
+        : pending ? <div className="cn-request-quiet" role="status">Accept this invitation to send messages.</div>
+        : <TimelineComposer timeline={timeline} onOpenImage={onOpenImage} />}
       {details && <GroupDetails group={currentGroup} me={me} onClose={() => setDetails(false)}
-        onUpdated={updated => { refreshRequest.current += 1; setCurrentGroup(updated) }}
+        onUpdated={updated => { timeline.cancelRefresh(); setCurrentGroup(updated) }}
         onDeleted={() => { showToast('Group deleted', 'success'); onBack() }} />}
     </div>
   )

@@ -110,6 +110,9 @@ export const saveMe = (settings) =>
 export const sendMessage = (id, to, text, peerHandle, attachment, replyTo) =>
   call('send', {
     method: 'POST',
+    // The platform serializes private service calls. Allow queued work ahead
+    // of this request as well as the service's own bounded delivery attempt.
+    timeoutMs: 60_000,
     body: JSON.stringify({
       id,
       to,
@@ -121,13 +124,14 @@ export const sendMessage = (id, to, text, peerHandle, attachment, replyTo) =>
   })
 export const retryMessage = (peer, id) =>
   call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/retry`, {
-    method: 'POST', body: JSON.stringify({}),
+    method: 'POST', body: JSON.stringify({}), timeoutMs: 60_000,
   })
-export const publishPost = (text, attachment, attachments, thumbnails) =>
+export const publishPost = (text, attachment, attachments, thumbnails, id) =>
   call('publish', {
     method: 'POST',
     body: JSON.stringify({
       text,
+      ...(id ? { id } : {}),
       ...(attachment ? { attachment } : {}),
       ...(attachments && attachments.length ? { attachments } : {}),
       ...(thumbnails && thumbnails.length ? { thumbnails } : {}),
@@ -163,6 +167,12 @@ export const reactToPost = (postId, emoji, replyId) =>
   }) })
 export const deletePost = (postId) =>
   call('delete', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
+export const deleteReply = (postId, replyId) =>
+  call('reply/delete', { method: 'POST', body: JSON.stringify({ post_id: postId, reply_id: replyId }) })
+export const editBoardText = (postId, text, replyId) =>
+  call('edit', { method: 'POST', body: JSON.stringify({
+    post_id: postId, text, ...(replyId ? { reply_id: replyId } : {}),
+  }) })
 export const getReplies = (postId, { background = false } = {}) =>
   call(`replies/${encodeURIComponent(postId)}`, { background }).then((result) => {
     noteAvatarDigests(result?.replies)
@@ -197,12 +207,23 @@ export const getPeerAvatars = (hosts, { background = false, digests = {} } = {})
 
 // ── conversation storage (each side keeps only its own copy) ────────────────
 
+// Lists reload because the server's change counter moved, so read the server's
+// copy: a cache-first get() would repaint the previous metadata and hand the new
+// copy only to subscribers, hiding a delivered message until a manual refresh.
+// If the server cannot answer, keep showing the device copy.
+async function readFresh(store, path) {
+  try { return (await store.getWithVersion(path)).value }
+  catch { return store.get(path) }
+}
+
 async function listMetadata(prefix) {
   const store = window.mobius?.storage
   if (!store) throw new Error('Conversation storage is unavailable.')
   const entries = await store.list(prefix)
   const directories = entries.filter(entry => entry.type === 'directory')
-  const records = await Promise.all(directories.map(entry => store.get(`${prefix}${entry.name}/meta.json`)))
+  const records = await Promise.all(
+    directories.map(entry => readFresh(store, `${prefix}${entry.name}/meta.json`)),
+  )
   return records.filter(Boolean)
 }
 
@@ -307,14 +328,20 @@ export const addGroupMember = (gid, host) =>
   call(`groups/${encodeURIComponent(gid)}/members`, { method: 'POST', body: JSON.stringify({ host }) })
 export const deleteGroup = (gid) =>
   call(`groups/${encodeURIComponent(gid)}`, { method: 'DELETE' })
-export const sendGroupMessage = (gid, text, attachment, replyTo) =>
+export const sendGroupMessage = (id, gid, text, attachment, replyTo) =>
   call(`groups/${encodeURIComponent(gid)}/send`, {
     method: 'POST',
+    timeoutMs: 60_000,
     body: JSON.stringify({
+      id,
       text,
       ...(attachment ? { attachment } : {}),
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
+  })
+export const retryGroupMessage = (gid, id) =>
+  call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/retry`, {
+    method: 'POST', body: JSON.stringify({}), timeoutMs: 60_000,
   })
 export const acceptGroupInvitation = gid =>
   call(`groups/${encodeURIComponent(gid)}/accept`, { method: 'POST', body: JSON.stringify({}) })

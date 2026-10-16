@@ -7,7 +7,7 @@ import {
 } from './media_limits.js'
 
 const INTENT_VERSION = 1
-const TEXT_LIMITS = { post: 4000, reply: 1000 }
+export const TEXT_LIMITS = { post: 4000, reply: 1000 }
 const INTENT_KINDS = new Set(['post', 'reply', 'like'])
 const POST_ID_RE = /^[a-z0-9-]{1,128}$/i
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])

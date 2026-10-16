@@ -1334,6 +1334,21 @@ class GifValidationOwnershipTests(unittest.TestCase):
                      [data for data, _ in gifs])
     self.assertEqual(store.reply_image("abcdef12", "abcdef34")[0].read_bytes(), gifs[0][0])
 
+  def test_unlocked_post_retry_check_still_refuses_another_authors_id(self):
+    root = self.enterContext(tempfile.TemporaryDirectory())
+    store = CommonPublicStore(root)
+    data = animation()
+    post = {"id": "abcdef12", "host": "member.example", "text": "", "created_at": 1, "replies": []}
+    self.assertTrue(store.store_post(post, attachment=(wire(data), data)))
+    with MediaWorkLedger() as ledger:
+      self.assertFalse(store.store_post(post, attachment=(wire(data), data)))
+      with self.assertRaises(HTTPException) as caught:
+        store.store_post({**post, "host": "other.example"}, attachment=(wire(data), data))
+    self.assertEqual(caught.exception.status_code, 409)
+    self.assertEqual(ledger.renders, [])  # Settled before any poster work.
+    stored = json.loads((store.board_dir() / "abcdef12.json").read_text())
+    self.assertEqual(stored["host"], "member.example")
+
   def test_post_deleted_during_reply_preread_is_unknown_without_writing_media(self):
     root = self.enterContext(tempfile.TemporaryDirectory())
     store = CommonPublicStore(root)

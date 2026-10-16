@@ -58,6 +58,17 @@ never joins or submits an interaction. Directory search requires a registered,
 signed member request; direct and group conversation routes require local
 membership. A personal Möbius hosts no board of its own.
 
+### Editing and deleting
+
+Authors can edit the text of their own posts and replies inline (Enter saves,
+Escape cancels) and delete their own posts and replies. Edited items show
+"(edited)". Only the authoring Möbius may edit or delete an item; replies use
+their own `board_reply_delete` and `board_edit` envelopes so an older host
+refuses them rather than treating them as a whole-post delete. The host remembers
+deleted reply ids so a delayed retry cannot restore them, and an older or
+replayed edit never overwrites a newer one. Until the Community host is updated,
+these actions report that the server does not support them yet.
+
 ### Photos and captions
 
 Direct messages, group messages, and Community posts send photo attachments

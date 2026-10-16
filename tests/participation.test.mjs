@@ -6,6 +6,7 @@ import { setToken, postReply } from '../api.js'
 import { attachmentBytes, galleryFitsMediaLimits, GIF_MAX_BYTES, IMAGE_MAX_BYTES, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 import { boardPostFitsWireLimit } from '../board_payload.js'
 import { upsertReplyAttempt } from '../reconciliation.js'
+import { revokeLocalPreviews } from '../ui/boardEdits.js'
 import { joinGlobalCommunity } from '../community.js'
 import {
   PARTICIPATION_INTENT_PATH, accountHandoff, clearParticipationIntent,
@@ -70,6 +71,10 @@ async function restoredBoard(saved, { fail = false, failPreparation = false } = 
     upsertReplyAttempt, replySendingRef: { current: false }, replyPostIdRef: { current: null },
     replyDrafts: { current: new Map() }, replyCache: new Map(),
     setDraft: value => { env.draft = value }, setSelectedImages: value => { env.selectedImages = value },
+    // Board keeps one stable post id per draft; any draft change clears it.
+    postMessageId: null, setPostMessageId: value => { env.postMessageId = value },
+    changeDraft: value => { env.draft = value; env.postMessageId = null },
+    feedRef: { current: [] }, revokeLocalPreviews,
     setReplyDraft: value => { env.replyDraft = value }, setReplyImage: value => { env.replyImage = value },
     setReplyMessageId: value => { env.replyMessageId = value },
     setParticipationIntent: value => { env.participationIntent = value },
@@ -95,7 +100,7 @@ async function restoredBoard(saved, { fail = false, failPreparation = false } = 
     },
   }
   const functions = [handler(board, 'resumeParticipation'), handler(board, 'collectImagePayloads', true),
-    handler(board, 'publish', true), handler(board, 'sendReply', true),
+    handler(board, 'publish', true), handler(board, 'sendReply', true), handler(board, 'clearReplyDraft'),
     handler(app, 'completeParticipationIntent', true)].join('\n')
   const actions = new Function('env', `with (env) { ${functions}; return {
     resumeParticipation, publish, sendReply, completeParticipationIntent,
