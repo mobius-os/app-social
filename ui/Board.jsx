@@ -28,6 +28,7 @@ import { boardPostFitsWireLimit } from '../board_payload.js'
 import { attachmentBytes, galleryFitsMediaLimits, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 import Composer, { ComposerAttachmentButton, ComposerFooter } from './Composer.jsx'
 import { prependedScrollTop } from './interactionRules.js'
+import { pollWhileVisible } from '../visibility.js'
 import { reachedEarlierHistory } from './historyScroll.js'
 
 const MAX_POST_IMAGES = 4
@@ -622,76 +623,22 @@ export default function Board({
     onRefresh(true)
   }
 
-  // The board itself stays current while it is visible. Opening or using a
+  // The board itself stays current while it is on screen. Opening or using a
   // conversation temporarily tightens the cadence; an idle board relaxes.
-  useEffect(() => {
-    let alive = true
-    let timer = null
-    let refreshing = false
-    const schedule = () => {
-      if (!alive) return
-      timer = setTimeout(tick, boardRefreshDelay(lastActivityAt.current))
-    }
-    const tick = async () => {
-      if (!alive) return
-      if (document.visibilityState !== 'visible') return
-      if (refreshing) {
-        schedule()
-        return
-      }
-      refreshing = true
-      try { await onRefresh(true) } finally {
-        refreshing = false
-        schedule()
-      }
-    }
-    const onVisibility = () => {
-      if (document.visibilityState !== 'visible') return
-      clearTimeout(timer)
-      markActivity()
-      tick()
-    }
-    schedule()
-    document.addEventListener('visibilitychange', onVisibility)
-    return () => {
-      alive = false
-      clearTimeout(timer)
-      document.removeEventListener('visibilitychange', onVisibility)
-    }
-  }, [onRefresh])
+  useEffect(() => pollWhileVisible(async ({ resumed }) => {
+    if (resumed) markActivity()
+    await onRefresh(true)
+  }, () => boardRefreshDelay(lastActivityAt.current)), [onRefresh])
 
   // Only an open conversation gets the tighter thread refresh. Background
   // checks never replace the sheet with a spinner or surface a transient error.
   useEffect(() => {
     if (!replyPost) return undefined
-    let alive = true
-    let timer = null
-    const schedule = () => {
-      if (!alive) return
-      timer = setTimeout(tick, threadRefreshDelay(lastActivityAt.current))
-    }
-    const tick = async () => {
-      if (!alive) return
-      if (document.visibilityState !== 'visible') return
-      if (replySendingRef.current || replyDeletingRef.current) {
-        schedule()
-        return
-      }
-      try { await loadReplies(replyPost, { background: true }) } finally { schedule() }
-    }
-    const onVisibility = () => {
-      if (document.visibilityState !== 'visible') return
-      clearTimeout(timer)
-      markActivity()
-      tick()
-    }
-    schedule()
-    document.addEventListener('visibilitychange', onVisibility)
-    return () => {
-      alive = false
-      clearTimeout(timer)
-      document.removeEventListener('visibilitychange', onVisibility)
-    }
+    return pollWhileVisible(async ({ resumed }) => {
+      if (resumed) markActivity()
+      if (replySendingRef.current || replyDeletingRef.current) return
+      await loadReplies(replyPost, { background: true })
+    }, () => threadRefreshDelay(lastActivityAt.current))
   }, [replyPost?.id])
 
   // A thread click should reveal content, not begin a full network round-trip.
