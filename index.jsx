@@ -17,7 +17,6 @@ import {
   saveParticipationIntent,
 } from './participation.js'
 import { reconcileFeedPage } from './reconciliation.js'
-import { pollWhileVisible } from './visibility.js'
 import { discoveryExtendsFeed, locateBoardPost, mergeDiscoveredPosts, parseBoardIntent } from './boardNavigation.js'
 
 function ParticipationNotice({ me, state, busy, onJoin, onCheck }) {
@@ -430,7 +429,7 @@ export default function App({ appId, token }) {
   }, [loadFeed])
 
   // Incoming federation deliveries bump state/version.json on the server.
-  // Poll it while Social is on screen (get() revalidates in the background and
+  // api.watchServerChanges checks it (get() revalidates in the background and
   // notifies the subscriber below when the server value changed).
   useEffect(() => {
     const store = window.mobius?.storage
@@ -443,13 +442,10 @@ export default function App({ appId, token }) {
         setVersion((prior) => (value.v !== prior ? value.v : prior))
       })
       .then?.((u) => { if (typeof u === 'function') unsubscribe = u })
-    const stopPolling = pollWhileVisible(
-      () => store.get('state/version.json'),
-      () => 5000,
-    )
+    const stopWatching = api.watchServerChanges(store)
     return () => {
       cancelled = true
-      stopPolling()
+      stopWatching()
       if (typeof unsubscribe === 'function') unsubscribe()
     }
   }, [])

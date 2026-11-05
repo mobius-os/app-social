@@ -138,7 +138,9 @@ test('refreshes never overlap and stop ends the loop', async (t) => {
 test('Social background loops gate on the frame, not on document visibility', () => {
   const index = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
-  assert.match(index, /pollWhileVisible\(\s*\(\) => store\.get\('state\/version\.json'\)/)
+  const api = readFileSync(new URL('../api.js', import.meta.url), 'utf8')
+  assert.match(index, /api\.watchServerChanges\(store\)/)
+  assert.match(api, /pollWhileVisible\(check,/)
   assert.equal((board.match(/pollWhileVisible\(/g) || []).length, 2)
   assert.doesNotMatch(board, /visibilityState|visibilitychange/)
   assert.doesNotMatch(index, /setInterval/)

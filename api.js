@@ -3,6 +3,7 @@
 // the platform's reviewed app-service boundary.
 
 import { noteAvatarDigests, noteBoardAvatarDigests } from './avatarHints.js'
+import { pollWhileVisible } from './visibility.js'
 
 let bearer = null
 export function setToken(token) { bearer = token }
@@ -204,6 +205,27 @@ export const getPeerAvatars = (hosts, { background = false, digests = {} } = {})
   call('peer-avatars', {
     method: 'POST', body: JSON.stringify({ hosts, avatars: digests }), background,
   })
+
+// ── server changes ─────────────────────────────────────────────────────────
+
+// Federation deliveries and other service writes bump state/version.json on
+// the server. Check it the moment Möbius nudges the open app (the same signal
+// that updates the sidebar badge), and poll while Social is on screen as the
+// fallback for a missed nudge or an older Möbius. A hidden pane makes no
+// requests; it catches up when it is shown again. Returns a stop function.
+export function watchServerChanges(store, {
+  mobius = globalThis.window?.mobius, intervalMs = 5000,
+} = {}) {
+  const check = () => store.get('state/version.json')
+  const stopPolling = pollWhileVisible(check, () => intervalMs, { mobius })
+  const stopActivity = mobius?.onActivity?.(() => {
+    if (mobius.visible !== false) check().catch(() => null)
+  })
+  return () => {
+    stopPolling()
+    if (typeof stopActivity === 'function') stopActivity()
+  }
+}
 
 // ── conversation storage (each side keeps only its own copy) ────────────────
 
