@@ -123,6 +123,34 @@ class CommunityHostTests(unittest.TestCase):
           "peer.example",
         )
 
+  def test_the_shared_gif_key_goes_only_to_signed_members(self):
+    def ask(client, key, host):
+      return client.post("/api/common/gifs/key", json=_signed(key, {
+        "v": 0, "type": "gif_key_read", "from": host, "sent_at": time.time(),
+      }))
+
+    with tempfile.TemporaryDirectory() as data_dir:
+      member = _peer(Path(data_dir), "peer.example")
+      outsider = _peer(Path(data_dir), "outsider.example")
+      common_public.CommonPublicStore(data_dir).register("peer.example", "peer", "")
+      with patch.dict(os.environ, {"KLIPY_APP_KEY": ""}):
+        with TestClient(community_host.create_app(data_dir)) as client:
+          # Not configured: members learn that plainly.
+          self.assertEqual(ask(client, member, "peer.example").status_code, 404)
+      with patch.dict(os.environ, {"KLIPY_APP_KEY": "shared_key_123456"}):
+        with TestClient(community_host.create_app(data_dir)) as client:
+          granted = ask(client, member, "peer.example")
+          self.assertEqual(granted.status_code, 200)
+          self.assertEqual(granted.json(), {"provider": "klipy", "app_key": "shared_key_123456"})
+          self.assertEqual(granted.headers["cache-control"], "no-store")
+          self.assertEqual(ask(client, outsider, "outsider.example").status_code, 403)
+          forged = _signed(member, {
+            "v": 0, "type": "gif_key_read", "from": "peer.example", "sent_at": time.time(),
+          })
+          forged["from"] = "outsider.example"
+          self.assertEqual(client.post("/api/common/gifs/key", json=forged).status_code, 403)
+          self.assertNotIn("gifs/key", client.get("/api/common/board").text)
+
   def test_health_version_and_public_prefix_share_one_app(self):
     revision = "a" * 40
     with tempfile.TemporaryDirectory() as data_dir, patch.dict(

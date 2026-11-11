@@ -3,6 +3,8 @@ import { Check, Clock, Warning } from '@openai/apps-sdk-ui/components/Icon'
 import Composer, { ComposerAttachmentButton, ComposerFooter } from './Composer.jsx'
 import { ReplyTarget } from './MessageBubble.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
+import { GifButton, GifPicker, SelectedGifStrip, useGifChoice } from './Gifs.jsx'
+import { withGif } from '../gifs.js'
 import { prependedScrollTop } from './interactionRules.js'
 import { reachedEarlierHistory } from './historyScroll.js'
 import {
@@ -41,6 +43,7 @@ export function useMessageTimeline({
   const prepended = useRef(null)
   const inputRef = useRef(null)
   const fileRef = useRef(null)
+  const gifChoice = useGifChoice()
 
   function updateMessages(next) {
     const value = typeof next === 'function' ? next(messagesRef.current) : next
@@ -193,7 +196,10 @@ export function useMessageTimeline({
 
   async function send(event) {
     event.preventDefault()
-    const text = draft.trim()
+    const caption = draft.trim()
+    const gif = gifChoice.gif
+    // A staged GIF travels as its KLIPY link on the message's last line.
+    const text = withGif(caption, gif)
     const image = selectedImage
     const reply = replyTarget
     if ((!text && !image) || sending || processingImage || sendBlocked) return
@@ -224,6 +230,7 @@ export function useMessageTimeline({
     }])
     setDraft('')
     setSelectedImage(null)
+    gifChoice.setGif(null)
     setReplyTarget(null)
     try {
       const result = await deliver({ id: messageId, text, attachment: image?.payload, reply })
@@ -236,8 +243,9 @@ export function useMessageTimeline({
       window.mobius?.signal?.('error', { message: error.message, source: signals.error })
       if (isDefinitePrecommitRejection(error)) {
         updateMessages((prior) => (prior || []).filter((message) => message.id !== messageId))
-        setDraft((current) => (current.trim() ? `${text}\n${current}` : text))
+        setDraft((current) => (current.trim() ? `${caption}\n${current}` : caption))
         setSelectedImage(image)
+        gifChoice.setGif(gif)
         setReplyTarget(reply)
         showToast(
           (error.status === 400 || error.status === 404) && (image || reply)
@@ -298,7 +306,7 @@ export function useMessageTimeline({
   return {
     messages, nextCursor, loadingEarlier, loadError, earlierFailed, refresh, loadEarlier,
     trackScroll, scrollRef, inputRef, fileRef, draft, setDraft, sending, retrying, retry,
-    processingImage, selectedImage, setSelectedImage, chooseImage, selectImage,
+    processingImage, selectedImage, setSelectedImage, chooseImage, selectImage, gifChoice,
     replyTarget, replyTo, cancelReply, send, cancelRefresh: () => { refreshRequest.current += 1 },
   }
 }
@@ -382,21 +390,28 @@ export function TimelineComposer({ timeline, onOpenImage }) {
   const {
     scrollRef, fileRef, inputRef, chooseImage, draft, setDraft, send, sending,
     processingImage, selectImage, selectedImage, setSelectedImage, replyTarget, cancelReply,
+    gifChoice,
   } = timeline
+  const gif = gifChoice.gif
   return (
     <ComposerFooter scrollRef={scrollRef}>
       <input ref={fileRef} className="cn-file-input" type="file" accept="image/*"
              onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
       <Composer inputRef={inputRef} value={draft} onChange={setDraft} onSubmit={send}
                 disabled={processingImage} onImagePaste={sending ? undefined : selectImage}
-                sendDisabled={sending || processingImage || (!draft.trim() && !selectedImage)}
+                sendDisabled={sending || processingImage || (!draft.trim() && !selectedImage && !gif)}
                 attachmentAction={<ComposerAttachmentButton onClick={() => fileRef.current?.click()}
-                  disabled={sending || processingImage} />}>
-        {(replyTarget || selectedImage) && <>
+                  disabled={sending || processingImage || !!gif} />}
+                gifAction={<GifButton onClick={gifChoice.open}
+                  disabled={sending || processingImage || !!selectedImage} />}>
+        {(replyTarget || selectedImage || gif) && <>
           <ReplyTarget reply={replyTarget} onDismiss={cancelReply} />
           <SelectedImageStrip selected={selectedImage} onRemove={() => setSelectedImage(null)} onOpen={onOpenImage} />
+          <SelectedGifStrip gif={gif} onRemove={() => { gifChoice.setGif(null); inputRef.current?.focus() }} />
         </>}
       </Composer>
+      <GifPicker open={gifChoice.picking} onClose={gifChoice.close}
+                 onPick={gifChoice.pick} />
     </ComposerFooter>
   )
 }

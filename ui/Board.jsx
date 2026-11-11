@@ -27,6 +27,8 @@ import ReactionControls, { useBoardReactions } from './ReactionControls.jsx'
 import { boardPostFitsWireLimit } from '../board_payload.js'
 import { attachmentBytes, galleryFitsMediaLimits, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 import Composer, { ComposerAttachmentButton, ComposerFooter } from './Composer.jsx'
+import { GifButton, GifPicker, SelectedGifStrip, useGifChoice } from './Gifs.jsx'
+import { withGif } from '../gifs.js'
 import { prependedScrollTop } from './interactionRules.js'
 import { pollWhileVisible } from '../visibility.js'
 import { reachedEarlierHistory } from './historyScroll.js'
@@ -276,6 +278,8 @@ export default function Board({
   // Confirmed post edits shown before the next feed refresh delivers them.
   const [postEdits, setPostEdits] = useState({})
   const [selectedImages, setSelectedImages] = useState([])
+  const postGif = useGifChoice()
+  const replyGif = useGifChoice()
   // The feed as of now, for checks made after an await.
   const feedRef = useRef(feed)
   feedRef.current = feed
@@ -314,6 +318,8 @@ export default function Board({
   const replyScrollRef = useRef(null)
   const replyFileRef = useRef(null)
   const replyPostIdRef = useRef(null)
+  // A staged reply GIF belongs to the thread it was chosen in.
+  useEffect(() => { replyGif.setGif(null) }, [replyPost?.id])
   const stickToBottom = useRef(true)
   const initialScrollDone = useRef(false)
   const threadAnchor = useRef(null)
@@ -673,7 +679,8 @@ export default function Board({
       postId: replyPost?.id, text: replyDraft, attachment: replyImage?.payload,
       thumbnail: replyImage?.thumbnailPayload,
     })
-    const text = replyDraft.trim()
+    const gif = replyGif.gif
+    const text = withGif(replyDraft.trim(), gif)
     const post = replyPost
     const image = replyImage
     if (!canInteract || (!text && !image) || !post || replySending || handoffBusy || preparingReplyImage) return
@@ -711,6 +718,7 @@ export default function Board({
         ))
       }
       clearReplyDraft(post.id)
+      replyGif.setGif(null)
       // Replace any pre-write request without discarding the confirmed write
       // if its fresh confirmation read fails or the thread is reopened.
       const key = String(post.id)
@@ -1030,7 +1038,9 @@ export default function Board({
 
   async function publish() {
     const draftText = draft
-    const text = draftText.trim()
+    const gif = postGif.gif
+    // A staged GIF travels as its KLIPY link on the post's last line.
+    const text = withGif(draftText.trim(), gif)
     const images = selectedImages
     if (!text && !images.length) return
     // Kept across a failure (the draft is restored unchanged) and cleared on
@@ -1051,6 +1061,7 @@ export default function Board({
     })
     setDraft('')
     setSelectedImages([])
+    postGif.setGif(null)
     setComposing(false)
     let attachment
     let attachments
@@ -1063,6 +1074,7 @@ export default function Board({
       setPending(null)
       setDraft(draftText)
       setSelectedImages(images)
+      postGif.setGif(gif)
       setComposing(true)
       setPosting(false)
       showToast(error.message || 'An image couldn’t be prepared.', 'error')
@@ -1107,6 +1119,7 @@ export default function Board({
       setPending(null)
       setDraft(draftText)
       setSelectedImages(images)
+      postGif.setGif(gif)
       setComposing(true)
       window.mobius?.signal?.('error', { message: error.message, source: 'publish' })
       showToast(
@@ -1344,14 +1357,18 @@ export default function Board({
                       inputRef={replyInputRef} value={replyDraft} onChange={changeReplyDraft}
                       maxLength={TEXT_LIMITS.reply} placeholder="Post your reply" label="Post your reply"
                       disabled={replySending || handoffBusy || participationBusy || preparingReplyImage}
-                      sendDisabled={replySending || handoffBusy || participationBusy || preparingReplyImage || (!replyDraft.trim() && !replyImage)}
+                      sendDisabled={replySending || handoffBusy || participationBusy || preparingReplyImage || (!replyDraft.trim() && !replyImage && !replyGif.gif)}
+                      gifAction={<GifButton onClick={replyGif.open} label="Add a GIF to your reply"
+                        disabled={replySending || preparingReplyImage || handoffBusy || participationBusy || !!replyImage} />}
                       attachmentAction={<ComposerAttachmentButton onClick={() => replyFileRef.current?.click()}
-                        disabled={!replyAttachments || replySending || preparingReplyImage || handoffBusy || participationBusy}
+                        disabled={!replyAttachments || replySending || preparingReplyImage || handoffBusy || participationBusy || !!replyGif.gif}
                         label={!replyAttachments ? 'Photo replies need a Community server update' : preparingReplyImage ? 'Preparing photo…' : 'Attach photo to reply'} />}
                       sendLabel="Send reply">
                       {replyImage && <SelectedImageStrip selected={replyImage} onRemove={removeReplyImage}
                         disabled={replySending || preparingReplyImage} onOpen={onOpenImage} />}
-                    </Composer></ComposerFooter></> : <button className="cn-btn cn-btn-primary cn-reply-join" type="button"
+                      {replyGif.gif && <SelectedGifStrip gif={replyGif.gif} onRemove={() => replyGif.setGif(null)} disabled={replySending} />}
+                    </Composer></ComposerFooter>
+                    <GifPicker open={replyGif.picking} onClose={replyGif.close} onPick={replyGif.pick} /></> : <button className="cn-btn cn-btn-primary cn-reply-join" type="button"
                                       onClick={onJoin} disabled={joinBusy}>Join Social to reply</button>}
                   </section>
                 )}
@@ -1401,13 +1418,17 @@ export default function Board({
             inputRef={composerInputRef} value={draft} onChange={changeDraft}
             maxLength={TEXT_LIMITS.post} placeholder="Message everyone…" label="Message everyone"
             disabled={posting || handoffBusy || participationBusy}
-            sendDisabled={!canInteract || posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length)}
+            sendDisabled={!canInteract || posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length && !postGif.gif)}
+            gifAction={<GifButton onClick={postGif.open}
+              disabled={!canInteract || posting || handoffBusy || participationBusy || selectedImages.length > 0} />}
             sendLabel={accountState === 'loading' ? 'Checking your account…' : 'Send message'}
             attachmentAction={<ComposerAttachmentButton onClick={() => fileRef.current?.click()}
-              disabled={!canInteract || posting || selectedImages.length >= MAX_POST_IMAGES}
+              disabled={!canInteract || posting || selectedImages.length >= MAX_POST_IMAGES || !!postGif.gif}
               label={selectedImages.length >= MAX_POST_IMAGES ? `Up to ${MAX_POST_IMAGES} images` : 'Attach photo'} />}>
             {selectedImages.length > 0 && <SelectedImagesStrip selected={selectedImages} onRemove={removeImage} onOpen={onOpenImage} />}
+            {postGif.gif && <SelectedGifStrip gif={postGif.gif} onRemove={() => postGif.setGif(null)} disabled={posting} />}
           </Composer>
+          <GifPicker open={postGif.picking} onClose={postGif.close} onPick={postGif.pick} />
         </> : <div className="cn-board-join">
           <button className="cn-btn cn-btn-primary" type="button" onClick={onJoin}
                   disabled={joinBusy}>Join Social to message</button>

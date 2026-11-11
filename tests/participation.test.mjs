@@ -13,6 +13,7 @@ import {
   completedParticipationIntent, createParticipationIntent, loadParticipationIntent, participationActionLabel, participationStep,
   participationIntentMatches, saveParticipationIntent,
 } from '../participation.js'
+import { withGif } from '../gifs.js'
 
 const originalFetch = globalThis.fetch
 test.afterEach(() => { globalThis.fetch = originalFetch })
@@ -60,6 +61,7 @@ async function restoredBoard(saved, { fail = false, failPreparation = false } = 
     participationIntent: loaded, canInteract: true, feed: [{ id: saved.post_id }],
     draft: '', selectedImages: [], replyDraft: '', replyImage: null, replyPost: null,
     replyMessageId: 'reply-id', replySending: false, handoffBusy: false, preparingReplyImage: false,
+    withGif, postGif: { gif: null, setGif() {} }, replyGif: { gif: null, setGif() {} },
     me: { host: 'test.invalid', handle: 'test' },
     window: { mobius: { storage } }, crypto: { randomUUID: () => 'reply-id' },
     galleryFitsMediaLimits, attachmentBytes, THUMBNAIL_MAX_BYTES,

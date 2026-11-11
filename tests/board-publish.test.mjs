@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { revokeLocalPreviews } from '../ui/boardEdits.js'
+import { withGif } from '../gifs.js'
 
 const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
 
@@ -34,6 +35,7 @@ test('a post that lands while its publish is in flight is not confirmed a second
     const confirmed = []
     const deps = {
       draft: 'Hello', selectedImages: [], postMessageId: null, me: { host: 'me.example', handle: 'me' },
+      withGif, postGif: { gif: null, setGif() {} },
       // The render that started publishing saw an empty feed.
       feed: [], feedRef: { current: [] },
       setPostMessageId: () => {}, markActivity: () => {}, setPosting: () => {}, setPending: () => {},

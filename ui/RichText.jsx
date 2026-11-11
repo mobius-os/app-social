@@ -1,9 +1,10 @@
 import { previewFor, textParts } from '../links.js'
+import { GifText } from './Gifs.jsx'
 
 export default function RichText({ text, className, preview = false }) {
   const card = preview ? previewFor(text) : null
   return (
-    <>
+    <GifText text={text} className={className}>
       <p className={className}>
         {textParts(text).map((part, index) => part.type === 'link' ? (
           <a key={`${part.value}-${index}`} href={part.value} target="_blank"
@@ -22,6 +23,6 @@ export default function RichText({ text, className, preview = false }) {
           </span>
         </a>
       )}
-    </>
+    </GifText>
   )
 }
