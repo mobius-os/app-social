@@ -1,13 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptGroupInvitation, clearGroupUnread, clockTime, declineGroupInvitation,
-  getGroup, listGroupMessages, requestStatus, retryGroupMessage, sendGroupMessage,
-  watchLatestGroupMessages,
+  getGroup, getPeer, listGroupMessages, reactToGroupMessage, requestStatus, retryGroupMessage,
+  sendGroupMessage, watchLatestGroupMessages,
 } from '../api.js'
+import { BOARD_REACTION_EMOJIS } from '../reconciliation.js'
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
+import { supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
 import GroupDetails from './GroupDetails.jsx'
 import {
   DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
@@ -50,6 +52,25 @@ export default function GroupThread({
 
   // Messages are read only while this pane is actually visible to the owner.
   const isMember = requestStatus(currentGroup) === 'accepted'
+  const hostedHere = !!me?.host && currentGroup.host === me.host
+  const [hostReacts, setHostReacts] = useState(false)
+  useEffect(() => {
+    let active = true
+    setHostReacts(false)
+    if (hostedHere || !currentGroup.host) return () => { active = false }
+    getPeer(currentGroup.host, undefined, { background: true })
+      .then(actor => { if (active) setHostReacts(supportsMessageReactions(actor)) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [currentGroup.host, hostedHere])
+  const [pickerFor, setPickerFor] = useState(null)
+  const closePicker = useCallback(() => setPickerFor(null), [])
+  const messageReactions = useMessageReactions({
+    ownHost: me?.host,
+    send: (id, emoji, on) => reactToGroupMessage(gid, id, emoji, on),
+    onError: error => showToast(error.message || 'The reaction couldn’t be sent.', 'error'),
+  })
+  const canReact = isMember && !currentGroup.deleted_at && (hostedHere || hostReacts)
   useEffect(() => {
     if (foreground && isMember) clearGroupUnread(gid).catch(() => {})
   }, [gid, version, foreground, isMember])
@@ -105,6 +126,16 @@ export default function GroupThread({
         onReply={pending ? undefined : () => timeline.replyTo(replyTargetFor(
           message, author || 'Social member',
         ))}
+        reactions={{
+          state: messageReactions.stateFor(message),
+          choices: BOARD_REACTION_EMOJIS,
+          canReact,
+          disabled: Boolean(messageReactions.pending[message.id]),
+          open: pickerFor === message.id,
+          onToggle: () => setPickerFor(open => open === message.id ? null : message.id),
+          onClose: closePicker,
+          onReact: emoji => messageReactions.toggle(message, emoji),
+        }}
       />,
       <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline} />,
     ]

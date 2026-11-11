@@ -98,6 +98,10 @@ from common_public import (
 )
 from common_transport import DEFAULT_MAX_RESPONSE_BYTES, FederationTransportError, federation_request
 from service_io import atomic_write
+from message_reactions import (
+  MESSAGE_REACTIONS_FEATURE, apply_reaction, next_reaction_time, reaction_line,
+  supports_message_reactions, validate_reaction,
+)
 from message_history import (
   begin_message_mutation, load_page, mark_version_covered, mirror_message,
 )
@@ -468,6 +472,13 @@ def _seal_dm(
   attachment: dict | None, reply_to: dict | None,
 ) -> dict:
   """Seal one canonical DM payload to a peer's static X25519 key."""
+  return _seal_payload(message_id, recipient_key_b64, {
+    "text": text, "attachment": attachment, "reply_to": reply_to,
+  })
+
+
+def _seal_payload(envelope_id: str, recipient_key_b64: str, payload: dict) -> dict:
+  """Seal a canonical JSON payload, bound to one envelope id, to a peer's key."""
   from cryptography.hazmat.primitives import serialization
   from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey, X25519PublicKey,
@@ -479,11 +490,8 @@ def _seal_dm(
   ephemeral = X25519PrivateKey.generate()
   key = _dm_key(ephemeral.exchange(recipient))
   nonce = os.urandom(12)
-  plaintext = _canonical({
-    "text": text, "attachment": attachment, "reply_to": reply_to,
-  })
   ciphertext = ChaCha20Poly1305(key).encrypt(
-    nonce, plaintext, message_id.encode("utf-8")
+    nonce, _canonical(payload), envelope_id.encode("utf-8")
   )
   ephemeral_public = ephemeral.public_key().public_bytes(
     encoding=serialization.Encoding.Raw,
@@ -499,6 +507,15 @@ def _seal_dm(
 
 def _open_dm(message_id: str, enc: Any, private_key_b64: str) -> dict:
   """Open one sealed DM payload or return the protocol's generic failure."""
+  return _open_payload(
+    message_id, enc, private_key_b64, {"text", "attachment", "reply_to"},
+  )
+
+
+def _open_payload(
+  envelope_id: str, enc: Any, private_key_b64: str, fields: set[str],
+) -> dict:
+  """Open a sealed payload with exactly ``fields``, or the generic failure."""
   from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey, X25519PublicKey,
   )
@@ -524,14 +541,12 @@ def _open_dm(message_id: str, enc: Any, private_key_b64: str) -> dict:
     )
     plaintext = ChaCha20Poly1305(
       _dm_key(private.exchange(ephemeral))
-    ).decrypt(nonce, ciphertext, message_id.encode("utf-8"))
+    ).decrypt(nonce, ciphertext, envelope_id.encode("utf-8"))
     # Authentication proves the sender, not a safe JSON shape. Admit the
     # revealed bytes through the same structure budget as wire envelopes;
     # an overrun stays the generic decryption failure below.
     payload = _loads_bounded_json(plaintext)
-    if not isinstance(payload, dict) or set(payload) != {
-      "text", "attachment", "reply_to",
-    }:
+    if not isinstance(payload, dict) or set(payload) != fields:
       raise ValueError("invalid sealed payload")
     return payload
   except Exception as exc:
@@ -661,6 +676,7 @@ def _key_actor_doc(identity: dict) -> dict:
       "key_b64": _encryption_public_key(identity["enc_private_key_b64"]),
     },
     "inbox": f"{PUBLIC_SERVICE_PATH}/inbox",
+    "features": [MESSAGE_REACTIONS_FEATURE],
   }
 
 
@@ -1178,10 +1194,12 @@ async def receive_message(request: Request, db=Depends(get_db)):
   if not _joined_for_federation():
     raise HTTPException(status_code=403, detail="Join Social before receiving messages.")
   envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "message":
+  if envelope.get("v") != 0 or envelope.get("type") not in ("message", "message_reaction"):
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   if envelope.get("to") != _own_host():
     raise HTTPException(status_code=400, detail="Envelope is addressed elsewhere.")
+  if envelope["type"] == "message_reaction":
+    return await _receive_message_reaction(envelope, db)
   message_id = envelope.get("id")
   if not isinstance(message_id, str) or not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
@@ -1238,6 +1256,60 @@ async def receive_message(request: Request, db=Depends(get_db)):
   return {
     "status": "delivered" if request_state == "accepted" else "pending",
   }
+
+
+async def _store_dm_reaction(
+  app, peer_host: str, message_id: str, host: str, emoji: str, on: bool, at: float,
+) -> tuple[bool, dict, str]:
+  """Apply one reaction update to a saved DM; ``(applied, record, request_state)``."""
+  async with fs_locks.app_storage_lock(app.id):
+    convo = _conversation_dir(app, peer_host)
+    meta_path = convo / "meta.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+    state = meta.get("request_status") if meta.get("request_status") in REQUEST_STATES else "accepted"
+    if state == "blocked" and host == peer_host:
+      return False, {}, state
+    path = convo / "msgs" / f"{message_id}.json"
+    if not path.is_file():
+      raise HTTPException(status_code=404, detail="Message not found.")
+    record = json.loads(path.read_text())
+    if not apply_reaction(record, host, emoji, on, at):
+      return False, record, state
+    owns_dirty_marker = begin_message_mutation("dm", peer_host)
+    atomic_write(path, json.dumps(record))
+    version = _bump_version(app, history_covered=False)
+    mirror_message(
+      "dm", peer_host, record, path, version=version,
+      owns_dirty_marker=owns_dirty_marker,
+    )
+    return True, record, state
+
+
+async def _receive_message_reaction(envelope: dict, db) -> dict:
+  """Apply a peer's reaction to a message in our conversation with them."""
+  event_id = envelope.get("id")
+  if not isinstance(event_id, str) or not _valid_id(event_id):
+    raise HTTPException(status_code=400, detail="Reaction id is invalid.")
+  actor = await _verify_peer_envelope(envelope)
+  if "enc" in envelope:
+    payload = _open_payload(
+      event_id, envelope.get("enc"), _load_identity()["enc_private_key_b64"],
+      {"message_id", "emoji", "on", "at"},
+    )
+  else:
+    payload = envelope
+  message_id = payload.get("message_id")
+  if not isinstance(message_id, str) or not _valid_id(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  emoji, on, at = validate_reaction(payload.get("emoji"), payload.get("on"), payload.get("at"))
+  sender = envelope["from"]
+  app = _common_app(db)
+  applied, record, state = await _store_dm_reaction(app, sender, message_id, sender, emoji, on, at)
+  # Blocked senders get an ordinary receipt and no trace on the owner's side.
+  if applied and on and state == "accepted" and record.get("dir") == "out":
+    who = f"@{actor['handle']}" if actor.get("handle") else sender
+    await notify("Reaction to your message", reaction_line(who, emoji), f"dm:{sender}")
+  return {"status": "ok"}
 
 
 def _activity_line(kind: str, actor_host: str, actor_handle: str,
@@ -1862,6 +1934,68 @@ async def retry_direct_message(
     "id": message_id,
     "detail": record.get("failure"),
   }
+
+
+class MessageReaction(BaseModel):
+  emoji: str
+  on: bool
+
+
+@router.post("/conversations/{peer_host}/messages/{message_id}/reactions")
+async def react_to_direct_message(
+  peer_host: str,
+  message_id: str,
+  body: MessageReaction,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Turn one of the owner's reactions on or off, on both copies of a DM."""
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  peer = _request_peer(peer_host)
+  if not _valid_id(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  record = await _load_message(app, peer, message_id)
+  meta_path = _conversation_dir(app, peer) / "meta.json"
+  meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+  if meta.get("request_status") in {"pending", "declined", "blocked"}:
+    raise HTTPException(status_code=409, detail="Accept this conversation before reacting.")
+  own = _own_host()
+  emoji, on, at = validate_reaction(body.emoji, body.on, next_reaction_time(record, own, body.emoji))
+  try:
+    actor = await _fetch_actor(peer)
+  except HTTPException as exc:
+    raise HTTPException(status_code=502, detail="This person couldn’t be reached.") from exc
+  if not supports_message_reactions(actor):
+    raise HTTPException(
+      status_code=409, detail="This person’s Social doesn’t support reactions yet.",
+    )
+  event_id = str(uuid.uuid4())
+  envelope = {
+    "v": 0, "type": "message_reaction", "id": event_id,
+    "from": own, "to": peer, "sent_at": time.time(),
+  }
+  payload = {"message_id": message_id, "emoji": emoji, "on": on, "at": at}
+  encryption_key = actor.get("encryption_key")
+  if isinstance(encryption_key, dict) and encryption_key.get("alg") == "x25519":
+    try:
+      envelope["enc"] = _seal_payload(event_id, encryption_key.get("key_b64"), payload)
+    except Exception as exc:
+      raise HTTPException(status_code=502, detail="This person’s encryption key is invalid.") from exc
+  else:
+    envelope.update(payload)
+  envelope["sig"] = _sign(envelope, _load_identity()["private_key_b64"])
+  # The peer's copy changes first; only a confirmed update changes ours, so
+  # the two copies never disagree about this owner's reaction.
+  try:
+    response = await _post_signed_envelope(
+      _peer_service_url(peer, "inbox"), envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
+    )
+    response.raise_for_status()
+  except Exception as exc:
+    raise HTTPException(status_code=502, detail="This person couldn’t be reached.") from exc
+  _applied, record, _state = await _store_dm_reaction(app, peer, message_id, own, emoji, on, at)
+  return {"status": "ok", "reactions": record.get("reactions") or {}}
 
 
 async def _require_community_media_support(

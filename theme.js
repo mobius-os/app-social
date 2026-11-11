@@ -625,6 +625,22 @@ export const CSS = `
 .cn-message-line:hover .cn-bubble-reply,
 .cn-bubble-reply:focus-visible { opacity: 1; pointer-events: auto; }
 .cn-bubble-reply:hover { background: var(--surface-2, var(--surface)); color: var(--text); }
+.cn-bubble-actions { display: flex; align-items: center; flex: 0 0 auto; }
+.cn-message-line.is-mine .cn-bubble-actions { order: -1; }
+.cn-bubble-react[aria-expanded="true"] { opacity: 1; pointer-events: auto; color: var(--accent-text, var(--accent)); }
+/* Reactions get their own line, tucked under the bubble and indented past
+   the avatar column; the 44px chips reach into the gap above. */
+.cn-message-reactions {
+  flex: 0 0 auto; gap: 2px; width: 92%; align-self: flex-start;
+  margin: -12px 0 -4px; padding-left: 36px;
+}
+.cn-message-reactions.is-mine { align-self: flex-end; justify-content: flex-end; padding-left: 0; }
+/* Its own width, so a one-word bubble still gets a full grid of choices. */
+.cn-message-reactions .cn-reaction-picker {
+  position: relative; top: auto; left: auto;
+  flex: 0 0 auto; width: min(302px, calc(100vw - 72px)); max-width: none; margin: 2px 7px 6px;
+}
+.cn-message-reactions .cn-reaction-grid { grid-template-columns: repeat(auto-fill, 44px); }
 .cn-quote {
   margin: 0 0 7px; padding: 7px 9px; min-width: 0;
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 8px;

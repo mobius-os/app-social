@@ -8,7 +8,7 @@ import {
 import { EMOJI_ART } from '../emoji_art.js'
 import { reactionPickerPlacement } from './interactionRules.js'
 
-function FlatEmoji({ emoji }) {
+export function FlatEmoji({ emoji }) {
   return <img className="cn-flat-emoji" src={EMOJI_ART[emoji]} alt="" aria-hidden="true" draggable="false" />
 }
 

@@ -2,7 +2,7 @@
 
 A group lives on its creator's instance, the **group host**. The host owns the
 authoritative membership record; members keep their own copy of every message,
-exactly like 1:1 conversations. Six signed envelope types extend the
+exactly like 1:1 conversations. Eight signed envelope types extend the
 protocol, all delivered to `/api/app-services/social/groups/inbox`:
 
 - `group_added`  host → invitee   invitation; carries group metadata
@@ -11,6 +11,11 @@ protocol, all delivered to `/api/app-services/social/groups/inbox`:
 - `group_post`   member → host    a member's message for the group
 - `group_message` host → member   the host's fan-out relay of a post
 - `group_deleted` host → member   the group is closed; retain local history
+- `group_react`   member → host    a member turns a reaction on or off
+- `group_reaction` host → member   the host's relay of a reaction
+
+Like `group_message`, a `group_reaction` carries the member-signed
+`group_react` as `original`, so the host cannot forge someone's reaction.
 
 A relayed `group_message` is signed by the *host* and carries the complete
 author-signed `group_post` as `original`. Members verify both signatures, so
@@ -83,6 +88,10 @@ from social_routes import (
 )
 from service_io import atomic_write
 from message_history import begin_message_mutation, load_page, mirror_message
+from message_reactions import (
+  apply_reaction, next_reaction_time, reaction_line, supports_message_reactions,
+  validate_reaction,
+)
 
 router = APIRouter(prefix="/groups", tags=["common"])
 
@@ -516,7 +525,7 @@ async def group_inbox(request: Request, db: object = Depends(get_db)):
   _validate_gid(gid)
   if envelope.get("type") not in (
     "group_added", "group_deleted", "group_post", "group_message",
-    "group_accept", "group_decline",
+    "group_accept", "group_decline", "group_react", "group_reaction",
   ):
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   app = _common_app(db)
@@ -636,6 +645,11 @@ async def _accept_group_envelope(
   if not isinstance(message_id, str) or not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
 
+  if kind == "group_react":
+    return await _host_accept_reaction(app, gid, envelope)
+  if kind == "group_reaction":
+    return await _member_accept_reaction(app, gid, envelope)
+
   if kind == "group_post":
     text = envelope.get("text")
     attachment = _validate_attachment(envelope.get("attachment"))
@@ -709,6 +723,132 @@ async def _accept_group_envelope(
     )
     return {"status": "delivered"}
   return {"status": "pending"}
+
+
+# ── reactions ───────────────────────────────────────────────────────────────
+
+def _reaction_fields(envelope: dict) -> tuple[str, str, bool, float]:
+  message_id = envelope.get("message_id")
+  if not isinstance(message_id, str) or not _GID_RE.fullmatch(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  emoji, on, at = validate_reaction(envelope.get("emoji"), envelope.get("on"), envelope.get("at"))
+  return message_id, emoji, on, at
+
+
+def _react_envelope(
+  identity: dict, gid: str, host: str, message_id: str, emoji: str, on: bool, at: float,
+) -> dict:
+  return _signed({
+    "v": 0, "type": "group_react", "id": str(uuid.uuid4()),
+    "from": _own_host(), "to": host, "gid": gid,
+    "message_id": message_id, "emoji": emoji, "on": on, "at": at,
+    "sent_at": time.time(),
+  }, identity)
+
+
+async def _store_group_reaction(
+  app, gid: str, message_id: str, host: str, emoji: str, on: bool, at: float,
+) -> tuple[bool, dict | None]:
+  """Apply one update to this copy; ``(applied, record)``, record None if unknown."""
+  async with fs_locks.app_storage_lock(app.id):
+    path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
+    if not path.is_file():
+      return False, None
+    record = json.loads(path.read_text())
+    if not apply_reaction(record, host, emoji, on, at):
+      return False, record
+    owns_dirty_marker = begin_message_mutation("group", gid)
+    atomic_write(path, json.dumps(record))
+    version = _bump_version(app, history_covered=False)
+    mirror_message(
+      "group", gid, record, path, version=version,
+      owns_dirty_marker=owns_dirty_marker,
+    )
+    return True, record
+
+
+async def _host_commit_reaction(app, group: dict, original: dict) -> tuple[bool, dict, dict]:
+  """Apply a verified ``group_react`` on the host; return its relay batch."""
+  message_id, emoji, on, at = _reaction_fields(original)
+  applied, record = await _store_group_reaction(
+    app, group["id"], message_id, original["from"], emoji, on, at,
+  )
+  if record is None:
+    raise HTTPException(status_code=404, detail="Message not found.")
+  if not applied:
+    return False, record, {}
+  identity = _load_identity()
+  relays = {
+    member: _signed({
+      "v": 0, "type": "group_reaction", "id": str(uuid.uuid4()),
+      "from": _own_host(), "to": member, "gid": group["id"],
+      "original": original, "sent_at": time.time(),
+    }, identity)
+    for member in group["members"]
+    if (
+      member not in (_own_host(), original["from"])
+      and _host_member_active(group["members"][member])
+    )
+  }
+  return True, record, relays
+
+
+async def _notify_group_reaction(meta: dict, record: dict, who: str, emoji: str, on: bool) -> None:
+  if on and record.get("dir") == "out" and _group_request_state(meta) == "accepted":
+    await notify(
+      f"{meta.get('name') or 'Group'}", reaction_line(who, emoji), f"group:{meta.get('gid') or record.get('gid')}",
+    )
+
+
+async def _host_accept_reaction(app, gid: str, envelope: dict) -> dict:
+  sender = envelope["from"]
+  with _host_group_transaction(gid):
+    group = _load_host_group(gid)
+    if group is None:
+      raise HTTPException(status_code=404, detail="Unknown group.")
+    _require_open(group)
+    member = group["members"].get(sender)
+    if member is None or not _host_member_active(member):
+      raise HTTPException(status_code=403, detail="Not a member of this group.")
+    applied, record, relays = await _host_commit_reaction(app, group, envelope)
+  if applied:
+    await _fan_out(group, relays)
+    _message_id, emoji, on, _at = _reaction_fields(envelope)
+    who = f"@{member['handle']}" if member.get("handle") else sender
+    await _notify_group_reaction(
+      _load_group_meta(app, gid) or {"gid": gid, "name": group.get("name")}, record, who, emoji, on,
+    )
+  return {"status": "ok"}
+
+
+async def _member_accept_reaction(app, gid: str, envelope: dict) -> dict:
+  meta = _load_group_meta(app, gid)
+  if meta is None:
+    return {"status": "unknown_group"}
+  if envelope["from"] != meta.get("host"):
+    raise HTTPException(status_code=403, detail="Relay is not from the group host.")
+  _require_open(meta)
+  original = envelope.get("original")
+  if (
+    not isinstance(original, dict)
+    or original.get("type") != "group_react"
+    or original.get("gid") != gid
+    or original.get("to") != meta["host"]
+  ):
+    raise HTTPException(status_code=403, detail="Original reaction is invalid.")
+  try:
+    original_actor = await _verify_peer_envelope(original)
+  except HTTPException as exc:
+    raise HTTPException(status_code=403, detail="Original reaction signature is invalid.") from exc
+  message_id, emoji, on, at = _reaction_fields(original)
+  applied, record = await _store_group_reaction(app, gid, message_id, original["from"], emoji, on, at)
+  if record is None:
+    # A member who joined later never received this message.
+    return {"status": "unknown_message"}
+  if applied:
+    who = f"@{original_actor['handle']}" if original_actor.get("handle") else original["from"]
+    await _notify_group_reaction(meta, record, who, emoji, on)
+  return {"status": "ok"}
 
 
 # ── owner surface ───────────────────────────────────────────────────────────
@@ -1047,6 +1187,67 @@ async def retry_group_message(
   if not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   return await _retry_saved_group_message(app, gid, message_id)
+
+
+class GroupReaction(BaseModel):
+  emoji: str
+  on: bool
+
+
+@router.post("/{gid}/messages/{message_id}/reactions")
+async def react_to_group_message(
+  gid: str,
+  message_id: str,
+  body: GroupReaction,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Turn one of the owner's reactions on or off for everyone in a group."""
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  _validate_gid(gid)
+  if not _GID_RE.fullmatch(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  identity = _load_identity()
+  own = _own_host()
+  path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
+  if not path.is_file():
+    raise HTTPException(status_code=404, detail="Message not found.")
+  at = next_reaction_time(json.loads(path.read_text()), own, body.emoji)
+  emoji, on, at = validate_reaction(body.emoji, body.on, at)
+
+  async with _group_lock(gid):
+    with _host_group_transaction(gid):
+      group = _load_host_group(gid)
+      if group is not None:
+        _require_open(group)
+        original = _react_envelope(identity, gid, own, message_id, emoji, on, at)
+        _applied, record, relays = await _host_commit_reaction(app, group, original)
+  if group is not None:
+    # Committed before networking, like a hosted post.
+    await _fan_out(group, relays)
+    return {"status": "ok", "reactions": record.get("reactions") or {}}
+
+  meta = _load_group_meta(app, gid)
+  if meta is None:
+    raise HTTPException(status_code=404, detail="Unknown group.")
+  _require_open(meta)
+  _require_accepted_group(meta)
+  host = meta["host"]
+  try:
+    host_actor = await _fetch_actor(host)
+  except HTTPException as exc:
+    raise HTTPException(status_code=502, detail="The group host couldn’t be reached.") from exc
+  if not supports_message_reactions(host_actor):
+    raise HTTPException(
+      status_code=409, detail="This group’s host doesn’t support reactions yet.",
+    )
+  envelope = _react_envelope(identity, gid, host, message_id, emoji, on, at)
+  # The host's copy is authoritative for the group; ours follows it.
+  if not await _deliver(host, envelope):
+    raise HTTPException(status_code=502, detail="The group host couldn’t be reached.")
+  _applied, record = await _store_group_reaction(app, gid, message_id, own, emoji, on, at)
+  return {"status": "ok", "reactions": (record or {}).get("reactions") or {}}
 
 
 @router.post("/{gid}/send")
