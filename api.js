@@ -209,18 +209,22 @@ export const getPeerAvatars = (hosts, { background = false, digests = {} } = {})
 // ── server changes ─────────────────────────────────────────────────────────
 
 // Federation deliveries and other service writes bump state/version.json on
-// the server. Check it the moment Möbius nudges the open app (the same signal
-// that updates the sidebar badge), and poll while Social is on screen as the
-// fallback for a missed nudge or an older Möbius. A hidden pane makes no
-// requests; it catches up when it is shown again. Returns a stop function.
+// the server. Möbius nudges the open app only when its unread badge changes or
+// an app-attributed notification arrives, and once after the shell's event
+// stream reconnects; each nudge checks at once. Board posts, reactions, edits
+// and pending message requests leave the badge alone, so only the poll while
+// Social is on screen picks them up (it also covers an older Möbius and the
+// standalone page). A hidden pane makes no requests; it catches up when it is
+// shown again. Returns a stop function.
 export function watchServerChanges(store, {
   mobius = globalThis.window?.mobius, intervalMs = 5000,
 } = {}) {
-  const check = () => store.get('state/version.json')
-  const stopPolling = pollWhileVisible(check, () => intervalMs, { mobius })
-  const stopActivity = mobius?.onActivity?.(() => {
-    if (mobius.visible !== false) check().catch(() => null)
-  })
+  const stopPolling = pollWhileVisible(
+    () => store.get('state/version.json'),
+    () => intervalMs,
+    { mobius },
+  )
+  const stopActivity = mobius?.onActivity?.(stopPolling.now)
   return () => {
     stopPolling()
     if (typeof stopActivity === 'function') stopActivity()
