@@ -93,7 +93,8 @@ from common_protocol import (
   wire_json_size as _wire_json_size,
 )
 from common_public import (
-  AVATAR_DIGEST, BOARD_REACTION_EMOJIS, CommonPublicStore, image_thumbnail_bytes,
+  AVATAR_DIGEST, BOARD_REACTION_EMOJIS, BOARD_REACTION_NAMES, CommonPublicStore,
+  image_thumbnail_bytes,
 )
 from common_transport import DEFAULT_MAX_RESPONSE_BYTES, FederationTransportError, federation_request
 from service_io import atomic_write
@@ -1245,9 +1246,19 @@ def _activity_line(kind: str, actor_host: str, actor_handle: str,
   if kind == "reply":
     return f"{who} replied to your post"
   item = "reply" if reply_id is not None else "post"
-  if emoji is not None:
+  if emoji in BOARD_REACTION_NAMES:
+    return f"{who} reacted with {BOARD_REACTION_NAMES[emoji]} to your {item}"
+  if emoji in BOARD_REACTION_EMOJIS:
     return f"{who} reacted {emoji} to your {item}"
+  if emoji is not None:
+    # A newer host's reaction this version cannot draw or name.
+    return f"{who} reacted to your {item}"
   return f"{who} liked your {item}"
+
+
+# The board host may know reactions this version does not. A notice still
+# arrives for them, so accept any short printable id rather than only our list.
+_ACTIVITY_REACTION_RE = re.compile(r"[^\s\x00-\x1f\x7f]{1,32}")
 
 
 @contextmanager
@@ -1311,8 +1322,8 @@ async def receive_board_activity(request: Request):
   if reply_id is not None and not _valid_id(reply_id):
     raise HTTPException(status_code=400, detail="Reply id is invalid.")
   emoji = envelope.get("emoji")
-  if emoji is not None and emoji not in BOARD_REACTION_EMOJIS:
-    raise HTTPException(status_code=400, detail="Reaction is not supported.")
+  if emoji is not None and (not isinstance(emoji, str) or not _ACTIVITY_REACTION_RE.fullmatch(emoji)):
+    raise HTTPException(status_code=400, detail="Reaction is invalid.")
   activity_id = envelope.get("activity_id")
   if activity_id is not None and (not isinstance(activity_id, str) or not 1 <= len(activity_id) <= 128):
     raise HTTPException(status_code=400, detail="Activity id is invalid.")

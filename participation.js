@@ -5,16 +5,14 @@ import {
   attachmentBytes, galleryFitsMediaLimits, GIF_MAX_BYTES, IMAGE_MAX_BYTES,
   THUMBNAIL_MAX_BYTES,
 } from './media_limits.js'
+import { BOARD_REACTION_EMOJIS } from './reconciliation.js'
 
 const INTENT_VERSION = 1
 export const TEXT_LIMITS = { post: 4000, reply: 1000 }
 const INTENT_KINDS = new Set(['post', 'reply', 'like'])
 const POST_ID_RE = /^[a-z0-9-]{1,128}$/i
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
-const REACTION_EMOJIS = new Set([
-  '❤️', '👍', '👎', '😂', '😮', '😢', '😡', '🎉', '🚀', '👀', '🙌', '🔥',
-  '✅', '💯', '🤔', '👏', '🙏', '💪', '🤝', '✨', '😍', '🤯', '🫡', '🫶',
-])
+const REACTION_EMOJIS = new Set(BOARD_REACTION_EMOJIS)
 
 const MAX_INTENT_ATTACHMENTS = 4
 

@@ -23,6 +23,7 @@ from common_public import (
   CommonPublicStore,
   create_public_router,
   image_thumbnail_bytes,
+  read_board_page,
 )
 
 
@@ -304,6 +305,27 @@ class PublicBoardIndexTests(unittest.TestCase):
       self.assertEqual(presented["like_count"], 1)
       self.assertEqual([item["emoji"] for item in presented["reactions"]], ["❤️", "🎉"])
       self.assertTrue(presented["reactions"][1]["reacted"])
+
+  def test_board_advertises_every_reaction_and_stores_the_mobius_logo(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      store.store_post({
+        "id": "post-logo", "host": "author.example", "text": "Logo",
+        "created_at": 1.0, "replies": [],
+      })
+      page = read_board_page(store, 10, None, "viewer.example")
+      self.assertEqual(page["capabilities"]["reactions"], list(BOARD_REACTION_EMOJIS))
+      # Older stored reactions keep their place: the list only ever grows.
+      self.assertEqual(BOARD_REACTION_EMOJIS[:1] + BOARD_REACTION_EMOJIS[2:25], (
+        "❤️", "👍", "👎", "😂", "😮", "😢", "😡", "🎉", "🚀", "👀", "🙌", "🔥",
+        "✅", "💯", "🤔", "👏", "🙏", "💪", "🤝", "✨", "😍", "🤯", "🫡", "🫶",
+      ))
+      result = store.toggle_reaction("post-logo", "viewer.example", ":mobius:")
+      self.assertEqual(result["reaction_counts"], {":mobius:": 1})
+      presented = store.read_board(10, None, "viewer.example")[0]
+      self.assertEqual(presented["reactions"], [{"emoji": ":mobius:", "count": 1, "reacted": True}])
+      with self.assertRaises(HTTPException):
+        store.toggle_reaction("post-logo", "viewer.example", ":unknown:")
 
   def test_legacy_like_response_shape_survives_storage_migration(self):
     with tempfile.TemporaryDirectory() as directory:

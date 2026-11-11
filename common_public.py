@@ -115,10 +115,18 @@ REACTION_REPLAY_TTL_S = 2 * CLOCK_SKEW_S
 # Bound per-post metadata; saturation rejects new reactions rather than
 # discarding live tokens and making earlier requests replayable.
 REACTION_REPLAY_LIMIT = 2048
+# Every reaction this host stores, in presentation order. The board advertises
+# this list as capabilities.reactions so a client offers only what the host
+# accepts; add reactions freely, but never remove one, or stored reactions vanish.
+# ":mobius:" is the Möbius logo, the one reaction that is not a Unicode emoji.
 BOARD_REACTION_EMOJIS = (
-  "❤️", "👍", "👎", "😂", "😮", "😢", "😡", "🎉", "🚀", "👀", "🙌", "🔥",
+  "❤️", ":mobius:", "👍", "👎", "😂", "😮", "😢", "😡", "🎉", "🚀", "👀", "🙌", "🔥",
   "✅", "💯", "🤔", "👏", "🙏", "💪", "🤝", "✨", "😍", "🤯", "🫡", "🫶",
+  "😊", "🥰", "😎", "🥳", "😭", "😅", "🙃", "😬", "🤗", "🤩", "😴", "🫠",
+  "💔", "💙", "💚", "💜", "👋", "✌️", "👌", "💡", "🎯", "🏆", "⭐",
 )
+# Spoken names for reactions that are not themselves readable text.
+BOARD_REACTION_NAMES = {":mobius:": "the Möbius logo"}
 BOARD_THUMBNAIL_MAX_SIDE = 640
 BOARD_THUMBNAIL_MAX_PIXELS = 24_000_000
 IMAGE_FORMAT_MIME = {
@@ -1574,7 +1582,7 @@ def read_board_page(
     if position is not None:
       next_cursor = _encode_board_cursor(*position)
   return {
-    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True},
+    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True, "reactions": list(BOARD_REACTION_EMOJIS)},
     "media_limits": {
       "gif_bytes": MAX_ATTACHMENT_BYTES,
       "static_bytes": MAX_STATIC_ATTACHMENT_BYTES,

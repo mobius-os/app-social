@@ -16,7 +16,7 @@ import {
   participationIntentMatches, participationStep,
   saveParticipationIntent,
 } from './participation.js'
-import { reconcileFeedPage } from './reconciliation.js'
+import { offeredReactions, reconcileFeedPage } from './reconciliation.js'
 import { pollWhileVisible } from './visibility.js'
 import { discoveryExtendsFeed, locateBoardPost, mergeDiscoveredPosts, parseBoardIntent } from './boardNavigation.js'
 
@@ -745,6 +745,7 @@ export default function App({ appId, token }) {
                  onJoin={beginJoin} joinBusy={saving || meState === 'loading'}
                  emojiReactions={Boolean(feedCapabilities.emoji_reactions)}
                  replyReactions={Boolean(feedCapabilities.reply_reactions)}
+                 reactionChoices={offeredReactions(feedCapabilities)}
                  authorEdits={Boolean(feedCapabilities.author_edits)}
                  replyAttachments={Boolean(feedCapabilities.reply_attachments)}
                  boardTarget={boardTarget} onTargetHandled={finishBoardTarget}

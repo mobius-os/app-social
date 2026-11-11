@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
+import { EMOJI_ART } from '../emoji_art.js'
 import {
+  BOARD_REACTION_EMOJIS,
   boardRefreshDelay,
+  offeredReactions,
   optimisticReactionChange,
   reactionActionLabel,
+  reactionName,
   reactionState,
   reconcileFeedPage,
   reconcileReplies,
@@ -133,4 +138,27 @@ test('visible Social surfaces refresh quickly after activity and relax when idle
   assert.equal(boardRefreshDelay(1_000, 20_000), 15000)
   assert.equal(threadRefreshDelay(10_000, 20_000), 1500)
   assert.equal(threadRefreshDelay(1_000, 20_000), 5000)
+})
+
+test('the picker offers only reactions the community host accepts', () => {
+  const legacy = offeredReactions({ emoji_reactions: true })
+  assert.equal(legacy.length, 24)
+  assert.ok(!legacy.includes(':mobius:'), 'an older host would refuse the logo')
+  assert.deepEqual(offeredReactions({ reactions: ['🫶', ':mobius:', ':from-the-future:', '❤️'] }),
+    ['❤️', ':mobius:', '🫶'])
+  assert.deepEqual(offeredReactions({ reactions: BOARD_REACTION_EMOJIS }), BOARD_REACTION_EMOJIS)
+})
+
+test('every reaction has artwork and matches the host list', () => {
+  for (const emoji of BOARD_REACTION_EMOJIS) assert.ok(EMOJI_ART[emoji], `artwork for ${emoji}`)
+  const python = readFileSync(new URL('../common_public.py', import.meta.url), 'utf8')
+  const tuple = python.match(/BOARD_REACTION_EMOJIS = \(([^)]*)\)/)[1]
+  assert.deepEqual([...tuple.matchAll(/"([^"]+)"/g)].map(match => match[1]), BOARD_REACTION_EMOJIS)
+})
+
+test('the Möbius logo reaction has a spoken name', () => {
+  assert.equal(reactionName(':mobius:'), 'Möbius logo')
+  assert.equal(reactionName('🎉'), '🎉')
+  assert.equal(reactionActionLabel({ count: 2, reacted: false }, ':mobius:'),
+    'Add Möbius logo reaction. 2 reactions')
 })
