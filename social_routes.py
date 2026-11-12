@@ -99,8 +99,8 @@ from common_public import (
 from common_transport import DEFAULT_MAX_RESPONSE_BYTES, FederationTransportError, federation_request
 from service_io import atomic_write
 from message_reactions import (
-  MESSAGE_REACTIONS_FEATURE, apply_reaction, next_reaction_time, reaction_line,
-  supports_message_reactions, validate_reaction,
+  MESSAGE_REACTIONS_FEATURE, apply_reaction, begin_own_update, own_update_result,
+  reaction_line, settle_own_update, supports_message_reactions, validate_reaction,
 )
 from message_history import (
   begin_message_mutation, load_page, mark_version_covered, mirror_message,
@@ -1260,6 +1260,7 @@ async def receive_message(request: Request, db=Depends(get_db)):
 
 async def _store_dm_reaction(
   app, peer_host: str, message_id: str, host: str, emoji: str, on: bool, at: float,
+  *, sealed: bool,
 ) -> tuple[bool, dict, str]:
   """Apply one reaction update to a saved DM; ``(applied, record, request_state)``."""
   async with fs_locks.app_storage_lock(app.id):
@@ -1273,6 +1274,9 @@ async def _store_dm_reaction(
     if not path.is_file():
       raise HTTPException(status_code=404, detail="Message not found.")
     record = json.loads(path.read_text())
+    if record.get("encrypted") is True and not sealed:
+      # The sender should have sealed it; refuse rather than accept a downgrade.
+      raise HTTPException(status_code=400, detail="This reaction must be encrypted.")
     if not apply_reaction(record, host, emoji, on, at):
       return False, record, state
     owns_dirty_marker = begin_message_mutation("dm", peer_host)
@@ -1304,7 +1308,9 @@ async def _receive_message_reaction(envelope: dict, db) -> dict:
   emoji, on, at = validate_reaction(payload.get("emoji"), payload.get("on"), payload.get("at"))
   sender = envelope["from"]
   app = _common_app(db)
-  applied, record, state = await _store_dm_reaction(app, sender, message_id, sender, emoji, on, at)
+  applied, record, state = await _store_dm_reaction(
+    app, sender, message_id, sender, emoji, on, at, sealed="enc" in envelope,
+  )
   # Blocked senders get an ordinary receipt and no trace on the owner's side.
   if applied and on and state == "accepted" and record.get("dir") == "out":
     who = f"@{actor['handle']}" if actor.get("handle") else sender
@@ -1939,6 +1945,38 @@ async def retry_direct_message(
 class MessageReaction(BaseModel):
   emoji: str
   on: bool
+  # The update's stable identity, chosen by the app so that a retry after a
+  # lost reply re-sends this exact update rather than a new one.
+  id: str | None = None
+
+
+async def _change_own_dm_reaction(app, peer_host: str, message_id: str, change) -> tuple:
+  """Run ``change(record)`` on a saved DM under the storage lock; save if it says so."""
+  async with fs_locks.app_storage_lock(app.id):
+    path = _message_path(app, peer_host, message_id)
+    if not path.is_file():
+      raise HTTPException(status_code=404, detail="Message not found.")
+    record = json.loads(path.read_text())
+    changed, value = change(record)
+    if changed:
+      owns_dirty_marker = begin_message_mutation("dm", peer_host)
+      atomic_write(path, json.dumps(record))
+      version = _bump_version(app, history_covered=False)
+      mirror_message(
+        "dm", peer_host, record, path, version=version,
+        owns_dirty_marker=owns_dirty_marker,
+      )
+    return record, value
+
+
+def _reaction_failure(exc: Exception) -> tuple[str, str]:
+  """Classify a failed reaction send: ``refused`` only when the peer said no."""
+  if isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500 \
+      and exc.response.status_code not in (408, 429):
+    return "refused", "This person’s Social refused the reaction."
+  if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+    return "uncertain", "The reply was lost; this reaction may have arrived. Retry to make sure."
+  return "uncertain", "This person couldn’t be reached. Retry to send the reaction."
 
 
 @router.post("/conversations/{peer_host}/messages/{message_id}/reactions")
@@ -1949,19 +1987,27 @@ async def react_to_direct_message(
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Turn one of the owner's reactions on or off, on both copies of a DM."""
+  """Turn one of the owner's reactions on or off, on both copies of a DM.
+
+  The update is saved here, as pending, before it is sent. A lost reply is no
+  proof that the peer did not apply it, so it stays shown and retryable under
+  the same id until the peer confirms it; only a definite refusal undoes it.
+  """
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
   peer = _request_peer(peer_host)
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
+  update_id = body.id or str(uuid.uuid4())
+  if not _valid_id(update_id):
+    raise HTTPException(status_code=400, detail="Reaction id is invalid.")
   record = await _load_message(app, peer, message_id)
   meta_path = _conversation_dir(app, peer) / "meta.json"
   meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
   if meta.get("request_status") in {"pending", "declined", "blocked"}:
     raise HTTPException(status_code=409, detail="Accept this conversation before reacting.")
   own = _own_host()
-  emoji, on, at = validate_reaction(body.emoji, body.on, next_reaction_time(record, own, body.emoji))
+  validate_reaction(body.emoji, body.on, time.time())
   try:
     actor = await _fetch_actor(peer)
   except HTTPException as exc:
@@ -1970,32 +2016,63 @@ async def react_to_direct_message(
     raise HTTPException(
       status_code=409, detail="This person’s Social doesn’t support reactions yet.",
     )
-  event_id = str(uuid.uuid4())
+  encryption_key = actor.get("encryption_key")
+  peer_encrypts = isinstance(encryption_key, dict) and encryption_key.get("alg") == "x25519"
+  if record.get("encrypted") is True and not peer_encrypts:
+    # Like a DM retry, never downgrade an encrypted conversation to plaintext.
+    raise HTTPException(
+      status_code=409,
+      detail="This person no longer publishes an encryption key, so the reaction wasn’t sent.",
+    )
+
+  def begin(saved: dict) -> tuple[bool, tuple[dict, bool]]:
+    update, new = begin_own_update(saved, own, body.emoji, body.on, update_id)
+    return new, (update, new)
+
+  def settle(outcome: str, detail: str | None = None):
+    return lambda saved: (
+      settle_own_update(saved, own, body.emoji, update_id, outcome, detail), None,
+    )
+
+  record, (update, new) = await _change_own_dm_reaction(app, peer, message_id, begin)
+  if not update.get("pending"):
+    return own_update_result(record, update)
+
   envelope = {
-    "v": 0, "type": "message_reaction", "id": event_id,
+    "v": 0, "type": "message_reaction", "id": update_id,
     "from": own, "to": peer, "sent_at": time.time(),
   }
-  payload = {"message_id": message_id, "emoji": emoji, "on": on, "at": at}
-  encryption_key = actor.get("encryption_key")
-  if isinstance(encryption_key, dict) and encryption_key.get("alg") == "x25519":
+  payload = {"message_id": message_id, "emoji": body.emoji, "on": update["on"], "at": update["at"]}
+  if peer_encrypts:
     try:
-      envelope["enc"] = _seal_payload(event_id, encryption_key.get("key_b64"), payload)
+      envelope["enc"] = _seal_payload(update_id, encryption_key.get("key_b64"), payload)
     except Exception as exc:
-      raise HTTPException(status_code=502, detail="This person’s encryption key is invalid.") from exc
+      # Nothing left this host. A first attempt is undone; an earlier attempt
+      # of a retried update may still have arrived, so it stays pending.
+      detail = "This person’s encryption key is invalid."
+      await _change_own_dm_reaction(
+        app, peer, message_id, settle("refused" if new else "uncertain", detail),
+      )
+      raise HTTPException(status_code=409 if new else 502, detail=detail) from exc
   else:
     envelope.update(payload)
   envelope["sig"] = _sign(envelope, _load_identity()["private_key_b64"])
-  # The peer's copy changes first; only a confirmed update changes ours, so
-  # the two copies never disagree about this owner's reaction.
   try:
     response = await _post_signed_envelope(
       _peer_service_url(peer, "inbox"), envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
     )
     response.raise_for_status()
+    outcome, detail = "delivered", None
   except Exception as exc:
-    raise HTTPException(status_code=502, detail="This person couldn’t be reached.") from exc
-  _applied, record, _state = await _store_dm_reaction(app, peer, message_id, own, emoji, on, at)
-  return {"status": "ok", "reactions": record.get("reactions") or {}}
+    outcome, detail = _reaction_failure(exc)
+  record, _ = await _change_own_dm_reaction(app, peer, message_id, settle(outcome, detail))
+  if outcome == "refused":
+    raise HTTPException(status_code=409, detail=detail)
+  current = (record.get("reaction_updates") or {}).get(body.emoji)
+  if not isinstance(current, dict) or current.get("id") != update_id:
+    # A newer update for this reaction replaced this one while it was sent.
+    return {**own_update_result(record, {**update, "pending": False}), "superseded": True}
+  return own_update_result(record, current)
 
 
 async def _require_community_media_support(

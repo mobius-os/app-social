@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 from weakref import WeakValueDictionary
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
@@ -89,8 +90,8 @@ from social_routes import (
 from service_io import atomic_write
 from message_history import begin_message_mutation, load_page, mirror_message
 from message_reactions import (
-  apply_reaction, next_reaction_time, reaction_line, supports_message_reactions,
-  validate_reaction,
+  apply_reaction, begin_own_update, own_update_result, reaction_line, settle_own_update,
+  supports_message_reactions, validate_reaction,
 )
 
 router = APIRouter(prefix="/groups", tags=["common"])
@@ -737,60 +738,159 @@ def _reaction_fields(envelope: dict) -> tuple[str, str, bool, float]:
 
 def _react_envelope(
   identity: dict, gid: str, host: str, message_id: str, emoji: str, on: bool, at: float,
+  *, update_id: str,
 ) -> dict:
+  # The id is the update's stable identity: every attempt of one update
+  # carries it, with a fresh transport timestamp and signature.
   return _signed({
-    "v": 0, "type": "group_react", "id": str(uuid.uuid4()),
+    "v": 0, "type": "group_react", "id": update_id,
     "from": _own_host(), "to": host, "gid": gid,
     "message_id": message_id, "emoji": emoji, "on": on, "at": at,
     "sent_at": time.time(),
   }, identity)
 
 
+async def _change_group_message(app, gid: str, message_id: str, change) -> tuple[dict | None, Any]:
+  """Run ``change(record)`` on a saved group message under the storage lock.
+
+  ``change`` returns ``(changed, value)``; a changed record is saved and
+  republished. Returns ``(record, value)``, or ``(None, None)`` when this copy
+  never received the message.
+  """
+  async with fs_locks.app_storage_lock(app.id):
+    path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
+    if not path.is_file():
+      return None, None
+    record = json.loads(path.read_text())
+    changed, value = change(record)
+    if changed:
+      owns_dirty_marker = begin_message_mutation("group", gid)
+      atomic_write(path, json.dumps(record))
+      version = _bump_version(app, history_covered=False)
+      mirror_message(
+        "group", gid, record, path, version=version,
+        owns_dirty_marker=owns_dirty_marker,
+      )
+    return record, value
+
+
 async def _store_group_reaction(
   app, gid: str, message_id: str, host: str, emoji: str, on: bool, at: float,
 ) -> tuple[bool, dict | None]:
   """Apply one update to this copy; ``(applied, record)``, record None if unknown."""
-  async with fs_locks.app_storage_lock(app.id):
-    path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
-    if not path.is_file():
-      return False, None
-    record = json.loads(path.read_text())
-    if not apply_reaction(record, host, emoji, on, at):
-      return False, record
-    owns_dirty_marker = begin_message_mutation("group", gid)
-    atomic_write(path, json.dumps(record))
-    version = _bump_version(app, history_covered=False)
-    mirror_message(
-      "group", gid, record, path, version=version,
-      owns_dirty_marker=owns_dirty_marker,
-    )
-    return True, record
+  def change(saved: dict) -> tuple[bool, bool]:
+    applied = apply_reaction(saved, host, emoji, on, at)
+    return applied, applied
+
+  record, applied = await _change_group_message(app, gid, message_id, change)
+  return bool(applied), record
+
+
+# Relays the host still owes members, kept apart from the message so that
+# delivering them never reapplies a reaction or repeats a notification:
+# ``{"<message id> <reacting host> <emoji>": {"original": signed group_react,
+# "members": [hosts not yet confirmed]}}``. A newer update for the same pair
+# replaces the entry, because members need only the newest one.
+
+def _relay_outbox_path(gid: str) -> Path:
+  return _host_groups_dir() / "reaction-relays" / f"{gid}.json"
+
+
+def _load_relay_outbox(gid: str) -> dict:
+  path = _relay_outbox_path(gid)
+  if not path.is_file():
+    return {}
+  value = json.loads(path.read_text())
+  return value if isinstance(value, dict) else {}
+
+
+def _save_relay_outbox(gid: str, outbox: dict) -> None:
+  path = _relay_outbox_path(gid)
+  if outbox:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, json.dumps(outbox))
+  else:
+    path.unlink(missing_ok=True)
+
+
+def _relay_key(original: dict) -> str:
+  return f"{original['message_id']} {original['from']} {original['emoji']}"
+
+
+def _same_update(a: dict, b: dict) -> bool:
+  return all(a.get(field) == b.get(field) for field in (
+    "id", "from", "gid", "message_id", "emoji", "on", "at",
+  ))
+
+
+def _queue_reaction_relays(group: dict, original: dict, *, applied: bool) -> dict[str, dict]:
+  """Record and return the relays one host-accepted update still needs.
+
+  A newly applied update owes every other active member a relay. An exact
+  retry of an applied one owes only the members its earlier attempts missed.
+  Callers hold the host group transaction.
+  """
+  outbox = _load_relay_outbox(group["id"])
+  key = _relay_key(original)
+  if applied:
+    entry = {"original": original, "members": [
+      member for member in group["members"]
+      if member not in (_own_host(), original["from"])
+      and _host_member_active(group["members"][member])
+    ]}
+  else:
+    entry = outbox.get(key)
+    if not isinstance(entry, dict) or not _same_update(entry.get("original") or {}, original):
+      return {}  # an older update, or one every member already has
+    # Relay the freshly signed attempt: members check the original's timestamp.
+    entry = {"original": original, "members": [
+      member for member in entry.get("members") or []
+      if member in group["members"] and _host_member_active(group["members"][member])
+    ]}
+  if entry["members"]:
+    outbox[key] = entry
+  else:
+    outbox.pop(key, None)
+  _save_relay_outbox(group["id"], outbox)
+  identity = _load_identity()
+  return {
+    member: _signed({
+      "v": 0, "type": "group_reaction",
+      "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"group-reaction:{original['id']}:{member}")),
+      "from": _own_host(), "to": member, "gid": group["id"],
+      "original": original, "sent_at": time.time(),
+    }, identity)
+    for member in entry["members"]
+  }
+
+
+async def _relay_reaction(group: dict, original: dict, relays: dict[str, dict]) -> list[str]:
+  """Fan out, then settle confirmed members; return those still owed."""
+  delivered = await _fan_out(group, relays) if relays else {}
+  key = _relay_key(original)
+  with _host_group_transaction(group["id"]):
+    outbox = _load_relay_outbox(group["id"])
+    entry = outbox.get(key)
+    if not isinstance(entry, dict) or not _same_update(entry.get("original") or {}, original):
+      return []  # a newer update replaced this one; it carries its own relays
+    remaining = [member for member in entry.get("members") or [] if not delivered.get(member)]
+    if remaining:
+      outbox[key] = {**entry, "members": remaining}
+    else:
+      outbox.pop(key)
+    _save_relay_outbox(group["id"], outbox)
+  return remaining
 
 
 async def _host_commit_reaction(app, group: dict, original: dict) -> tuple[bool, dict, dict]:
-  """Apply a verified ``group_react`` on the host; return its relay batch."""
+  """Apply a verified ``group_react`` on the host; return the relays it owes."""
   message_id, emoji, on, at = _reaction_fields(original)
   applied, record = await _store_group_reaction(
     app, group["id"], message_id, original["from"], emoji, on, at,
   )
   if record is None:
     raise HTTPException(status_code=404, detail="Message not found.")
-  if not applied:
-    return False, record, {}
-  identity = _load_identity()
-  relays = {
-    member: _signed({
-      "v": 0, "type": "group_reaction", "id": str(uuid.uuid4()),
-      "from": _own_host(), "to": member, "gid": group["id"],
-      "original": original, "sent_at": time.time(),
-    }, identity)
-    for member in group["members"]
-    if (
-      member not in (_own_host(), original["from"])
-      and _host_member_active(group["members"][member])
-    )
-  }
-  return True, record, relays
+  return applied, record, _queue_reaction_relays(group, original, applied=applied)
 
 
 async def _notify_group_reaction(meta: dict, record: dict, who: str, emoji: str, on: bool) -> None:
@@ -811,14 +911,16 @@ async def _host_accept_reaction(app, gid: str, envelope: dict) -> dict:
     if member is None or not _host_member_active(member):
       raise HTTPException(status_code=403, detail="Not a member of this group.")
     applied, record, relays = await _host_commit_reaction(app, group, envelope)
+  undelivered = await _relay_reaction(group, envelope, relays)
   if applied:
-    await _fan_out(group, relays)
+    # Only the first application notifies; a retry only finishes relaying.
     _message_id, emoji, on, _at = _reaction_fields(envelope)
     who = f"@{member['handle']}" if member.get("handle") else sender
     await _notify_group_reaction(
       _load_group_meta(app, gid) or {"gid": gid, "name": group.get("name")}, record, who, emoji, on,
     )
-  return {"status": "ok"}
+  # The reacting member keeps its update retryable while relays are owed.
+  return {"status": "ok", "undelivered": len(undelivered)}
 
 
 async def _member_accept_reaction(app, gid: str, envelope: dict) -> dict:
@@ -1192,6 +1294,29 @@ async def retry_group_message(
 class GroupReaction(BaseModel):
   emoji: str
   on: bool
+  # The update's stable identity; a retry under it re-sends the same update.
+  id: str | None = None
+
+
+async def _deliver_reaction(host: str, envelope: dict) -> tuple[str, dict]:
+  """``(outcome, reply)``: delivered, refused (the host said no), or uncertain."""
+  try:
+    response = await _post_signed_envelope(
+      _peer_service_url(host, "groups/inbox"), envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+    )
+    response.raise_for_status()
+  except httpx.HTTPStatusError as exc:
+    code = exc.response.status_code
+    return ("refused" if 400 <= code < 500 and code not in (408, 429) else "uncertain"), {}
+  except Exception:
+    # A lost reply is no proof the host did not apply it.
+    return "uncertain", {}
+  try:
+    reply = response.json()
+  except Exception:
+    reply = {}
+  return "delivered", reply if isinstance(reply, dict) else {}
 
 
 @router.post("/{gid}/messages/{message_id}/reactions")
@@ -1202,31 +1327,69 @@ async def react_to_group_message(
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Turn one of the owner's reactions on or off for everyone in a group."""
+  """Turn one of the owner's reactions on or off for everyone in a group.
+
+  The update is saved on this copy, as pending, before anything is sent. It
+  stays pending, shown and retryable under its id, until the host has it and
+  every member it is relayed to has confirmed it. An exact retry re-sends only
+  what is still owed; only a definite refusal undoes it here.
+  """
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
   _validate_gid(gid)
   if not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
+  update_id = body.id or str(uuid.uuid4())
+  if not isinstance(update_id, str) or not _GID_RE.fullmatch(update_id):
+    raise HTTPException(status_code=400, detail="Reaction id is invalid.")
+  validate_reaction(body.emoji, body.on, time.time())
   identity = _load_identity()
   own = _own_host()
-  path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
-  if not path.is_file():
+  if not (_group_dir(app, gid) / "msgs" / f"{message_id}.json").is_file():
     raise HTTPException(status_code=404, detail="Message not found.")
-  at = next_reaction_time(json.loads(path.read_text()), own, body.emoji)
-  emoji, on, at = validate_reaction(body.emoji, body.on, at)
+
+  def begin(saved: dict) -> tuple[bool, tuple[dict, bool]]:
+    update, new = begin_own_update(saved, own, body.emoji, body.on, update_id)
+    return new, (update, new)
+
+  def settle(outcome: str, detail: str | None = None):
+    return lambda saved: (
+      settle_own_update(saved, own, body.emoji, update_id, outcome, detail), None,
+    )
+
+  async def result(outcome: str, detail: str | None = None, **extra) -> dict:
+    record, _ = await _change_group_message(app, gid, message_id, settle(outcome, detail))
+    current = ((record or {}).get("reaction_updates") or {}).get(body.emoji)
+    if not isinstance(current, dict) or current.get("id") != update_id:
+      # A newer update for this reaction replaced this one while it was sent.
+      current = {"id": update_id, "pending": False}
+    return {**own_update_result(record or {}, current), **extra}
 
   async with _group_lock(gid):
     with _host_group_transaction(gid):
       group = _load_host_group(gid)
       if group is not None:
         _require_open(group)
-        original = _react_envelope(identity, gid, own, message_id, emoji, on, at)
-        _applied, record, relays = await _host_commit_reaction(app, group, original)
+        record, begun = await _change_group_message(app, gid, message_id, begin)
+        if record is None:
+          raise HTTPException(status_code=404, detail="Message not found.")
+        update, new = begun
+        original = _react_envelope(
+          identity, gid, own, message_id, body.emoji, update["on"], update["at"],
+          update_id=update_id,
+        )
+        relays = _queue_reaction_relays(group, original, applied=new)
   if group is not None:
     # Committed before networking, like a hosted post.
-    await _fan_out(group, relays)
-    return {"status": "ok", "reactions": record.get("reactions") or {}}
+    if not update.get("pending"):
+      return own_update_result(record, update)
+    failed = await _relay_reaction(group, original, relays)
+    if failed:
+      return await result(
+        "uncertain", "Not everyone in the group has this reaction yet. Retry to send it again.",
+        failed_members=failed,
+      )
+    return await result("delivered", failed_members=[])
 
   meta = _load_group_meta(app, gid)
   if meta is None:
@@ -1242,12 +1405,30 @@ async def react_to_group_message(
     raise HTTPException(
       status_code=409, detail="This group’s host doesn’t support reactions yet.",
     )
-  envelope = _react_envelope(identity, gid, host, message_id, emoji, on, at)
-  # The host's copy is authoritative for the group; ours follows it.
-  if not await _deliver(host, envelope):
-    raise HTTPException(status_code=502, detail="The group host couldn’t be reached.")
-  _applied, record = await _store_group_reaction(app, gid, message_id, own, emoji, on, at)
-  return {"status": "ok", "reactions": (record or {}).get("reactions") or {}}
+  record, begun = await _change_group_message(app, gid, message_id, begin)
+  if record is None:
+    raise HTTPException(status_code=404, detail="Message not found.")
+  update, _new = begun
+  if not update.get("pending"):
+    return own_update_result(record, update)
+  envelope = _react_envelope(
+    identity, gid, host, message_id, body.emoji, update["on"], update["at"],
+    update_id=update_id,
+  )
+  # Never hold the member lock while contacting the host.
+  outcome, reply = await _deliver_reaction(host, envelope)
+  if outcome == "refused":
+    await result("refused")
+    raise HTTPException(status_code=409, detail="The group host refused the reaction.")
+  if outcome == "uncertain":
+    return await result(
+      "uncertain", "The group host didn’t confirm this reaction; it may have arrived. Retry to make sure.",
+    )
+  if reply.get("undelivered"):
+    return await result(
+      "uncertain", "Not everyone in the group has this reaction yet. Retry to send it again.",
+    )
+  return await result("delivered")
 
 
 @router.post("/{gid}/send")
