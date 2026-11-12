@@ -106,8 +106,36 @@ def supports_message_reactions(actor: dict) -> bool:
 # ``before`` is what a definite refusal restores. ``reaction_rev`` counts every
 # change to a message's reaction fields, so a view holding two copies of one
 # message keeps the newer one.
+#
+# An update stops being current when a newer one replaces it or it is refused.
+# Its identity moves to ``reaction_retired``: ``{id: {"emoji", "on", "at"}}``.
+# A retry under a retired id (an old tab still offering it) is a superseded
+# no-op, never a new update that could undo a newer choice. Only the owner's own
+# taps add entries, one small one each, so the map is kept whole: dropping old
+# ids would let a very late retry turn into a fresh update again.
 
 OWN_UPDATES = "reaction_updates"
+RETIRED = "reaction_retired"
+
+
+def _retired(record: dict) -> dict:
+  retired = record.get(RETIRED)
+  return {key: dict(value) for key, value in retired.items() if isinstance(value, dict)} \
+    if isinstance(retired, dict) else {}
+
+
+def _retire(record: dict, emoji: str, update) -> None:
+  if not isinstance(update, dict) or not isinstance(update.get("id"), str):
+    return
+  retired = _retired(record)
+  retired[update["id"]] = {"emoji": emoji, "on": update.get("on"), "at": update.get("at")}
+  record[RETIRED] = retired
+
+
+def _reinstate(record: dict, update) -> None:
+  retired = _retired(record)
+  if isinstance(update, dict) and retired.pop(update.get("id"), None) is not None:
+    record[RETIRED] = retired
 
 
 def bump_reaction_rev(record: dict) -> None:
@@ -121,16 +149,24 @@ def begin_own_update(
   """Apply and remember one own update; ``(update, new)``.
 
   The same id again is an exact retry of the saved update, which is returned
-  unchanged. Reusing an id for a different update is refused.
+  unchanged; a retry of a replaced or refused one changes nothing and comes
+  back settled and ``superseded``. Reusing an id for a different update is
+  refused.
   """
   updates = record.get(OWN_UPDATES)
   updates = {key: dict(value) for key, value in updates.items() if isinstance(value, dict)} \
     if isinstance(updates, dict) else {}
-  for key, update in updates.items():
-    if update.get("id") == update_id:
-      if key != emoji or update.get("on") is not on:
-        raise HTTPException(status_code=409, detail="This reaction id belongs to another update.")
-      return update, False
+  found = [(key, update) for key, update in updates.items() if update.get("id") == update_id]
+  old = _retired(record).get(update_id)
+  if old is not None:
+    found.append((old.get("emoji"), {
+      "id": update_id, "on": old.get("on"), "at": old.get("at"),
+      "pending": False, "superseded": True,
+    }))
+  for key, update in found:
+    if key != emoji or update.get("on") is not on:
+      raise HTTPException(status_code=409, detail="This reaction id belongs to another update.")
+    return update, False
   emoji, on, at = validate_reaction(emoji, on, next_reaction_time(record, host, emoji))
   clock = record.get("reaction_clock")
   reactions = record.get("reactions")
@@ -147,6 +183,7 @@ def begin_own_update(
     "update": previous if isinstance(previous, dict) else None,
   }
   apply_reaction(record, host, emoji, on, at)
+  _retire(record, emoji, updates.get(emoji))
   update = {"id": update_id, "on": on, "at": at, "pending": True, "before": before}
   updates[emoji] = update
   record[OWN_UPDATES] = updates
@@ -179,8 +216,10 @@ def settle_own_update(
     previous = (update.get("before") or {}).get("update")
     if _restore(record, host, emoji, update) and isinstance(previous, dict):
       updates[emoji] = previous
+      _reinstate(record, previous)
     else:
       updates.pop(emoji)
+    _retire(record, emoji, update)
   else:
     raise ValueError(f"Unknown outcome {outcome!r}.")
   record[OWN_UPDATES] = updates
@@ -217,9 +256,12 @@ def _restore(record: dict, host: str, emoji: str, update: dict) -> bool:
 def own_update_result(record: dict, update: dict) -> dict:
   """The owner surface's answer for one own update."""
   pending = bool(update.get("pending"))
-  return {
+  result = {
     "status": "pending" if pending else "delivered",
     "id": update.get("id"),
     "detail": update.get("detail") if pending else None,
     "reactions": record.get("reactions") or {},
   }
+  if update.get("superseded"):
+    result["superseded"] = True
+  return result

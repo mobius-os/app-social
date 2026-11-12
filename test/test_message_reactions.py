@@ -31,6 +31,7 @@ OWNER = Principal("owner", None, None)
 MESSAGE_ID = "0b6f4d2e-5c1a-4e8b-9f3d-2a7c6e1b9d40"
 GID = "deadbeef"
 UPDATE_ID = "7c1e2d3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
+OTHER_ID = "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a"
 
 
 class ReactionStateTests(unittest.TestCase):
@@ -83,6 +84,26 @@ class ReactionStateTests(unittest.TestCase):
     self.assertEqual((update["id"], update["on"], update["pending"]), ("u-a", True, True))
     self.assertTrue(settle_own_update(record, "me.example", "🎉", "u-a", "refused"))
     self.assertEqual((record["reactions"], record["reaction_updates"]), ({}, {}))
+
+  def test_a_retry_of_a_replaced_or_refused_update_changes_nothing(self):
+    record = {}
+    begin_own_update(record, "me.example", "🎉", True, "u-a")
+    begin_own_update(record, "me.example", "🎉", False, "u-b")
+    settle_own_update(record, "me.example", "🎉", "u-b", "delivered")
+    before = json.loads(json.dumps(record))
+    update, new = begin_own_update(record, "me.example", "🎉", True, "u-a")
+    self.assertFalse(new)
+    self.assertEqual((update["pending"], update["superseded"]), (False, True))
+    self.assertEqual(record, before)
+    with self.assertRaises(HTTPException):
+      begin_own_update(record, "me.example", "🎉", False, "u-a")
+    # A refused update is retired too, and the one it hands retry back to is not.
+    begin_own_update(record, "me.example", "🎉", True, "u-c")
+    settle_own_update(record, "me.example", "🎉", "u-c", "refused")
+    self.assertEqual(record["reaction_updates"]["🎉"]["id"], "u-b")
+    self.assertNotIn("u-b", record["reaction_retired"])
+    self.assertTrue(begin_own_update(record, "me.example", "🎉", True, "u-c")[0]["superseded"])
+    self.assertEqual(record["reactions"], {})
 
   def test_only_supported_reactions_and_sane_times_are_accepted(self):
     self.assertEqual(validate_reaction(":mobius:", True, 5), (":mobius:", True, 5.0))
@@ -265,6 +286,28 @@ class DirectMessageReactionTests(unittest.IsolatedAsyncioTestCase):
     # The confirmed update it replaced is current again; nothing is left to retry.
     self.assertFalse(saved["reaction_updates"]["❤️"]["pending"])
 
+  async def test_a_stale_retry_never_undoes_a_newer_confirmed_choice(self):
+    async def lose_reply(url, envelope, **kwargs):
+      self.sent.append(envelope)
+      await self.peer_receives(envelope)
+      raise httpx.ReadTimeout("no reply")
+    with patch.object(social_routes, "_post_signed_envelope", new=AsyncMock(side_effect=lose_reply)):
+      self.assertEqual((await self.react(update_id=UPDATE_ID))["status"], "pending")
+
+    async def apply(url, envelope, **kwargs):
+      self.sent.append(envelope)
+      await self.peer_receives(envelope)
+      return httpx.Response(200, json={"status": "ok"}, request=httpx.Request("POST", url))
+    with patch.object(social_routes, "_post_signed_envelope", new=AsyncMock(side_effect=apply)):
+      self.assertEqual((await self.react(on=False, update_id=OTHER_ID))["status"], "delivered")
+      # An old tab still offers Retry for the first update.
+      stale = await self.react(update_id=UPDATE_ID)
+    self.assertEqual((stale["status"], stale.get("superseded"), stale["reactions"]),
+                     ("delivered", True, {}))
+    self.assertEqual(len(self.sent), 2)  # nothing new was sent
+    self.assertNotIn("🎉", self.stored("peer.example").get("reactions", {}))
+    self.assertNotIn("🎉", self.stored("self.example").get("reactions", {}))
+
   async def test_an_id_is_never_reused_for_a_different_update(self):
     await self.react("🎉", True, update_id=UPDATE_ID)
     with self.assertRaises(HTTPException) as caught:
@@ -422,6 +465,33 @@ class GroupReactionTests(unittest.IsolatedAsyncioTestCase):
     fields = ("id", "message_id", "emoji", "on", "at")
     self.assertEqual([first[f] for f in fields], [second[f] for f in fields])
     self.assertFalse(self.stored()["reaction_updates"][":mobius:"]["pending"])
+
+  async def test_member_stale_retry_never_undoes_a_newer_confirmed_choice(self):
+    self.save(host="host.example", author="host.example")
+    def applied_then_lost(envelope):
+      raise httpx.ReadTimeout("no reply")
+    self.host_reply = applied_then_lost
+    self.assertEqual((await self.react(update_id=UPDATE_ID))["status"], "pending")
+    self.host_reply = lambda envelope: httpx.Response(200, json={"status": "ok", "undelivered": 0})
+    self.assertEqual((await self.react(on=False, update_id=OTHER_ID))["status"], "delivered")
+    stale = await self.react(update_id=UPDATE_ID)
+    self.assertEqual((stale["status"], stale.get("superseded"), stale["reactions"]),
+                     ("delivered", True, {}))
+    self.assertEqual(len(self.host_posts), 2)
+    self.assertNotIn("🎉", self.stored().get("reactions", {}))
+
+  async def test_hosted_stale_retry_relays_nothing_and_keeps_the_newer_choice(self):
+    self.hosting()
+    self.save(host="host.example", author="pal.example")
+    self.unreachable = {"pal.example"}
+    self.assertEqual((await self.react(update_id=UPDATE_ID))["status"], "pending")
+    self.unreachable = set()
+    self.assertEqual((await self.react(on=False, update_id=OTHER_ID))["status"], "delivered")
+    relayed = len(self.delivered)
+    stale = await self.react(update_id=UPDATE_ID)
+    self.assertEqual((stale["status"], stale.get("superseded")), ("delivered", True))
+    self.assertEqual(len(self.delivered), relayed)
+    self.assertNotIn("🎉", self.stored().get("reactions", {}))
 
   async def test_member_reaction_stays_pending_while_the_host_still_owes_relays(self):
     self.save(host="host.example", author="host.example")
