@@ -8,7 +8,7 @@ import {
 import { BOARD_REACTION_EMOJIS } from '../reconciliation.js'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
-import { supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
+import { ReactionRetryNote, supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
 import {
   DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
   withDayDividers,
@@ -43,7 +43,7 @@ export default function Thread({
   const closePicker = useCallback(() => setPickerFor(null), [])
   const messageReactions = useMessageReactions({
     ownHost: me?.host,
-    send: (id, emoji, on) => reactToMessage(peer, id, emoji, on),
+    send: (id, emoji, on, updateId) => reactToMessage(peer, id, emoji, on, updateId),
     onError: error => showToast(error.message || 'The reaction couldn’t be sent.', 'error'),
   })
   const canReact = !requestPending && supportsMessageReactions(peerActor)
@@ -124,6 +124,7 @@ export default function Thread({
         }}
       />,
       <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline} />,
+      <ReactionRetryNote key={`react-${message.id}`} message={message} mine={mine} reactions={messageReactions} />,
     ]
   })
 

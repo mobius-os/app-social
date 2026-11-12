@@ -635,6 +635,9 @@ export const CSS = `
   margin: -12px 0 -4px; padding-left: 36px;
 }
 .cn-message-reactions.is-mine { align-self: flex-end; justify-content: flex-end; padding-left: 0; }
+/* An unconfirmed reaction's retry sits on the reacted message's side. */
+.cn-reaction-note.is-theirs { align-self: flex-start; align-items: flex-start; padding-left: 36px; }
+.cn-reaction-note.is-theirs .cn-delivery-reason { text-align: left; }
 /* Its own width, so a one-word bubble still gets a full grid of choices. */
 .cn-message-reactions .cn-reaction-picker {
   position: relative; top: auto; left: auto;

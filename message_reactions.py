@@ -135,9 +135,16 @@ def begin_own_update(
   clock = record.get("reaction_clock")
   reactions = record.get("reactions")
   hosts = reactions.get(emoji) if isinstance(reactions, dict) else None
+  previous = updates.get(emoji)
+  if isinstance(previous, dict) and isinstance(previous.get("before"), dict):
+    # Keep one level: enough to restore the update this one replaces.
+    previous = {**previous, "before": {
+      key: value for key, value in previous["before"].items() if key != "update"
+    }}
   before = {
     "at": clock.get(f"{host} {emoji}") if isinstance(clock, dict) else None,
     "since": hosts.get(host) if isinstance(hosts, dict) else None,
+    "update": previous if isinstance(previous, dict) else None,
   }
   apply_reaction(record, host, emoji, on, at)
   update = {"id": update_id, "on": on, "at": at, "pending": True, "before": before}
@@ -167,8 +174,13 @@ def settle_own_update(
   elif outcome == "uncertain":
     updates[emoji] = {**update, "detail": detail} if detail else dict(update)
   elif outcome == "refused":
-    updates.pop(emoji)
-    _restore(record, host, emoji, update)
+    # Back to the state, and the update (still retryable if it was pending),
+    # that this one replaced.
+    previous = (update.get("before") or {}).get("update")
+    if _restore(record, host, emoji, update) and isinstance(previous, dict):
+      updates[emoji] = previous
+    else:
+      updates.pop(emoji)
   else:
     raise ValueError(f"Unknown outcome {outcome!r}.")
   record[OWN_UPDATES] = updates
@@ -176,11 +188,11 @@ def settle_own_update(
   return True
 
 
-def _restore(record: dict, host: str, emoji: str, update: dict) -> None:
+def _restore(record: dict, host: str, emoji: str, update: dict) -> bool:
   key = f"{host} {emoji}"
   clock = dict(record.get("reaction_clock") or {})
   if clock.get(key) != update.get("at"):
-    return  # a newer update for this pair has been applied since
+    return False  # a newer update for this pair has been applied since
   before = update.get("before") if isinstance(update.get("before"), dict) else {}
   if isinstance(before.get("at"), (int, float)):
     clock[key] = before["at"]
@@ -199,6 +211,7 @@ def _restore(record: dict, host: str, emoji: str, update: dict) -> None:
     reactions.pop(emoji, None)
   record["reactions"] = reactions
   record["reaction_clock"] = clock
+  return True
 
 
 def own_update_result(record: dict, update: dict) -> dict:

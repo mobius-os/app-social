@@ -9,7 +9,7 @@ import { BOARD_REACTION_EMOJIS } from '../reconciliation.js'
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
-import { supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
+import { ReactionRetryNote, supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
 import GroupDetails from './GroupDetails.jsx'
 import {
   DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
@@ -67,7 +67,7 @@ export default function GroupThread({
   const closePicker = useCallback(() => setPickerFor(null), [])
   const messageReactions = useMessageReactions({
     ownHost: me?.host,
-    send: (id, emoji, on) => reactToGroupMessage(gid, id, emoji, on),
+    send: (id, emoji, on, updateId) => reactToGroupMessage(gid, id, emoji, on, updateId),
     onError: error => showToast(error.message || 'The reaction couldn’t be sent.', 'error'),
   })
   const canReact = isMember && !currentGroup.deleted_at && (hostedHere || hostReacts)
@@ -138,6 +138,7 @@ export default function GroupThread({
         }}
       />,
       <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline} />,
+      <ReactionRetryNote key={`react-${message.id}`} message={message} mine={mine} reactions={messageReactions} />,
     ]
   })
 

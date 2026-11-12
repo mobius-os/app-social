@@ -73,6 +73,17 @@ class ReactionStateTests(unittest.TestCase):
     self.assertIn("me.example", record["reactions"]["🎉"])
     self.assertFalse(settle_own_update(record, "me.example", "🎉", "u-1", "delivered"))
 
+  def test_a_refused_update_hands_retry_back_to_the_pending_one_it_replaced(self):
+    record = {}
+    begin_own_update(record, "me.example", "🎉", True, "u-a")
+    begin_own_update(record, "me.example", "🎉", False, "u-b")
+    settle_own_update(record, "me.example", "🎉", "u-b", "refused")
+    self.assertIn("me.example", record["reactions"]["🎉"])
+    update = record["reaction_updates"]["🎉"]
+    self.assertEqual((update["id"], update["on"], update["pending"]), ("u-a", True, True))
+    self.assertTrue(settle_own_update(record, "me.example", "🎉", "u-a", "refused"))
+    self.assertEqual((record["reactions"], record["reaction_updates"]), ({}, {}))
+
   def test_only_supported_reactions_and_sane_times_are_accepted(self):
     self.assertEqual(validate_reaction(":mobius:", True, 5), (":mobius:", True, 5.0))
     for emoji, on, at in (
@@ -251,7 +262,8 @@ class DirectMessageReactionTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(caught.exception.status_code, 409)
     saved = self.stored("peer.example")
     self.assertEqual(set(saved["reactions"]["❤️"]), {"self.example"})
-    self.assertNotIn("❤️", saved["reaction_updates"])  # nothing left to retry
+    # The confirmed update it replaced is current again; nothing is left to retry.
+    self.assertFalse(saved["reaction_updates"]["❤️"]["pending"])
 
   async def test_an_id_is_never_reused_for_a_different_update(self):
     await self.react("🎉", True, update_id=UPDATE_ID)

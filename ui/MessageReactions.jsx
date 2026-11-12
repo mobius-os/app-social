@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { EmojiAdd } from '@openai/apps-sdk-ui/components/Icon'
+import { EmojiAdd, Warning } from '@openai/apps-sdk-ui/components/Icon'
+import { isDefinitePrecommitRejection, unconfirmedReactions } from '../message_ui_state.js'
 import { BOARD_REACTION_EMOJIS, reactionActionLabel, reactionName } from '../reconciliation.js'
 import { FlatEmoji } from './ReactionControls.jsx'
 
@@ -23,11 +24,18 @@ const clockOf = message => JSON.stringify(message?.reaction_clock || {})
  * Optimistic reactions for one conversation. A tap shows at once; the
  * confirmed answer replaces it, and the saved message takes over as soon as a
  * refresh brings a newer copy of it.
+ *
+ * Every update carries an id chosen here. Like a message send, a lost answer
+ * is no proof that the update failed: the reaction stays shown, with a retry
+ * that re-sends the same update under the same id, until it is confirmed.
+ * Only a definite refusal takes it back.
  */
-export function useMessageReactions({ ownHost, send, onError }) {
+export function useMessageReactions({ ownHost, send, onError, newId = () => crypto.randomUUID() }) {
   const [overrides, setOverrides] = useState({})
   const [pending, setPending] = useState({})
+  const [unconfirmed, setUnconfirmed] = useState({})
   const inFlight = useRef(new Set())
+  const settled = useRef(new Set())
 
   function stateFor(message) {
     const override = overrides[message.id]
@@ -35,32 +43,62 @@ export function useMessageReactions({ ownHost, send, onError }) {
     return messageReactionState(message, ownHost)
   }
 
-  async function toggle(message, emoji) {
+  function unconfirmedFor(message) {
+    return unconfirmedReactions(message, unconfirmed[message.id], settled.current)[0] || null
+  }
+
+  function forget(messageId, emoji) {
+    setUnconfirmed((prior) => {
+      if (!prior[messageId]?.[emoji]) return prior
+      const { [emoji]: _done, ...rest } = prior[messageId]
+      const next = { ...prior, [messageId]: rest }
+      if (!Object.keys(rest).length) delete next[messageId]
+      return next
+    })
+  }
+
+  function remember(messageId, update, detail) {
+    setUnconfirmed(prior => ({
+      ...prior, [messageId]: { ...prior[messageId], [update.emoji]: { ...update, detail } },
+    }))
+  }
+
+  async function submit(message, update, optimistic) {
     if (inFlight.current.has(message.id)) return
     inFlight.current.add(message.id)
     const basis = clockOf(message)
-    const current = stateFor(message)
-    const was = current[emoji]
-    const next = { ...current, [emoji]: {
-      reacted: !was.reacted, count: Math.max(0, was.count + (was.reacted ? -1 : 1)),
-    } }
-    setOverrides(prior => ({ ...prior, [message.id]: { state: next, basis } }))
+    if (optimistic) setOverrides(prior => ({ ...prior, [message.id]: { state: optimistic, basis } }))
     setPending(prior => ({ ...prior, [message.id]: true }))
     try {
-      const result = await send(message.id, emoji, !was.reacted)
+      const result = await send(message.id, update.emoji, update.on, update.id)
       setOverrides(prior => ({ ...prior, [message.id]: {
         state: messageReactionState({ reactions: result?.reactions }, ownHost), basis,
       } }))
+      if (result?.status === 'pending') {
+        const detail = result.detail || 'This reaction isn’t confirmed yet.'
+        remember(message.id, update, detail)
+        onError(new Error(detail))
+      } else {
+        settled.current.add(update.id)
+        forget(message.id, update.emoji)
+      }
     } catch (error) {
-      setOverrides(prior => {
-        const remaining = { ...prior }
-        delete remaining[message.id]
-        return remaining
-      })
+      if (isDefinitePrecommitRejection(error)) {
+        settled.current.add(update.id)
+        forget(message.id, update.emoji)
+        setOverrides((prior) => {
+          const remaining = { ...prior }
+          delete remaining[message.id]
+          return remaining
+        })
+      } else {
+        // The tap stays shown: it may have arrived. Offer the same update again.
+        remember(message.id, update, 'Confirmation was interrupted; this reaction may have arrived.')
+      }
       onError(error)
     } finally {
       inFlight.current.delete(message.id)
-      setPending(prior => {
+      setPending((prior) => {
         const remaining = { ...prior }
         delete remaining[message.id]
         return remaining
@@ -68,7 +106,37 @@ export function useMessageReactions({ ownHost, send, onError }) {
     }
   }
 
-  return { stateFor, toggle, pending }
+  async function toggle(message, emoji) {
+    const current = stateFor(message)
+    const was = current[emoji]
+    const next = { ...current, [emoji]: {
+      reacted: !was.reacted, count: Math.max(0, was.count + (was.reacted ? -1 : 1)),
+    } }
+    await submit(message, { emoji, on: !was.reacted, id: newId() }, next)
+  }
+
+  async function retry(message) {
+    const update = unconfirmedFor(message)
+    if (update) await submit(message, { emoji: update.emoji, on: update.on, id: update.id }, null)
+  }
+
+  return { stateFor, toggle, retry, unconfirmedFor, pending }
+}
+
+/** An unconfirmed own reaction, with one retry, under its message. */
+export function ReactionRetryNote({ message, mine, reactions }) {
+  const update = reactions.unconfirmedFor(message)
+  if (!update) return null
+  const busy = Boolean(reactions.pending[message.id])
+  return (
+    <span className={`cn-delivery-note cn-reaction-note ${mine ? 'is-mine' : 'is-theirs'}`}>
+      <button className="cn-failed-note" type="button" disabled={busy} onClick={() => reactions.retry(message)}>
+        <Warning aria-hidden="true" />
+        {busy ? 'Retrying…' : `${update.on ? 'Reaction' : 'Removed reaction'} ${reactionName(update.emoji)} not confirmed · Retry`}
+      </button>
+      {update.detail && <span className="cn-delivery-reason">{update.detail}</span>}
+    </span>
+  )
 }
 
 /** The add-reaction button that sits beside a bubble's reply button. */
