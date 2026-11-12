@@ -3,6 +3,7 @@ import { Mail, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import { timeAgo, initials, createGroup, searchPeople } from '../api.js'
 import { Avatar } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
+import { gifPreviewText } from '../gifs.js'
 
 function GroupAvatar({ name }) {
   return (
@@ -16,7 +17,7 @@ export { GroupAvatar }
 
 function lastMessagePreview(item) {
   const text = String(item.last_text || '').trim()
-  if (text) return text
+  if (text) return gifPreviewText(text)
   if (item.last_attachment || item.last_message?.attachment || item.attachment) return '📷 Photo'
   return ''
 }

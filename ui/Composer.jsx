@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'react'
+import { Children, useLayoutEffect, useRef } from 'react'
 import { ArrowUp, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import MessageInput, { keepMessageFocus } from './MessageInput.jsx'
 import { clipboardImageFile } from './interactionRules.js'
@@ -12,8 +12,8 @@ export function ComposerAttachmentButton({ onClick, disabled, label = 'Attach ph
 
 export default function Composer({
   value, onChange, onSubmit, disabled, sendDisabled, placeholder = 'Message',
-  maxLength, label = placeholder, sendLabel = 'Send', inputRef, attachmentAction,
-  children, className = '', onImagePaste,
+  maxLength, label = placeholder, sendLabel = 'Send', inputRef, attachmentAction, gifAction,
+  children, className = '', onImagePaste, overLimit = 0,
 }) {
   const fallbackRef = useRef(null)
   const textareaRef = inputRef || fallbackRef
@@ -26,16 +26,23 @@ export default function Composer({
   }
   return <form onPaste={onPaste} className={`cn-composer ${className}`.trim()} onSubmit={onSubmit}>
     {attachmentAction}
-    <div className={`cn-composer-pill${children ? ' has-children' : ''}`}>
+    {/* Empty slots (false/null) are not attachments. */}
+    <div className={`cn-composer-pill${Children.toArray(children).length ? ' has-children' : ''}`}>
       {children}
       <div className="cn-composer-input-line">
         <MessageInput inputRef={textareaRef} value={value} onChange={onChange}
-                      disabled={disabled} placeholder={placeholder} label={label} maxLength={maxLength} />
+                      disabled={disabled} placeholder={placeholder} label={label} maxLength={maxLength}
+                      invalid={overLimit > 0} />
+        {gifAction}
         <button className="cn-composer-send" type="submit" onMouseDown={keepMessageFocus}
                 disabled={sendDisabled} aria-label={sendLabel}>
           <ArrowUp aria-hidden="true" />
         </button>
       </div>
+      {/* The text with its GIF link is longer than the service accepts. */}
+      {overLimit > 0 && <p className="cn-composer-over" role="alert">
+        {overLimit === 1 ? '1 character' : `${overLimit.toLocaleString()} characters`} over the limit
+      </p>}
     </div>
   </form>
 }

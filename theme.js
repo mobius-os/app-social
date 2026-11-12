@@ -1194,6 +1194,7 @@ export const CSS = `
 }
 .cn-composer-input-line textarea:focus-visible { outline: none; }
 .cn-composer-input-line textarea::placeholder { color: var(--muted); }
+.cn-composer-over { margin: 0; padding: 0 12px 6px; color: var(--danger); font: 500 13px/1.3 var(--font); }
 /* A 44px target drawing a 40px circle; the margin keeps the pill's height. */
 .cn-composer-send {
   position: relative; width: 44px; height: 44px; margin: -2px; flex: 0 0 auto; align-self: flex-end; padding: 0;
@@ -1259,5 +1260,69 @@ export const CSS = `
 }
 @media (max-width: 640px) {
   .cn-scroll { padding-inline: 16px; }
+}
+
+/* Standard GIFs (KLIPY). Images load straight from KLIPY on this device. */
+.cn-gif-button {
+  flex: 0 0 auto; align-self: flex-end; min-width: 44px; height: 44px; margin: -2px 2px -2px 0; padding: 0 8px;
+  display: grid; place-items: center; border: 0; border-radius: 22px; background: transparent;
+  color: var(--muted); font: 750 12px/1 var(--font); letter-spacing: .04em; cursor: pointer;
+}
+.cn-gif-button:hover { color: var(--text); background: var(--surface-2, var(--surface)); }
+.cn-gif-button:disabled { opacity: .42; cursor: default; background: transparent; }
+.cn-gif-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cn-reply-composer .cn-gif-button { height: 40px; margin: 2px 0; }
+.cn-gif-scrim { position: fixed; z-index: 200; }
+.cn-gif-sheet { display: flex; flex-direction: column; gap: 10px; max-width: 560px; height: min(80vh, 640px); padding: 20px 16px; }
+.cn-gif-sheet .cn-grabber { margin-bottom: 4px; }
+.cn-gif-head { display: flex; align-items: center; gap: 8px; }
+.cn-gif-search {
+  flex: 1; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 22px; background: var(--bg); color: var(--muted);
+}
+.cn-gif-search:focus-within { border-color: var(--accent); }
+.cn-gif-search svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.cn-gif-search input {
+  flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
+  color: var(--text); font: 16px var(--font);
+}
+.cn-gif-search input::placeholder { color: var(--muted); }
+.cn-gif-close {
+  width: 44px; height: 44px; flex: 0 0 auto; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 50%; background: transparent; color: var(--text); cursor: pointer;
+}
+.cn-gif-close:hover { background: var(--surface-2, var(--surface)); }
+.cn-gif-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cn-gif-close svg { width: 20px; height: 20px; }
+.cn-gif-heading { margin: 2px 4px 0; color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: .02em; }
+.cn-gif-grid {
+  flex: 1; min-height: 0; overflow-y: auto; display: grid; gap: 6px; align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); grid-auto-rows: 112px;
+}
+.cn-gif-tile {
+  position: relative; overflow: hidden; padding: 0; border: 0; border-radius: 10px; cursor: pointer;
+  background: color-mix(in srgb, var(--text) 7%, var(--surface));
+}
+.cn-gif-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cn-gif-tile:hover img { filter: brightness(1.06); }
+.cn-gif-tile:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
+.cn-gif-tile.is-unavailable { cursor: default; }
+.cn-gif-tile.is-loading { cursor: default; animation: cn-gif-pulse 1.2s ease-in-out infinite; }
+@keyframes cn-gif-pulse { 50% { opacity: .55; } }
+.cn-gif-note { flex: 1; margin: 24px 8px; text-align: center; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.cn-gif-note p { margin: 0 0 12px; }
+.cn-gif-more { align-self: center; }
+.cn-gif-powered { margin: 0; text-align: center; color: var(--muted); font-size: 12px; font-weight: 650; }
+.cn-gif-frame { position: relative; display: block; width: fit-content; max-width: min(100%, 280px); margin-top: 4px; }
+.cn-gif { display: block; max-width: 100%; max-height: 280px; min-width: 96px; min-height: 64px; border-radius: 14px; background: color-mix(in srgb, var(--text) 7%, transparent); }
+.cn-post-body .cn-gif-frame { max-width: min(100%, 360px); margin-top: 10px; }
+.cn-post-body .cn-gif { max-height: 360px; }
+.cn-gif-credit {
+  position: absolute; bottom: 6px; left: 6px; padding: 2px 5px; border-radius: 5px;
+  background: rgba(0, 0, 0, .55); color: #fff; font: 700 10px/1.2 var(--font); letter-spacing: .04em; pointer-events: none;
+}
+.cn-gif-fallback { overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) {
+  .cn-gif-tile.is-loading { animation: none; }
 }
 `

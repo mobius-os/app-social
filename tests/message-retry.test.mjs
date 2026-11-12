@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { retryGroupMessage, retryMessage, sendGroupMessage, sendMessage } from '../api.js'
 import { isDefinitePrecommitRejection, markDeliveryUnknown, settleMessage } from '../message_ui_state.js'
+import { gifTextOverflow, withGif } from '../gifs.js'
+import { TEXT_LIMITS } from '../text_limits.js'
 
 const timelineSource = readFileSync(new URL('../ui/useMessageTimeline.jsx', import.meta.url), 'utf8')
 
@@ -192,6 +194,7 @@ test('sending while reading back returns to the newest message with one stable i
   const sent = []
   const deps = {
     draft: 'Hello', selectedImage: null, replyTarget: null, sending: false, processingImage: false,
+    withGif, gifTextOverflow, TEXT_LIMITS, gifChoice: { gif: null, setGif() {} },
     sendBlocked: false, stickToBottom: { current: false }, messages: [],
     signals: { created: 'group_message', error: 'group_send' },
     setSending: () => {}, setDraft: () => {}, setSelectedImage: () => {}, setReplyTarget: () => {},
@@ -213,6 +216,7 @@ test('a finished send releases the composer before a stalled history refresh', a
   let releaseRefresh
   const deps = {
     draft: 'Hello', selectedImage: null, replyTarget: null, sending: false, processingImage: false,
+    withGif, gifTextOverflow, TEXT_LIMITS, gifChoice: { gif: null, setGif() {} },
     sendBlocked: false, stickToBottom: { current: false }, messages: [],
     signals: { created: 'message', error: 'send' },
     setSending: value => { deps.sending = value }, setDraft: () => {}, setSelectedImage: () => {}, setReplyTarget: () => {},

@@ -26,6 +26,13 @@ The image exposes `/healthz`, `/version`, and Social's public router under
 `/api/common`. Production routing maps
 `/api/app-services/social/{directory,board,...}` to that internal prefix.
 
+GIF search uses one shared KLIPY app key. Set it as the private runtime setting
+`KLIPY_APP_KEY` on the host (never in this repository or the image). The host
+hands it only to signed, joined members at `/api/common/gifs/key`; without it,
+members' GIF pickers say search isn't set up. KLIPY requires searches to go from
+each member's own device, so members' devices do see the key: this keeps it out
+of public source and lets the operator replace it without a Social update.
+
 Merging prepares an immutable candidate; it does not authorize or perform a
 production deployment. Production promotion belongs to the host's separate,
 service-scoped controller so application maintainers cannot turn repository
