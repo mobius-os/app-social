@@ -13,7 +13,7 @@ export function ComposerAttachmentButton({ onClick, disabled, label = 'Attach ph
 export default function Composer({
   value, onChange, onSubmit, disabled, sendDisabled, placeholder = 'Message',
   maxLength, label = placeholder, sendLabel = 'Send', inputRef, attachmentAction, gifAction,
-  children, className = '', onImagePaste,
+  children, className = '', onImagePaste, overLimit = 0,
 }) {
   const fallbackRef = useRef(null)
   const textareaRef = inputRef || fallbackRef
@@ -31,13 +31,18 @@ export default function Composer({
       {children}
       <div className="cn-composer-input-line">
         <MessageInput inputRef={textareaRef} value={value} onChange={onChange}
-                      disabled={disabled} placeholder={placeholder} label={label} maxLength={maxLength} />
+                      disabled={disabled} placeholder={placeholder} label={label} maxLength={maxLength}
+                      invalid={overLimit > 0} />
         {gifAction}
         <button className="cn-composer-send" type="submit" onMouseDown={keepMessageFocus}
                 disabled={sendDisabled} aria-label={sendLabel}>
           <ArrowUp aria-hidden="true" />
         </button>
       </div>
+      {/* The text with its GIF link is longer than the service accepts. */}
+      {overLimit > 0 && <p className="cn-composer-over" role="alert">
+        {overLimit === 1 ? '1 character' : `${overLimit.toLocaleString()} characters`} over the limit
+      </p>}
     </div>
   </form>
 }

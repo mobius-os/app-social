@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Search, X } from '@openai/apps-sdk-ui/components/Icon'
-import { fetchGifs, resolveGifKey, splitGifMessage } from '../gifs.js'
+import { fetchGifs, resolveGifKey, splitGifMessage, stagedGif } from '../gifs.js'
 import { getGifKey } from '../api.js'
 import { keepMessageFocus } from './MessageInput.jsx'
 import { useModalFocus } from './modalFocus.js'
@@ -179,7 +179,9 @@ export function GifPicker({ open, onClose, onPick }) {
   )
 }
 
-// One staged GIF per composer, shared by messages, posts and replies.
+// One staged GIF per composer, shared by messages, posts and replies. A GIF
+// is part of its draft: a composer with a retry id routes `pick` and removal
+// through its own draft edit handlers so a changed draft gets a new id.
 export function useGifChoice() {
   const [gif, setGif] = useState(null)
   const [picking, setPicking] = useState(false)
@@ -188,7 +190,7 @@ export function useGifChoice() {
     open: () => setPicking(true),
     close: () => setPicking(false),
     pick: (chosen) => {
-      setGif({ url: chosen.send.url, title: chosen.title, preview: chosen.preview })
+      setGif(stagedGif(chosen))
       setPicking(false)
     },
   }

@@ -4,7 +4,8 @@ import Composer, { ComposerAttachmentButton, ComposerFooter } from './Composer.j
 import { ReplyTarget } from './MessageBubble.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import { GifButton, GifPicker, SelectedGifStrip, useGifChoice } from './Gifs.jsx'
-import { withGif } from '../gifs.js'
+import { gifCaptionLimit, gifTextOverflow, withGif } from '../gifs.js'
+import { TEXT_LIMITS } from '../text_limits.js'
 import { prependedScrollTop } from './interactionRules.js'
 import { reachedEarlierHistory } from './historyScroll.js'
 import {
@@ -203,6 +204,8 @@ export function useMessageTimeline({
     const image = selectedImage
     const reply = replyTarget
     if ((!text && !image) || sending || processingImage || sendBlocked) return
+    // The composer already shows the over-limit state; never cut the text.
+    if (gifTextOverflow(caption, gif, TEXT_LIMITS.message)) return
 
     // Your own new message is always shown, even when sent while reading back.
     stickToBottom.current = true
@@ -393,13 +396,16 @@ export function TimelineComposer({ timeline, onOpenImage }) {
     gifChoice,
   } = timeline
   const gif = gifChoice.gif
+  // A staged GIF's link is part of the text, so it counts against the limit.
+  const overLimit = gifTextOverflow(draft, gif, TEXT_LIMITS.message)
   return (
     <ComposerFooter scrollRef={scrollRef}>
       <input ref={fileRef} className="cn-file-input" type="file" accept="image/*"
              onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
       <Composer inputRef={inputRef} value={draft} onChange={setDraft} onSubmit={send}
                 disabled={processingImage} onImagePaste={sending ? undefined : selectImage}
-                sendDisabled={sending || processingImage || (!draft.trim() && !selectedImage && !gif)}
+                maxLength={gifCaptionLimit(TEXT_LIMITS.message, gif)} overLimit={overLimit}
+                sendDisabled={sending || processingImage || overLimit > 0 || (!draft.trim() && !selectedImage && !gif)}
                 attachmentAction={<ComposerAttachmentButton onClick={() => fileRef.current?.click()}
                   disabled={sending || processingImage || !!gif} />}
                 gifAction={<GifButton onClick={gifChoice.open}

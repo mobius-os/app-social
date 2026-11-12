@@ -1,8 +1,6 @@
 import { useLayoutEffect } from 'react'
 import { isTouchPrimary, shouldSubmitMessageKey } from './interactionRules.js'
-
-// Matches the service limit for direct and group messages.
-const MAX_MESSAGE_CHARS = 40000
+import { TEXT_LIMITS } from '../text_limits.js'
 
 // Phones close the keyboard whenever the message box loses focus, so the box
 // stays enabled while a message sends and the send button never takes focus.
@@ -15,8 +13,8 @@ export function keepMessageFocus(event) {
 // sends; touch-keyboard Enter and Shift+Enter add a line. IME composition is
 // never interrupted.
 export default function MessageInput({
-  inputRef, value, onChange, disabled, className, maxLength = MAX_MESSAGE_CHARS,
-  maxHeight, placeholder = 'Message', label = placeholder,
+  inputRef, value, onChange, disabled, className, maxLength = TEXT_LIMITS.message,
+  maxHeight, placeholder = 'Message', label = placeholder, invalid = false,
 }) {
   useLayoutEffect(() => {
     const el = inputRef.current
@@ -34,6 +32,7 @@ export default function MessageInput({
   return (
     <textarea ref={inputRef} className={className} rows={1} value={value} maxLength={maxLength}
               onChange={(event) => onChange(event.target.value)} onKeyDown={onKeyDown}
-              disabled={disabled} placeholder={placeholder} autoComplete="off" aria-label={label} />
+              disabled={disabled} placeholder={placeholder} autoComplete="off" aria-label={label}
+              aria-invalid={invalid || undefined} />
   )
 }

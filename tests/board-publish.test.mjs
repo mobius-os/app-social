@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { revokeLocalPreviews } from '../ui/boardEdits.js'
-import { withGif } from '../gifs.js'
+import { gifTextOverflow, withGif } from '../gifs.js'
+import { TEXT_LIMITS } from '../text_limits.js'
 
 const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
 
@@ -35,7 +36,7 @@ test('a post that lands while its publish is in flight is not confirmed a second
     const confirmed = []
     const deps = {
       draft: 'Hello', selectedImages: [], postMessageId: null, me: { host: 'me.example', handle: 'me' },
-      withGif, postGif: { gif: null, setGif() {} },
+      withGif, gifTextOverflow, TEXT_LIMITS, postGif: { gif: null, setGif() {} },
       // The render that started publishing saw an empty feed.
       feed: [], feedRef: { current: [] },
       setPostMessageId: () => {}, markActivity: () => {}, setPosting: () => {}, setPending: () => {},
@@ -66,12 +67,13 @@ test('a landed post draft releases its picked previews when it is cleared', () =
     setDraft: (value) => { state.draft = value },
     setSelectedImages: (value) => { state.images = value },
     setPostMessageId: (value) => { state.id = value },
+    postGif: { setGif: (value) => { state.gif = value } },
     revokeLocalPreviews,
   }
   const clear = owning('function clearLandedPostDraft() {', 'useEffect(clearLandedPostDraft', deps)
   const [, revoked] = withRevokes(clear)
   assert.deepEqual(revoked, ['blob:one', 'blob:two'])
-  assert.deepEqual(state, { draft: '', images: [], id: null })
+  assert.deepEqual(state, { draft: '', images: [], gif: null, id: null })
 
   deps.feed = []
   const [, untouched] = withRevokes(owning('function clearLandedPostDraft() {', 'useEffect(clearLandedPostDraft', deps))

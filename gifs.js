@@ -36,10 +36,29 @@ export function splitGifMessage(text) {
   return { caption: cut < 0 ? '' : source.slice(0, cut).trim(), url: last }
 }
 
+// What a composer stages from a picked result: the link that is sent, plus
+// the title and light preview shown until Send.
+export function stagedGif(chosen) {
+  return { url: chosen.send.url, title: chosen.title, preview: chosen.preview }
+}
+
 export function withGif(text, gif) {
   const caption = String(text || '').trim()
   if (!gif?.url) return caption
   return caption ? `${caption}\n${gif.url}` : gif.url
+}
+
+// The caption's share of a text limit once a GIF is staged: its link and the
+// newline before it are sent as part of the text, so they count too.
+export function gifCaptionLimit(limit, gif) {
+  return gif?.url ? Math.max(0, limit - gif.url.length - 1) : limit
+}
+
+// How many characters the complete outgoing text (caption plus GIF link) is
+// over the limit; 0 when it fits. A GIF picked after a long caption can push
+// it over: the composer shows that and keeps Send off rather than cutting.
+export function gifTextOverflow(text, gif, limit) {
+  return Math.max(0, withGif(text, gif).length - limit)
 }
 
 // Chat lists and notifications say "GIF" rather than showing a long link.

@@ -47,6 +47,7 @@
     "message_ui_state.js",
     "community.js",
     "participation.js",
+    "text_limits.js",
     "board_payload.js",
     "media_limits.js",
     "profile.js",

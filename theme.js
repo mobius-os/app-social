@@ -1194,6 +1194,7 @@ export const CSS = `
 }
 .cn-composer-input-line textarea:focus-visible { outline: none; }
 .cn-composer-input-line textarea::placeholder { color: var(--muted); }
+.cn-composer-over { margin: 0; padding: 0 12px 6px; color: var(--danger); font: 500 13px/1.3 var(--font); }
 /* A 44px target drawing a 40px circle; the margin keeps the pill's height. */
 .cn-composer-send {
   position: relative; width: 44px; height: 44px; margin: -2px; flex: 0 0 auto; align-self: flex-end; padding: 0;

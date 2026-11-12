@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto'
 import { completedParticipationIntent } from '../participation.js'
 import { attachmentBytes, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 import { reconcileReplies, upsertReplyAttempt } from '../reconciliation.js'
-import { withGif } from '../gifs.js'
+import { gifTextOverflow, withGif } from '../gifs.js'
+import { TEXT_LIMITS } from '../text_limits.js'
 
 const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
 
@@ -41,7 +42,7 @@ function thread({ count = 0, read, send, image = null } = {}) {
     replyRequest: { current: 0 }, replySendingRef: { current: false },
     replyPost: post, replyDraft: 'My reply', replySending: false,
     replyImage: image, replyMessageId: null, preparingReplyImage: false,
-    withGif, replyGif: { gif: null, setGif() {} },
+    withGif, gifTextOverflow, TEXT_LIMITS, replyGif: { gif: null, setGif() {} },
     replyDrafts: { current: new Map() }, replyPostIdRef: { current: post.id },
     canInteract: true, handoffBusy: false,
     me: { host: 'member.example', handle: 'member' },
