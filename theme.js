@@ -638,6 +638,7 @@ export const CSS = `
 /* An unconfirmed reaction's retry sits on the reacted message's side. */
 .cn-reaction-note.is-theirs { align-self: flex-start; align-items: flex-start; padding-left: 36px; }
 .cn-reaction-note.is-theirs .cn-delivery-reason { text-align: left; }
+.cn-reaction-note.is-theirs .cn-failed-note { align-self: flex-start; }
 /* Its own width, so a one-word bubble still gets a full grid of choices. */
 .cn-message-reactions .cn-reaction-picker {
   position: relative; top: auto; left: auto;
