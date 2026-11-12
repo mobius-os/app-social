@@ -6,8 +6,8 @@ import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import { prependedScrollTop } from './interactionRules.js'
 import { reachedEarlierHistory } from './historyScroll.js'
 import {
-  addUnseenMessages, deliveryLabel, isDefinitePrecommitRejection, markDeliveryUnknown, reconcileLatestPage,
-  reconcileOlderPage, settleMessage,
+  addUnseenMessages, deliveryLabel, isDefinitePrecommitRejection, loadedBefore, markDeliveryUnknown,
+  reconcileLatestPage, reconcileOlderPage, refreshLoadedRows, settleMessage,
 } from '../message_ui_state.js'
 
 // Direct and group threads share one timeline: history paging, reading
@@ -63,12 +63,33 @@ export function useMessageTimeline({
       }
       if (refreshExtra) onRefreshed(extra)
       if (!earlierFailed.current) setLoadError('')
+      if (!reconciled.resetCursor) await refreshLoadedHistory(page, request, background)
       return true
     } catch {
       if (request === refreshRequest.current && !earlierFailed.current) {
         setLoadError('Messages couldn’t be refreshed. Your saved history hasn’t been removed.')
       }
       return false
+    }
+  }
+
+  // The newest page refreshes only its own rows, but an older loaded message
+  // changes too (a reaction to it, for one). Re-read the loaded range below
+  // that page, one page at a time, down to the oldest message on screen.
+  async function refreshLoadedHistory(page, request, background) {
+    const generation = paginationGeneration.current
+    let boundary = page?.messages?.[0]
+    let cursor = page?.next_cursor
+    try {
+      while (cursor && loadedBefore(messagesRef.current, boundary)) {
+        const older = await loadPage(cursor, { background })
+        if (request !== refreshRequest.current || generation !== paginationGeneration.current) return
+        updateMessages((prior) => refreshLoadedRows(prior, older?.messages))
+        boundary = older?.messages?.[0]
+        cursor = older?.next_cursor
+      }
+    } catch {
+      // The rows on screen stay as they were; the next refresh reads them again.
     }
   }
 

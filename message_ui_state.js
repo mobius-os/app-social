@@ -1,10 +1,54 @@
+// The service counts every change to a message's reactions in reaction_rev.
+// Two copies of one message can reach a view in either order (the newest page,
+// an older page, a refresh of the loaded range), so its reactions always come
+// from the copy that has seen more changes, never just the one merged last.
+const REACTION_FIELDS = ['reactions', 'reaction_clock', 'reaction_updates', 'reaction_rev']
+const reactionRev = message => (Number.isInteger(message?.reaction_rev) ? message.reaction_rev : 0)
+
+function mergeRow(earlier, later) {
+  if (!earlier || reactionRev(earlier) <= reactionRev(later)) return later
+  const merged = { ...later }
+  for (const field of REACTION_FIELDS) {
+    if (field in earlier) merged[field] = earlier[field]
+    else delete merged[field]
+  }
+  return merged
+}
+
+function compareMessages(a, b) {
+  return (a.sent_at || 0) - (b.sent_at || 0) || String(a.id).localeCompare(String(b.id))
+}
+
 export function mergeMessages(...pages) {
   const byId = new Map()
   for (const page of pages) {
-    for (const message of page || []) byId.set(message.id, message)
+    for (const message of page || []) byId.set(message.id, mergeRow(byId.get(message.id), message))
   }
-  return [...byId.values()].sort((a, b) =>
-    (a.sent_at || 0) - (b.sent_at || 0) || String(a.id).localeCompare(String(b.id)))
+  return [...byId.values()].sort(compareMessages)
+}
+
+// Whether the view holds saved messages older than a page's oldest row: the
+// newest page alone does not cover them, so their changes need another read.
+export function loadedBefore(messages, boundary) {
+  if (!boundary) return false
+  return (messages || []).some(message => !message._client_retry && compareMessages(message, boundary) < 0)
+}
+
+// A re-read of already-loaded history refreshes the rows the view holds. It
+// never adds rows, so older-page pagination keeps its own cursor and order.
+export function refreshLoadedRows(prior, rows) {
+  if (!prior) return prior
+  const fresh = new Map((rows || []).map(row => [row.id, row]))
+  let changed = false
+  const next = prior.map((message) => {
+    const row = fresh.get(message.id)
+    if (!row) return message
+    const merged = mergeRow(message, row)
+    if (JSON.stringify(merged) === JSON.stringify(message)) return message
+    changed = true
+    return merged
+  })
+  return changed ? next : prior
 }
 
 export function reconcileLatestPage(prior, page, { replace = false } = {}) {
@@ -80,4 +124,22 @@ export function markDeliveryUnknown(messages, messageId, reason) {
 // Screen readers hear what the delivery tick means, not a raw status word.
 export function deliveryLabel(status) {
   return status === 'sending' ? 'Sending' : status === 'failed' ? 'Delivery failed' : 'Delivered'
+}
+
+// The owner's own reaction updates that are not confirmed yet, oldest first:
+// those this view could not confirm (`local`, keyed by emoji), then those the
+// service saved as pending. A confirmed or refused id (`settled`) is done, even
+// while an older copy of the message still lists it.
+export function unconfirmedReactions(message, local, settled) {
+  const found = new Map()
+  for (const [emoji, update] of Object.entries(local || {})) {
+    if (update && !settled?.has(update.id)) found.set(emoji, update)
+  }
+  const saved = message?.reaction_updates && typeof message.reaction_updates === 'object'
+    ? message.reaction_updates : {}
+  for (const [emoji, update] of Object.entries(saved)) {
+    if (found.has(emoji) || !update?.pending || typeof update.id !== 'string' || settled?.has(update.id)) continue
+    found.set(emoji, { emoji, on: Boolean(update.on), id: update.id, detail: update.detail || '' })
+  }
+  return [...found.values()]
 }
