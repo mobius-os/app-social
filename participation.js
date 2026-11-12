@@ -6,9 +6,11 @@ import {
   THUMBNAIL_MAX_BYTES,
 } from './media_limits.js'
 import { BOARD_REACTION_EMOJIS } from './reconciliation.js'
+import { TEXT_LIMITS } from './text_limits.js'
+
+export { TEXT_LIMITS }
 
 const INTENT_VERSION = 1
-export const TEXT_LIMITS = { post: 4000, reply: 1000 }
 const INTENT_KINDS = new Set(['post', 'reply', 'like'])
 const POST_ID_RE = /^[a-z0-9-]{1,128}$/i
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])

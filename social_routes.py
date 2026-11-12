@@ -60,6 +60,7 @@ import logging
 import os
 import re
 import time
+from urllib.parse import urlsplit
 import uuid
 import weakref
 from pathlib import Path
@@ -555,7 +556,37 @@ def _open_payload(
     ) from exc
 
 
+# Mirrors gifs.js: a message whose last line is one KLIPY media link is a GIF.
+_KLIPY_MEDIA_HOSTS = frozenset({"static.klipy.com", "static1.klipy.com", "static2.klipy.com"})
+
+
+def _gif_caption(text: str) -> str | None:
+  """The caption of a GIF message, or None when the text is not one."""
+  body = text.rstrip()
+  caption, _, last = body.rpartition("\n")
+  last = last.strip()
+  if len(last) > 512 or any(ch.isspace() for ch in last):
+    return None
+  try:
+    url = urlsplit(last)
+    port = url.port
+  except ValueError:
+    return None
+  if (
+    url.scheme != "https" or url.hostname not in _KLIPY_MEDIA_HOSTS or port
+    or url.username or url.password
+    or not url.path.lower().endswith((".gif", ".webp"))
+    # Mirror the browser's parse: only an exact lowercase host is a KLIPY link.
+    or url.netloc != url.hostname
+  ):
+    return None
+  return caption.strip()
+
+
 def _message_preview(text: str) -> str:
+  caption = _gif_caption(text)
+  if caption is not None:
+    return f"{caption[:110]} · GIF" if caption else "GIF"
   return text[:120] if text.strip() else "📷 Photo"
 
 
@@ -2793,6 +2824,55 @@ async def _search_community_members(q: str) -> dict:
     raise HTTPException(
       status_code=502, detail="Community host could not be reached."
     ) from exc
+
+
+# The shared KLIPY key, as the community host last handed it to this member.
+# Kept only in this service process's memory; never written to storage.
+_GIF_KEY_TTL_S = 3600
+_gif_key_cache: dict[str, Any] = {"key": None, "at": 0.0}
+
+
+async def _community_gif_key() -> str:
+  """One signed, members-only read of the shared KLIPY key."""
+  cached = _gif_key_cache["key"]
+  if cached and time.time() - _gif_key_cache["at"] < _GIF_KEY_TTL_S:
+    return cached
+  identity = _load_identity()
+  envelope = {"v": 0, "type": "gif_key_read", "from": _own_host(), "sent_at": time.time()}
+  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+  try:
+    response = await federation_request(
+      "POST", _peer_service_url(COMMUNITY_HOST, "gifs/key"), json=envelope,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    key = response.json().get("app_key")
+  except httpx.HTTPStatusError as exc:
+    if exc.response.status_code in (404, 405):
+      # Also an older community host without this route.
+      raise HTTPException(status_code=404, detail="GIF search isn’t set up yet.") from exc
+    if exc.response.status_code == 403:
+      raise HTTPException(status_code=403, detail="Join Social again to use GIFs.") from exc
+    raise HTTPException(status_code=502, detail="GIF search is unavailable right now.") from exc
+  except Exception as exc:
+    raise HTTPException(status_code=502, detail="GIF search is unavailable right now.") from exc
+  if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key):
+    raise HTTPException(status_code=502, detail="GIF search is unavailable right now.")
+  _gif_key_cache.update(key=key, at=time.time())
+  return key
+
+
+@router.get("/gifs/key")
+async def gif_key(
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """The shared KLIPY key for this member's GIF picker (no-store)."""
+  _require_member(db, principal)
+  return JSONResponse(
+    {"provider": "klipy", "app_key": await _community_gif_key()},
+    headers={"Cache-Control": "no-store"},
+  )
 
 
 @router.get("/people")

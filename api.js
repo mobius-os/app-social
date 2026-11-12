@@ -431,3 +431,9 @@ export function clockTime(ts) {
     hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   })
 }
+
+// The shared KLIPY key, which this Möbius fetches for members from the
+// community host (members only, never stored).
+export function getGifKey({ signal } = {}) {
+  return call('gifs/key', { signal, timeoutMs: 15_000 })
+}

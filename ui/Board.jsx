@@ -27,6 +27,8 @@ import ReactionControls, { useBoardReactions } from './ReactionControls.jsx'
 import { boardPostFitsWireLimit } from '../board_payload.js'
 import { attachmentBytes, galleryFitsMediaLimits, THUMBNAIL_MAX_BYTES } from '../media_limits.js'
 import Composer, { ComposerAttachmentButton, ComposerFooter } from './Composer.jsx'
+import { GifButton, GifPicker, SelectedGifStrip, useGifChoice } from './Gifs.jsx'
+import { gifCaptionLimit, gifTextOverflow, withGif } from '../gifs.js'
 import { prependedScrollTop } from './interactionRules.js'
 import { pollWhileVisible } from '../visibility.js'
 import { reachedEarlierHistory } from './historyScroll.js'
@@ -276,6 +278,8 @@ export default function Board({
   // Confirmed post edits shown before the next feed refresh delivers them.
   const [postEdits, setPostEdits] = useState({})
   const [selectedImages, setSelectedImages] = useState([])
+  const postGif = useGifChoice()
+  const replyGif = useGifChoice()
   // The feed as of now, for checks made after an await.
   const feedRef = useRef(feed)
   feedRef.current = feed
@@ -398,11 +402,14 @@ export default function Board({
 
   useEffect(() => {
     if (!replyPost) return
-    replyDrafts.current.set(replyPost.id, { text: replyDraft, image: replyImage, id: replyMessageId })
+    // A staged reply GIF belongs to the thread it was chosen in.
+    replyDrafts.current.set(replyPost.id, {
+      text: replyDraft, image: replyImage, gif: replyGif.gif, id: replyMessageId,
+    })
     while (replyDrafts.current.size > REPLY_CACHE_LIMIT) {
       replyDrafts.current.delete(replyDrafts.current.keys().next().value)
     }
-  }, [replyPost?.id, replyDraft, replyImage, replyMessageId])
+  }, [replyPost?.id, replyDraft, replyImage, replyGif.gif, replyMessageId])
 
   // A retained retry id whose reply has since landed (a timed-out send the
   // thread now shows) is finished: clear the draft rather than resend it.
@@ -419,6 +426,7 @@ export default function Board({
     setDraft('')
     revokeLocalPreviews(selectedImages)
     setSelectedImages([])
+    postGif.setGif(null)
     setPostMessageId(null)
   }
   useEffect(clearLandedPostDraft, [postMessageId, posting, feed])
@@ -547,6 +555,7 @@ export default function Board({
     const saved = restoredDraft || replyDrafts.current.get(postId)
     setReplyDraft(saved?.text || '')
     setReplyImage(saved?.image || null)
+    replyGif.setGif(saved?.gif || null)
     setReplyMessageId(saved?.id || null)
   }
 
@@ -555,6 +564,7 @@ export default function Board({
     if (replyPostIdRef.current !== postId) return
     setReplyDraft('')
     setReplyImage(null)
+    replyGif.setGif(null)
     setReplyMessageId(null)
   }
 
@@ -565,6 +575,18 @@ export default function Board({
 
   function removeReplyImage() {
     setReplyImage(null)
+    setReplyMessageId(null)
+  }
+
+  // Picking, replacing or removing a GIF changes the reply, so a retry of it
+  // is a new reply with a new id, as with text and photo edits.
+  function pickReplyGif(chosen) {
+    replyGif.pick(chosen)
+    setReplyMessageId(null)
+  }
+
+  function removeReplyGif() {
+    replyGif.setGif(null)
     setReplyMessageId(null)
   }
 
@@ -673,10 +695,13 @@ export default function Board({
       postId: replyPost?.id, text: replyDraft, attachment: replyImage?.payload,
       thumbnail: replyImage?.thumbnailPayload,
     })
-    const text = replyDraft.trim()
+    const gif = replyGif.gif
+    const text = withGif(replyDraft.trim(), gif)
     const post = replyPost
     const image = replyImage
     if (!canInteract || (!text && !image) || !post || replySending || handoffBusy || preparingReplyImage) return
+    // The composer already shows the over-limit state; never cut the text.
+    if (gifTextOverflow(replyDraft, gif, TEXT_LIMITS.reply)) return
 
     const localId = replyMessageId || crypto.randomUUID()
     setReplyMessageId(localId)
@@ -962,6 +987,18 @@ export default function Board({
     setPostMessageId(null)
   }
 
+  // Picking, replacing or removing a GIF changes the post, so a retry of it
+  // is a new post with a new id, as with text and photo edits.
+  function pickPostGif(chosen) {
+    postGif.pick(chosen)
+    setPostMessageId(null)
+  }
+
+  function removePostGif() {
+    postGif.setGif(null)
+    setPostMessageId(null)
+  }
+
   function chooseImage(event) {
     const files = Array.from(event.target.files || [])
     event.target.value = ''
@@ -1030,9 +1067,13 @@ export default function Board({
 
   async function publish() {
     const draftText = draft
-    const text = draftText.trim()
+    const gif = postGif.gif
+    // A staged GIF travels as its KLIPY link on the post's last line.
+    const text = withGif(draftText.trim(), gif)
     const images = selectedImages
     if (!text && !images.length) return
+    // The composer already shows the over-limit state; never cut the text.
+    if (gifTextOverflow(draftText, gif, TEXT_LIMITS.post)) return
     // Kept across a failure (the draft is restored unchanged) and cleared on
     // success or any edit, like a reply's retry id.
     const postId = postMessageId || crypto.randomUUID()
@@ -1051,6 +1092,7 @@ export default function Board({
     })
     setDraft('')
     setSelectedImages([])
+    postGif.setGif(null)
     setComposing(false)
     let attachment
     let attachments
@@ -1063,6 +1105,7 @@ export default function Board({
       setPending(null)
       setDraft(draftText)
       setSelectedImages(images)
+      postGif.setGif(gif)
       setComposing(true)
       setPosting(false)
       showToast(error.message || 'An image couldn’t be prepared.', 'error')
@@ -1107,6 +1150,7 @@ export default function Board({
       setPending(null)
       setDraft(draftText)
       setSelectedImages(images)
+      postGif.setGif(gif)
       setComposing(true)
       window.mobius?.signal?.('error', { message: error.message, source: 'publish' })
       showToast(
@@ -1129,6 +1173,9 @@ export default function Board({
     .filter((post) => !hiddenIds.has(post.id))
     .slice()
     .reverse()
+  // A staged GIF's link is part of the text, so it counts against the limit.
+  const postOverLimit = gifTextOverflow(draft, postGif.gif, TEXT_LIMITS.post)
+  const replyOverLimit = gifTextOverflow(replyDraft, replyGif.gif, TEXT_LIMITS.reply)
 
   return (
     <div className="cn-content cn-screen cn-board-chat">
@@ -1343,16 +1390,21 @@ export default function Board({
                     <ComposerFooter scrollRef={replyScrollRef} className="cn-reply-footer">
                     <Composer className="cn-reply-composer" onSubmit={sendReply}
                       inputRef={replyInputRef} value={replyDraft} onChange={changeReplyDraft}
-                      maxLength={TEXT_LIMITS.reply} placeholder="Post your reply" label="Post your reply"
+                      maxLength={gifCaptionLimit(TEXT_LIMITS.reply, replyGif.gif)} overLimit={replyOverLimit}
+                      placeholder="Post your reply" label="Post your reply"
                       disabled={replySending || handoffBusy || participationBusy || preparingReplyImage}
-                      sendDisabled={replySending || handoffBusy || participationBusy || preparingReplyImage || (!replyDraft.trim() && !replyImage)}
+                      sendDisabled={replySending || handoffBusy || participationBusy || preparingReplyImage || replyOverLimit > 0 || (!replyDraft.trim() && !replyImage && !replyGif.gif)}
+                      gifAction={<GifButton onClick={replyGif.open} label="Add a GIF to your reply"
+                        disabled={replySending || preparingReplyImage || handoffBusy || participationBusy || !!replyImage} />}
                       attachmentAction={<ComposerAttachmentButton onClick={() => replyFileRef.current?.click()}
-                        disabled={!replyAttachments || replySending || preparingReplyImage || handoffBusy || participationBusy}
+                        disabled={!replyAttachments || replySending || preparingReplyImage || handoffBusy || participationBusy || !!replyGif.gif}
                         label={!replyAttachments ? 'Photo replies need a Community server update' : preparingReplyImage ? 'Preparing photo…' : 'Attach photo to reply'} />}
                       sendLabel="Send reply">
                       {replyImage && <SelectedImageStrip selected={replyImage} onRemove={removeReplyImage}
                         disabled={replySending || preparingReplyImage} onOpen={onOpenImage} />}
-                    </Composer></ComposerFooter></> : <button className="cn-btn cn-btn-primary cn-reply-join" type="button"
+                      {replyGif.gif && <SelectedGifStrip gif={replyGif.gif} onRemove={removeReplyGif} disabled={replySending} />}
+                    </Composer></ComposerFooter>
+                    <GifPicker open={replyGif.picking} onClose={replyGif.close} onPick={pickReplyGif} /></> : <button className="cn-btn cn-btn-primary cn-reply-join" type="button"
                                       onClick={onJoin} disabled={joinBusy}>Join Social to reply</button>}
                   </section>
                 )}
@@ -1400,15 +1452,20 @@ export default function Board({
                  onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
           <Composer className="cn-board-composer" onSubmit={submitPost}
             inputRef={composerInputRef} value={draft} onChange={changeDraft}
-            maxLength={TEXT_LIMITS.post} placeholder="Message everyone…" label="Message everyone"
+            maxLength={gifCaptionLimit(TEXT_LIMITS.post, postGif.gif)} overLimit={postOverLimit}
+            placeholder="Message everyone…" label="Message everyone"
             disabled={posting || handoffBusy || participationBusy}
-            sendDisabled={!canInteract || posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length)}
+            sendDisabled={!canInteract || posting || handoffBusy || participationBusy || postOverLimit > 0 || (!draft.trim() && !selectedImages.length && !postGif.gif)}
+            gifAction={<GifButton onClick={postGif.open}
+              disabled={!canInteract || posting || handoffBusy || participationBusy || selectedImages.length > 0} />}
             sendLabel={accountState === 'loading' ? 'Checking your account…' : 'Send message'}
             attachmentAction={<ComposerAttachmentButton onClick={() => fileRef.current?.click()}
-              disabled={!canInteract || posting || selectedImages.length >= MAX_POST_IMAGES}
+              disabled={!canInteract || posting || selectedImages.length >= MAX_POST_IMAGES || !!postGif.gif}
               label={selectedImages.length >= MAX_POST_IMAGES ? `Up to ${MAX_POST_IMAGES} images` : 'Attach photo'} />}>
             {selectedImages.length > 0 && <SelectedImagesStrip selected={selectedImages} onRemove={removeImage} onOpen={onOpenImage} />}
+            {postGif.gif && <SelectedGifStrip gif={postGif.gif} onRemove={removePostGif} disabled={posting} />}
           </Composer>
+          <GifPicker open={postGif.picking} onClose={postGif.close} onPick={pickPostGif} />
         </> : <div className="cn-board-join">
           <button className="cn-btn cn-btn-primary" type="button" onClick={onJoin}
                   disabled={joinBusy}>Join Social to message</button>

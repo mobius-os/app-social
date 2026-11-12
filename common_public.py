@@ -1714,7 +1714,7 @@ class _PublicEnvelopeAdmission:
 
 def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
-  on_activity=None, on_register=None,
+  on_activity=None, on_register=None, gif_key: Callable[[], str | None] | None = None,
 ) -> tuple[APIRouter, None]:
   """Build the community host's directory and public board surface.
 
@@ -1723,6 +1723,8 @@ def create_public_router(
   someone other than the author, so it can tell the author's instance. It never
   changes the peer-facing response. ``on_register(host)`` is likewise awaited
   after each directory registration (the host refreshes the member's avatar).
+  ``gif_key()`` returns the shared KLIPY app key from the host's private
+  settings, handed only to verified members (see ``gifs/key``).
   """
   admission = _PublicEnvelopeAdmission()
   content_paths = {f"{prefix}/board", f"{prefix}/board/reply"}
@@ -1774,6 +1776,32 @@ def create_public_router(
     if not store.is_member(envelope["from"]):
       raise HTTPException(status_code=403, detail="Join Social to see People.")
     return store.search_directory(q)
+
+  @router.post("/gifs/key")
+  async def read_gif_key_for_member(request: Request):
+    """The shared KLIPY key, for joined members only.
+
+    KLIPY requires searches to go from each person's device with the key, so
+    a member's device does see it. Keeping it here rather than in Social's
+    public source hides it from non-members and lets the host replace it
+    without an app update.
+    """
+    envelope = await read_envelope(request)
+    if envelope.get("v") != 0 or envelope.get("type") != "gif_key_read":
+      raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+    await verifier.verify_envelope(envelope)
+    if not store.is_member(envelope["from"]):
+      raise HTTPException(status_code=403, detail="Join Social to use GIFs.")
+    key = (gif_key() if gif_key else None) or ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key):
+      raise HTTPException(
+        status_code=404, detail="GIF search isn’t set up on this community server.",
+        headers={"Cache-Control": "no-store"},
+      )
+    return Response(
+      content=json.dumps({"provider": "klipy", "app_key": key}),
+      media_type="application/json", headers={"Cache-Control": "no-store"},
+    )
 
   @router.post("/directory")
   async def register_in_directory(request: Request):

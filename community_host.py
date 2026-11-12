@@ -117,6 +117,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
   public_router, _ = create_public_router(
     store, verifier, prefix="/api/common", on_activity=on_activity,
     on_register=on_register,
+    # The shared KLIPY key is a private deployment setting, read per request
+    # so replacing it needs no rebuild of this image's source.
+    gif_key=lambda: os.environ.get("KLIPY_APP_KEY", "").strip() or None,
   )
 
   @asynccontextmanager
