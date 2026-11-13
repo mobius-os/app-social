@@ -237,6 +237,161 @@ class SignedRouteTests(unittest.TestCase):
       self.assertEqual(store.read_board(10, None)[0]["text"], "Post")
 
 
+class CommunityRoleModerationTests(unittest.TestCase):
+  """The deployment names an owner and admins; both moderate, members don't."""
+
+  def test_store_lets_a_moderator_delete_others_posts_and_replies(self):
+    with tempfile.TemporaryDirectory() as root:
+      store = common_public.CommonPublicStore(root)
+      post_id, reply_id = str(uuid.uuid4()), str(uuid.uuid4())
+      _seed(store, post_id, reply_id)
+      with self.assertRaises(HTTPException) as caught:
+        store.delete_post(post_id, "admin.example")
+      self.assertEqual(caught.exception.status_code, 403)
+      self.assertEqual(store.delete_reply(post_id, reply_id, "admin.example", moderator=True),
+                       {"status": "deleted", "reply_count": 0})
+      self.assertEqual(store.delete_post(post_id, "admin.example", moderator=True),
+                       {"status": "deleted"})
+      self.assertEqual(store.read_board(10, None), [])
+
+  def test_roles_come_from_settings_and_an_owner_listed_twice_stays_owner(self):
+    with patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": " Owner.example ",
+                                 "COMMUNITY_ADMIN_HOSTS": "admin.example, owner.example,"}):
+      self.assertEqual(community_host.community_roles(),
+                       {"owner.example": "owner", "admin.example": "admin"})
+    with patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "", "COMMUNITY_ADMIN_HOSTS": ""}):
+      self.assertEqual(community_host.community_roles(), {})
+
+  def test_an_owner_setting_with_several_hosts_seeds_no_owner(self):
+    with patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "one.example, two.example",
+                                 "COMMUNITY_ADMIN_HOSTS": "admin.example"}), \
+        self.assertLogs("social", level="WARNING"):
+      self.assertEqual(community_host.community_roles(), {"admin.example": "admin"})
+    with patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "one.example,one.example"}):
+      self.assertEqual(community_host.community_roles()["one.example"], "owner")
+
+  def test_owner_and_admin_moderate_members_cannot_and_the_board_names_roles(self):
+    with tempfile.TemporaryDirectory() as data_dir, \
+        patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "owner.example",
+                                "COMMUNITY_ADMIN_HOSTS": "admin.example"}):
+      root = Path(data_dir)
+      keys = {host: _peer(root, host) for host in ("owner.example", "admin.example", "member.example")}
+      store = common_public.CommonPublicStore(data_dir)
+      for host in keys:
+        store.register(host, host.split(".")[0], "")
+      posts = [(str(uuid.uuid4()), str(uuid.uuid4())) for _ in range(2)]
+      for post_id, reply_id in posts:
+        _seed(store, post_id, reply_id)
+
+      def send(host, path, kind, post_id, reply_id=None):
+        body = {"v": 0, "type": kind, "post_id": post_id, "from": host, "sent_at": time.time()}
+        if reply_id:
+          body["reply_id"] = reply_id
+        return client.post(f"/api/common/{path}", json=_signed(keys[host], body))
+
+      with TestClient(community_host.create_app(data_dir)) as client:
+        self.assertEqual(client.get("/api/common/board").json()["capabilities"]["roles"],
+                         {"admin.example": "admin", "owner.example": "owner"})
+        post_id, reply_id = posts[0]
+        self.assertEqual(send("member.example", "board/reply/delete", "board_reply_delete",
+                              post_id, reply_id).status_code, 403)
+        self.assertEqual(send("member.example", "board/delete", "board_delete", post_id).status_code, 403)
+        for moderator, (post_id, reply_id) in zip(("owner.example", "admin.example"), posts):
+          self.assertEqual(send(moderator, "board/reply/delete", "board_reply_delete",
+                                post_id, reply_id).json(), {"status": "deleted", "reply_count": 0})
+          self.assertEqual(send(moderator, "board/delete", "board_delete", post_id).json(),
+                           {"status": "deleted"})
+      self.assertEqual(store.read_board(10, None), [])
+
+
+class CommunityRoleChangeTests(unittest.TestCase):
+  """Only the owner changes roles; saved roles replace the deployment seed."""
+
+  SEED = {"owner.example": "owner", "admin.example": "admin"}
+
+  def _store(self, root):
+    store = common_public.CommonPublicStore(root)
+    for host in ("owner.example", "admin.example", "member.example"):
+      store.register(host, host.split(".")[0], "")
+    return store
+
+  def test_owner_promotes_demotes_and_hands_over_once(self):
+    with tempfile.TemporaryDirectory() as root:
+      store = self._store(root)
+      self.assertEqual(store.community_roles(self.SEED), self.SEED)
+      self.assertEqual(store.set_community_role("owner.example", "member.example", "admin", 1.0, self.SEED)["roles"],
+                       {"admin.example": "admin", "member.example": "admin", "owner.example": "owner"})
+      store.set_community_role("owner.example", "admin.example", "none", 2.0, self.SEED)
+      # Saved roles win from now on, whatever the settings say.
+      self.assertEqual(store.community_roles({"someone.example": "owner"}),
+                       {"owner.example": "owner", "member.example": "admin"})
+      handed = store.set_community_role("owner.example", "member.example", "owner", 3.0)["roles"]
+      self.assertEqual(handed, {"member.example": "owner", "owner.example": "admin"})
+      self.assertEqual(list(handed.values()).count("owner"), 1)
+
+  def test_only_the_owner_changes_roles_and_only_for_members(self):
+    with tempfile.TemporaryDirectory() as root:
+      store = self._store(root)
+      for actor in ("admin.example", "member.example"):
+        with self.assertRaises(HTTPException) as caught:
+          store.set_community_role(actor, "member.example" if actor != "member.example" else "admin.example",
+                                   "admin", 1.0, self.SEED)
+        self.assertEqual(caught.exception.status_code, 403)
+      for target, role in (("owner.example", "none"), ("stranger.example", "admin"),
+                           ("member.example", "member")):
+        with self.assertRaises(HTTPException) as caught:
+          store.set_community_role("owner.example", target, role, 1.0, self.SEED)
+        self.assertEqual(caught.exception.status_code, 400)
+      self.assertFalse(store.roles_path().exists())
+
+  def test_an_older_role_change_never_undoes_a_newer_one(self):
+    with tempfile.TemporaryDirectory() as root:
+      store = self._store(root)
+      store.set_community_role("owner.example", "member.example", "admin", 10.0, self.SEED)
+      store.set_community_role("owner.example", "member.example", "none", 20.0, self.SEED)
+      # A retry of the promotion, and an older promotion delivered only now.
+      for sent_at in (10.0, 15.0, 20.0):
+        with self.assertRaises(HTTPException) as caught:
+          store.set_community_role("owner.example", "member.example", "admin", sent_at, self.SEED)
+        self.assertEqual(caught.exception.status_code, 409)
+      self.assertNotIn("member.example", store.community_roles(self.SEED))
+      store.set_community_role("owner.example", "member.example", "admin", 21.0, self.SEED)
+      self.assertEqual(store.community_roles(self.SEED)["member.example"], "admin")
+
+  def test_signed_role_route_updates_the_board_roles(self):
+    with tempfile.TemporaryDirectory() as data_dir, \
+        patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "owner.example",
+                                "COMMUNITY_ADMIN_HOSTS": "admin.example"}):
+      root = Path(data_dir)
+      keys = {host: _peer(root, host) for host in ("owner.example", "admin.example", "member.example")}
+      self._store(data_dir)
+
+      def envelope(actor, target, role, sent_at=None):
+        return _signed(keys[actor], {
+          "v": 0, "type": "community_role", "target": target, "role": role,
+          "from": actor, "sent_at": time.time() if sent_at is None else sent_at,
+        })
+
+      def change(actor, target, role):
+        return client.post("/api/common/board/role", json=envelope(actor, target, role))
+
+      with TestClient(community_host.create_app(data_dir)) as client:
+        self.assertEqual(change("admin.example", "member.example", "admin").status_code, 403)
+        # Promote, revoke, then replay the exact signed promotion: refused.
+        promotion = envelope("owner.example", "member.example", "admin", time.time() - 5)
+        self.assertEqual(client.post("/api/common/board/role", json=promotion).status_code, 200)
+        self.assertEqual(change("owner.example", "member.example", "none").status_code, 200)
+        replay = client.post("/api/common/board/role", json=promotion)
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertNotIn("member.example", client.get("/api/common/board").json()["capabilities"]["roles"])
+        self.assertEqual(change("owner.example", "member.example", "admin").status_code, 200)
+        self.assertEqual(change("owner.example", "admin.example", "owner").status_code, 200)
+        self.assertEqual(client.get("/api/common/board").json()["capabilities"]["roles"],
+                         {"admin.example": "owner", "member.example": "admin", "owner.example": "admin"})
+        # The former owner is now an admin: still moderates, can't change roles.
+        self.assertEqual(change("owner.example", "member.example", "none").status_code, 403)
+
+
 @contextmanager
 def _owner_relay(host):
   with ExitStack() as stack:

@@ -33,6 +33,19 @@ members' GIF pickers say search isn't set up. KLIPY requires searches to go from
 each member's own device, so members' devices do see the key: this keeps it out
 of public source and lets the operator replace it without a Social update.
 
+Community roles start from two private runtime settings: `COMMUNITY_OWNER_HOSTS`
+names the one owner host and `COMMUNITY_ADMIN_HOSTS` lists admin hosts,
+comma-separated (for example `mobius.example.org`). A community has exactly one
+owner: an owner setting naming several hosts is refused with a logged warning,
+and no owner is seeded. The owner and admins may delete
+any post or reply; everyone else is an ordinary member. These settings only seed the roles: once the owner
+promotes, demotes or hands over ownership from Social (a signed
+`community_role` envelope to `board/role`), the host saves the roles in
+`common/roles.json` under its data directory and ignores the settings from then
+on. Each owner's role changes apply only in signing order, so a retried or
+late-delivered older change cannot undo a newer one. To reset roles, remove that file. The board lists the current roles under
+`capabilities.roles` so each member's Social can label them.
+
 Merging prepares an immutable candidate; it does not authorize or perform a
 production deployment. Production promotion belongs to the host's separate,
 service-scoped controller so application maintainers cannot turn repository

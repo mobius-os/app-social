@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -36,6 +37,31 @@ AVATAR_SWEEP_INTERVAL_S = 15 * 60
 AVATAR_SWEEP_BATCH = 25
 DEVELOPMENT_REVISION = "development"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _hosts(name: str) -> list[str]:
+  raw = os.environ.get(name, "")
+  return [part.strip().lower() for part in raw.split(",") if part.strip()]
+
+
+def community_roles() -> dict[str, str]:
+  """Owner and admin hosts from the deployment settings; others are members.
+
+  COMMUNITY_OWNER_HOSTS names the one owner host and COMMUNITY_ADMIN_HOSTS
+  lists admin hosts, comma-separated. A host listed in both is the owner. A
+  community has exactly one owner, so an owner setting naming several hosts
+  is refused: nobody is seeded as owner and a warning is logged.
+  """
+  roles = {host: "admin" for host in _hosts("COMMUNITY_ADMIN_HOSTS")}
+  owners = _hosts("COMMUNITY_OWNER_HOSTS")
+  if len(set(owners)) > 1:
+    logging.getLogger("social").warning(
+      "COMMUNITY_OWNER_HOSTS names %d hosts; a community has one owner, so none was set.",
+      len(set(owners)),
+    )
+  elif owners:
+    roles[owners[0]] = "owner"
+  return roles
 
 
 def source_revision() -> str:
@@ -120,6 +146,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     # The shared KLIPY key is a private deployment setting, read per request
     # so replacing it needs no rebuild of this image's source.
     gif_key=lambda: os.environ.get("KLIPY_APP_KEY", "").strip() or None,
+    # Community owner and admins are deployment settings (member hosts) who
+    # may moderate the board. Read per request, like the GIF key.
+    community_roles=community_roles,
   )
 
   @asynccontextmanager
