@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { EditPencil, Reply, X } from '@openai/apps-sdk-ui/components/Icon'
+import { Check, EditPencil, Reply, X } from '@openai/apps-sdk-ui/components/Icon'
 import { splitGifMessage } from '../gifs.js'
 import { MessageImage } from './Media.jsx'
 import { MessageReactButton, MessageReactionRow } from './MessageReactions.jsx'
@@ -147,9 +147,13 @@ function MessageEditor({ text, resendable, onSave, onCancel }) {
                 }} />
       {error && <p className="cn-bubble-editor-error" role="alert">{error}</p>}
       <div className="cn-bubble-editor-actions">
-        <button type="button" className="cn-btn cn-btn-ghost" onClick={onCancel} disabled={busy}>Cancel</button>
-        <button type="button" className="cn-btn cn-btn-primary" onClick={save} disabled={busy || !value.trim()}>
-          {busy ? 'Saving…' : 'Save'}
+        <button type="button" className="cn-edit-icon" onClick={onCancel} disabled={busy}
+                aria-label="Cancel edit" title="Cancel (Esc)">
+          <X aria-hidden="true" />
+        </button>
+        <button type="button" className="cn-edit-icon is-save" onClick={save} disabled={busy || !value.trim()}
+                aria-label={busy ? 'Saving edit' : 'Save edit'} title="Save (Enter)">
+          <Check aria-hidden="true" />
         </button>
       </div>
     </div>

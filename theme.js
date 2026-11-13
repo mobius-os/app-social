@@ -636,9 +636,16 @@ export const CSS = `
 }
 .cn-bubble-editor textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .cn-bubble-editor-actions { display: flex; justify-content: flex-end; gap: 6px; }
-.cn-bubble-editor-actions .cn-btn { min-height: 44px; padding: 0 14px; font-size: 13.5px; }
-.cn-bubble.is-mine .cn-bubble-editor .cn-btn-ghost { color: inherit; }
-.cn-bubble.is-mine .cn-bubble-editor .cn-btn-primary { background: var(--bg); color: var(--text); border-color: transparent; }
+.cn-edit-icon {
+  width: 34px; height: 34px; display: grid; place-items: center; padding: 0; cursor: pointer;
+  border: 0; border-radius: 50%; background: color-mix(in srgb, var(--bg) 35%, transparent); color: inherit;
+}
+.cn-edit-icon svg { width: 18px; height: 18px; }
+.cn-edit-icon:hover { background: color-mix(in srgb, var(--bg) 60%, transparent); }
+.cn-edit-icon.is-save { background: var(--bg); color: var(--text); }
+.cn-edit-icon:disabled { opacity: .5; cursor: default; }
+.cn-edit-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (hover: none) { .cn-edit-icon { width: 44px; height: 44px; } }
 .cn-bubble-editor-error { margin: 0; font-size: 13px; color: var(--danger-text, var(--danger)); }
 .cn-message-line.is-mine .cn-bubble-actions { order: -1; }
 .cn-bubble-react[aria-expanded="true"] { opacity: 1; pointer-events: auto; color: var(--accent-text, var(--accent)); }
