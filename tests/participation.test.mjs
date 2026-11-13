@@ -571,33 +571,79 @@ test('a linked account without a username chooses one before taking part', () =>
   assert.equal(participationActionLabel('username'), 'Choose a username')
 })
 
-test('returning from account Settings re-reads the profile until the username is chosen', async () => {
-  const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
-  const start = app.indexOf('    const refreshAfterHandoff = async () => {')
-  assert.notEqual(start, -1)
-  const source = app.slice(start, app.indexOf('\n    }\n', start) + 6)
-  const profiles = [
-    { connected: true, joined: true, name: 'Ada', handle: '' },
-    { connected: true, joined: true, name: 'Ada', handle: 'ada' },
-  ]
-  let reads = 0
-  const env = {
-    document: { visibilityState: 'visible' },
-    meRef: { current: { joined: true, name: 'Ada', handle: '' } },
-    handoffPending: { current: true },
-    async loadMe() { env.meRef.current = profiles[Math.min(reads++, 1)]; return env.meRef.current },
-    async loadFeed() {},
-  }
-  const refresh = new Function('env', `with (env) { let refreshing = false; ${source}; return refreshAfterHandoff }`)(env)
+// A minimal event target: the effect only adds, removes and receives events.
+function eventTarget(fields) {
+  const listeners = new Map()
+  return Object.assign(fields, {
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type).add(fn)
+    },
+    removeEventListener(type, fn) { listeners.get(type)?.delete(fn) },
+    async dispatch(type) { await Promise.all([...(listeners.get(type) || [])].map(fn => fn())) },
+    listenerCount() { return [...listeners.values()].reduce((sum, set) => sum + set.size, 0) },
+  })
+}
 
-  await refresh()
+test('returning from account Settings re-reads the profile until the username is chosen', async () => {
+  // Run the real App return effect. The shell signals a return by making the
+  // frame's document visible again and dispatching visibilitychange.
+  const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const start = app.indexOf('  useEffect(() => {\n    let refreshing = false')
+  assert.notEqual(start, -1)
+  const end = app.indexOf('\n  }, [loadFeed])', start)
+  assert.notEqual(end, -1)
+  const source = app.slice(start, end + '\n  }, [loadFeed])'.length)
+
+  const unnamed = { connected: true, joined: true, name: 'Ada', handle: '' }
+  // A failed read, a return before the username is chosen, then the username.
+  const responses = [null, unnamed, { ...unnamed, handle: 'ada' }]
+  let reads = 0, feeds = 0, unmount = null
+  const env = {
+    document: eventTarget({ visibilityState: 'hidden' }),
+    window: eventTarget({}),
+    meRef: { current: unnamed },
+    // Set when Social asked the shell to open account Settings.
+    handoffPending: { current: true },
+    async loadMe() {
+      const profile = responses[Math.min(reads++, responses.length - 1)]
+      if (profile) env.meRef.current = profile
+      return profile
+    },
+    async loadFeed() { feeds++ },
+    useEffect(effect) { unmount = effect() },
+  }
+  new Function('env', `with (env) { ${source} }`)(env)
+  const returnToSocial = () => {
+    env.document.visibilityState = 'visible'
+    return env.document.dispatch('visibilitychange')
+  }
+
+  await env.document.dispatch('visibilitychange')
+  assert.equal(reads, 0, 'a hidden pane does not read')
+
+  await returnToSocial()
   assert.equal(reads, 1)
-  assert.equal(env.handoffPending.current, true, 'signed in without a username is still mid-handoff')
-  await refresh()
+  assert.equal(env.handoffPending.current, true, 'a failed read stays pending for the next return')
+  assert.equal(feeds, 0)
+
+  await returnToSocial()
   assert.equal(reads, 2)
+  assert.equal(env.handoffPending.current, true, 'signed in without a username is still mid-handoff')
+
+  await returnToSocial()
+  assert.equal(reads, 3)
   assert.equal(env.handoffPending.current, false)
-  await refresh()
-  assert.equal(reads, 2, 'a finished member reconciles once, not on every focus')
+  assert.equal(feeds, 2)
+
+  await returnToSocial()
+  assert.equal(reads, 3, 'a finished member reconciles once, not on every return')
+
+  unmount()
+  assert.equal(env.document.listenerCount() + env.window.listenerCount(), 0)
+  env.handoffPending.current = true
+  await returnToSocial()
+  assert.equal(reads, 3, 'nothing reads after unmount')
 })
 
 test('only explicit completion clears a pending action', async () => {
