@@ -360,37 +360,6 @@ class CommunityRoleChangeTests(unittest.TestCase):
         self.assertEqual(change("owner.example", "member.example", "none").status_code, 403)
 
 
-class CommunityProfileTests(unittest.TestCase):
-  """The owner and admins edit the Community's name and description."""
-
-  def test_owner_and_admin_edit_members_cannot_and_the_board_carries_it(self):
-    with tempfile.TemporaryDirectory() as data_dir, \
-        patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "owner.example",
-                                "COMMUNITY_ADMIN_HOSTS": "admin.example"}):
-      root = Path(data_dir)
-      keys = {host: _peer(root, host) for host in ("owner.example", "admin.example", "member.example")}
-      store = common_public.CommonPublicStore(data_dir)
-      for host in keys:
-        store.register(host, host.split(".")[0], "")
-
-      def edit(actor, name, description):
-        return client.post("/api/common/board/community", json=_signed(keys[actor], {
-          "v": 0, "type": "community_profile", "name": name, "description": description,
-          "from": actor, "sent_at": time.time(),
-        }))
-
-      with TestClient(community_host.create_app(data_dir)) as client:
-        self.assertEqual(client.get("/api/common/board").json()["community"],
-                         {"name": "", "description": ""})
-        self.assertEqual(edit("member.example", "Mine", "x").status_code, 403)
-        self.assertEqual(edit("owner.example", "x" * 61, "").status_code, 400)
-        self.assertEqual(edit("owner.example", " Builders ", " Share what you make. ").json(),
-                         {"community": {"name": "Builders", "description": "Share what you make."}})
-        self.assertEqual(edit("admin.example", "Builders", "Be kind.").status_code, 200)
-        self.assertEqual(client.get("/api/common/board").json()["community"],
-                         {"name": "Builders", "description": "Be kind."})
-
-
 @contextmanager
 def _owner_relay(host):
   with ExitStack() as stack:

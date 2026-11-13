@@ -332,30 +332,6 @@ class CommonPublicStore:
   def roles_path(self) -> Path:
     return self.common_dir() / "roles.json"
 
-  def community_profile_path(self) -> Path:
-    return self.common_dir() / "community.json"
-
-  def community_profile(self) -> dict:
-    """The Community's name and description as the owner or an admin set them."""
-    saved = self._load_object(self.community_profile_path())
-    return {
-      "name": saved.get("name") if isinstance(saved.get("name"), str) else "",
-      "description": saved.get("description") if isinstance(saved.get("description"), str) else "",
-    }
-
-  def set_community_profile(self, name: object, description: object) -> dict:
-    """Save a new name and description; callers check the editor's role."""
-    if not isinstance(name, str) or not isinstance(description, str):
-      raise HTTPException(status_code=400, detail="Community details are invalid.")
-    name, description = name.strip(), description.strip()
-    if len(name) > COMMUNITY_NAME_LIMIT or len(description) > COMMUNITY_DESCRIPTION_LIMIT:
-      raise HTTPException(status_code=400, detail="Community details are too long.")
-    with self._mutation_lock(self._directory_lock, "directory"):
-      atomic_write(self.community_profile_path(), json.dumps(
-        {"name": name, "description": description, "updated_at": time.time()}, indent=2,
-      ))
-    return {"community": {"name": name, "description": description}}
-
   def community_roles(self, seed: dict[str, str] | None = None) -> dict[str, str]:
     """The saved owner/admin roles, or the deployment's seed before any change.
 
@@ -1630,8 +1606,6 @@ async def refresh_member_profile(
 
 # Community roles a deployment may assign; anyone unlisted is a member.
 MODERATOR_ROLES = frozenset({"owner", "admin"})
-COMMUNITY_NAME_LIMIT = 60
-COMMUNITY_DESCRIPTION_LIMIT = 500
 
 
 def read_board_page(
@@ -1673,7 +1647,6 @@ def read_board_page(
       "max_images": MAX_BOARD_ATTACHMENTS,
       "envelope_bytes": MAX_ATTACHMENT_ENVELOPE_BYTES,
     },
-    "community": store.community_profile(),
     "posts": posts,
     "next_cursor": next_cursor,
   }
@@ -1888,19 +1861,6 @@ def create_public_router(
       envelope["from"], target.strip().lower(), envelope.get("role"),
       community_roles() if community_roles is not None else {},
     )
-
-  @router.post("/board/community")
-  async def edit_community_profile(request: Request):
-    """The owner or an admin edits the Community's name and description."""
-    envelope = await read_envelope(request)
-    if envelope.get("v") != 0 or envelope.get("type") != "community_profile":
-      raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-    await verifier.verify_envelope(envelope)
-    if not store.is_member(envelope["from"]):
-      raise HTTPException(status_code=403, detail="Join Social first.")
-    if not moderates(envelope["from"]):
-      raise HTTPException(status_code=403, detail="Only the owner or an admin can edit the Community.")
-    return store.set_community_profile(envelope.get("name"), envelope.get("description"))
 
   @router.post("/gifs/key")
   async def read_gif_key_for_member(request: Request):
