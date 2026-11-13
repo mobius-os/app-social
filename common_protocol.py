@@ -29,9 +29,9 @@ PROTOCOL = "common/0"
 PUBLIC_SERVICE_PATH = "/api/app-services/social"
 # The one shared board and directory host every Möbius browses.
 COMMUNITY_HOST = "www.mobius.you"
-# Everything public is shown by handle, so the host refuses unnamed writers
-# with this exact detail and instances recognise it.
-NEEDS_USERNAME = "Choose a username in Möbius · You before joining in."
+# Everything public is shown by handle, so the host and each instance refuse
+# unnamed writers with this detail. It is shown as written; nothing matches it.
+NEEDS_USERNAME = "Choose a username in Settings › Accounts › Möbius before joining in."
 # Messages match Slack's 40,000-character cap. Board posts stay short because a
 # feed page carries many of them through the bounded community-host transport.
 MAX_MESSAGE_TEXT_CHARS = 40_000

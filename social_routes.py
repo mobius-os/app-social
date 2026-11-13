@@ -108,7 +108,7 @@ from message_history import (
 )
 from service_runtime import (
   APP, Principal, fs_locks, get_db, get_principal, get_settings,
-  identity_app_id, notify, owner_profile, public_actor_metadata, record_badge,
+  notify, owner_profile, public_actor_metadata, record_badge,
   require_nondelegated_owner_control,
 )
 
@@ -1610,7 +1610,7 @@ def _avatar_wire(path: Path, media_type: str) -> dict | None:
   return {"mime": media_type, "data_b64": base64.b64encode(data).decode()}
 
 
-async def _me_response(
+def _me_response(
   identity: dict, *, connected: bool, account_error: str | None,
   include_avatar: bool = True,
 ) -> dict:
@@ -1622,7 +1622,6 @@ async def _me_response(
     "connected": connected,
     "joined": _membership_confirmed(identity),
     "account_error": account_error,
-    "identity_app_id": await identity_app_id(),
   }
   if include_avatar:
     response["avatar"] = _avatar_wire(_avatar_path(), "image/png")
@@ -1635,7 +1634,7 @@ async def _me_payload(
   _require_owner_or_common_app(db, principal)
   state = await _refresh_profile_cache(db, principal)
   identity = state["identity"]
-  return await _me_response(
+  return _me_response(
     identity,
     connected=bool(state["profile"]) or bool(identity.get("name")),
     account_error=state["account_error"],
@@ -1647,7 +1646,7 @@ async def _cached_me_payload(db: object, principal: Principal) -> dict:
   """Return saved identity context without waiting on the account service."""
   _require_owner_or_common_app(db, principal)
   identity = _load_identity()
-  return await _me_response(
+  return _me_response(
     identity, connected=bool(identity.get("name")), account_error=None,
   )
 
@@ -1674,8 +1673,8 @@ async def join_community(
       raise HTTPException(
         status_code=409,
         detail=(
-          "No Möbius profile is connected yet. Connect your account in "
-          "Möbius · You first."
+          "No Möbius profile is connected yet. Sign in under "
+          "Settings › Accounts › Möbius first."
         ),
       )
     _require_username(identity)

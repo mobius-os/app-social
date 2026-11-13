@@ -159,12 +159,11 @@ export async function clearParticipationIntent(storage, expectedIntent) {
 }
 
 // Everything public in Social is shown by handle, so a linked account still
-// chooses a username in Möbius · You before it can join or take part.
+// chooses a username before it can join or take part.
 export function participationStep(profile) {
   if (profile?.joined && profile?.handle) return 'ready'
   if (profile?.connected && profile?.handle) return 'join'
-  if (profile?.connected) return 'username'
-  return profile?.identity_app_id == null ? 'store' : 'identity'
+  return profile?.connected ? 'username' : 'sign-in'
 }
 
 export function participationActionLabel(step, intentKind = 'post') {
@@ -175,18 +174,12 @@ export function participationActionLabel(step, intentKind = 'post') {
   }
   if (step === 'join') return 'Join Social to continue'
   if (step === 'username') return 'Choose a username'
-  if (step === 'store') return 'Get Möbius · You'
-  return 'Continue in Möbius · You'
+  return 'Sign in to Möbius'
 }
 
-// Navigation belongs to the shell. It resolves the installed numeric app id;
-// when Identity is absent, the Store owns catalog resolution through its
-// documented `app:<manifest-id>` intent rather than a guessed URL.
-export function accountHandoff(profile, postMessage) {
-  const installedId = profile?.identity_app_id
-  const message = installedId == null
-    ? { type: 'moebius:open-app', appId: 'store', intent: 'app:identity' }
-    : { type: 'moebius:open-app', appId: installedId }
-  postMessage(message, '*')
-  return installedId == null ? 'store' : 'identity'
-}
+// Möbius Settings › Accounts › Möbius owns both sign-in and the username, so
+// every account step asks the shell to open it. A shell that does not know the
+// section still opens Settings.
+export const ACCOUNT_SETTINGS_REQUEST = Object.freeze({
+  type: 'moebius:open-settings', section: 'mobius-account',
+})

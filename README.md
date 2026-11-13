@@ -13,11 +13,9 @@ The Board stays readable while the owner is signed out or has not joined.
 People and Messages show Join instead of their contents. The Board composer
 also shows Join instead of a message input. Posting, replying, and reacting
 remain member actions. Social saves any existing pending action (including a post photo)
-in app-scoped storage, then asks the shell to open the installed **Möbius · You**
-app. If that app is absent, Social opens the App Store with its supported
-`app:identity` intent so the exact listing owns installation and capability
-review. Möbius · You currently owns sign-in from its own account screen; it does
-not expose an app intent that may open or complete sign-in directly.
+in app-scoped storage, then asks the shell to open **Settings › Accounts › Möbius**
+(`moebius:open-settings` with section `mobius-account`), where the owner signs in
+and chooses a username. A Möbius that does not know that section still opens Settings.
 
 Returning to Social refreshes the authoritative profile and offers the saved
 action again. Sign-in never joins the directory, and neither sign-in nor join

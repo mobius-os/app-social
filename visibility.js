@@ -23,12 +23,14 @@ export function onFrameVisibility(cb, {
 // first visible report only starts the cadence (the view loads itself on
 // mount); a hidden frame makes no requests, and coming back into view ticks at
 // once with `resumed: true`. A tick never overlaps another. Returns a stop
-// function.
+// function; its `now()` ticks at once while visible and restarts the cadence
+// (during a tick, it queues one more right after).
 export function pollWhileVisible(tick, delay, options) {
   let timer = null
   let visible = false
   let started = false
   let running = false
+  let again = false
   let stopped = false
 
   function schedule() {
@@ -47,7 +49,12 @@ export function pollWhileVisible(tick, delay, options) {
       // A failed background refresh waits for the next turn of the cadence.
     } finally {
       running = false
-      schedule()
+      if (again) {
+        again = false
+        run(false)
+      } else {
+        schedule()
+      }
     }
   }
 
@@ -67,9 +74,18 @@ export function pollWhileVisible(tick, delay, options) {
     }
   }, options)
 
-  return () => {
+  const stop = () => {
     stopped = true
     clearTimeout(timer)
     unsubscribe()
   }
+  stop.now = () => {
+    if (running) {
+      again = true
+      return
+    }
+    clearTimeout(timer)
+    run(false)
+  }
+  return stop
 }

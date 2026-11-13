@@ -135,10 +135,59 @@ test('refreshes never overlap and stop ends the loop', async (t) => {
   assert.equal(calls, 2)
 })
 
+test('now() ticks at once, restarts the cadence, and queues one tick behind a running one', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const mobius = shellRuntime(true)
+  let release = null
+  let running = 0
+  let most = 0
+  let calls = 0
+  const stop = pollWhileVisible(async () => {
+    calls += 1
+    running += 1
+    most = Math.max(most, running)
+    await new Promise((resolve) => { release = resolve })
+    running -= 1
+  }, () => 1000, { mobius, doc: documentStub() })
+
+  t.mock.timers.tick(600)
+  stop.now()
+  assert.equal(calls, 1)
+  release()
+  await settle()
+  t.mock.timers.tick(600)
+  await settle()
+  assert.equal(calls, 1, 'the cadence restarts from the nudge')
+  t.mock.timers.tick(400)
+  await settle()
+  assert.equal(calls, 2)
+
+  stop.now()
+  stop.now()
+  assert.equal(calls, 2, 'a nudge during a tick waits for it')
+  release()
+  await settle()
+  assert.equal(calls, 3, 'one follow-up tick runs right after')
+  assert.equal(most, 1)
+  release()
+  await settle()
+
+  mobius.show(false)
+  stop.now()
+  assert.equal(calls, 3, 'a hidden pane ignores now()')
+  stop()
+  mobius.show(true)
+  stop.now()
+  await settle()
+  assert.equal(calls, 3, 'a stopped loop ignores now()')
+})
+
 test('Social background loops gate on the frame, not on document visibility', () => {
   const index = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
-  assert.match(index, /pollWhileVisible\(\s*\(\) => store\.get\('state\/version\.json'\)/)
+  const api = readFileSync(new URL('../api.js', import.meta.url), 'utf8')
+  assert.match(index, /api\.watchServerChanges\(store\)/)
+  assert.match(api, /pollWhileVisible\(\s*\(\) => store\.get\('state\/version\.json'\)/)
   assert.equal((board.match(/pollWhileVisible\(/g) || []).length, 2)
   assert.doesNotMatch(board, /visibilityState|visibilitychange/)
   assert.doesNotMatch(index, /setInterval/)
