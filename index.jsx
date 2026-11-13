@@ -12,7 +12,7 @@ import People from './ui/People.jsx'
 import { Lightbox } from './ui/Media.jsx'
 import { joinGlobalCommunity, checkGlobalRegistration } from './community.js'
 import {
-  accountHandoff, clearParticipationIntent, loadParticipationIntent,
+  ACCOUNT_SETTINGS_REQUEST, clearParticipationIntent, loadParticipationIntent,
   participationIntentMatches, participationStep,
   saveParticipationIntent,
 } from './participation.js'
@@ -398,9 +398,10 @@ export default function App({ appId, token }) {
     }
   }, [])
 
-  // Identity linking happens in Möbius · You. When the owner returns, read the
-  // authoritative profile again; never infer success from the app switch and
-  // never turn a completed sign-in into an automatic directory join or post.
+  // Sign-in and the username live in Settings › Accounts › Möbius. When the
+  // owner returns, read the authoritative profile again; never infer success
+  // from leaving Social and never turn a completed sign-in into an automatic
+  // directory join or post.
   // Only an unfinished account handoff can change on return; a joined owner's
   // profile reconciles once per launch instead of on every pane focus.
   useEffect(() => {
@@ -412,8 +413,9 @@ export default function App({ appId, token }) {
       refreshing = true
       try {
         const profile = await loadMe({ background: true })
-        // Returning before linking finished keeps the handoff pending.
-        if (profile?.connected) handoffPending.current = false
+        // Returning before sign-in and the username are both done keeps the
+        // handoff pending, so the handle still appears on a later return.
+        if (profile?.connected && profile?.handle) handoffPending.current = false
         if (profile) await loadFeed(true)
       } finally {
         refreshing = false
@@ -579,9 +581,9 @@ export default function App({ appId, token }) {
   const [saving, setSaving] = useState(false)
   const [joinError, setJoinError] = useState(null)
 
-  function openIdentityApp() {
+  function openAccountSettings() {
     handoffPending.current = true
-    accountHandoff(me, (message, target) => window.parent.postMessage(message, target))
+    window.parent.postMessage(ACCOUNT_SETTINGS_REQUEST, '*')
   }
 
   async function join() {
@@ -609,7 +611,7 @@ export default function App({ appId, token }) {
   function beginJoin() {
     if (meState === 'error' || !me) return loadMe()
     if (me.registration === 'missing' || participationStep(me) === 'join') return join()
-    openIdentityApp()
+    openAccountSettings()
   }
 
   async function requestParticipation(intent) {
@@ -621,7 +623,7 @@ export default function App({ appId, token }) {
       if (!joined) throw new Error('Social couldn’t finish joining. Your draft is still saved.')
       return true
     }
-    openIdentityApp()
+    openAccountSettings()
     return true
   }
 

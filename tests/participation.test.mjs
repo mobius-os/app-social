@@ -9,7 +9,7 @@ import { upsertReplyAttempt } from '../reconciliation.js'
 import { revokeLocalPreviews } from '../ui/boardEdits.js'
 import { joinGlobalCommunity } from '../community.js'
 import {
-  PARTICIPATION_INTENT_PATH, accountHandoff, clearParticipationIntent,
+  ACCOUNT_SETTINGS_REQUEST, PARTICIPATION_INTENT_PATH, clearParticipationIntent,
   completedParticipationIntent, createParticipationIntent, loadParticipationIntent, participationActionLabel, participationStep,
   participationIntentMatches, saveParticipationIntent,
 } from '../participation.js'
@@ -125,11 +125,11 @@ function legacyDraft(kind, previewBytes = 200_000) {
     : { version: 1, kind, text: 'Legacy caption', attachment, thumbnails: [preview] }
 }
 
-const JOINABLE = { connected: true, joined: false, handle: 'ada', registration: 'missing', identity_app_id: 8 }
+const JOINABLE = { connected: true, joined: false, handle: 'ada', registration: 'missing' }
 
 // Execute the real signed-out resume path: Board resume/continue hands the
 // saved intent to App requestParticipation, which saves, then joins or opens
-// the account app. Storage reads/writes are recorded; nothing can publish.
+// account Settings. Storage reads/writes are recorded; nothing can publish.
 async function signedOutBoard(saved, { me = JOINABLE, joinFailures = 0, postMessageFailures = 0 } = {}) {
   const storage = memoryStorage()
   if (saved) await storage.durableWrite(PARTICIPATION_INTENT_PATH, saved, { ifNoneMatch: true })
@@ -154,7 +154,7 @@ async function signedOutBoard(saved, { me = JOINABLE, joinFailures = 0, postMess
       if (postMessages++ < postMessageFailures) throw new Error('Account app unavailable')
       messages.push([message, target])
     } } },
-    saveParticipationIntent, participationStep, accountHandoff, joinGlobalCommunity,
+    saveParticipationIntent, participationStep, ACCOUNT_SETTINGS_REQUEST, joinGlobalCommunity,
     api: { async join() { joins++; return { directory: joins <= joinFailures ? 'unreachable' : 'registered' } } },
     async loadMe() { return { ...me, joined: true, registration: 'registered' } },
     async loadFeed() {},
@@ -172,7 +172,7 @@ async function signedOutBoard(saved, { me = JOINABLE, joinFailures = 0, postMess
     },
   }
   const functions = [handler(board, 'continueParticipation', true), handler(board, 'resumeParticipation'),
-    handler(app, 'openIdentityApp'), handler(app, 'join', true),
+    handler(app, 'openAccountSettings'), handler(app, 'join', true),
     handler(app, 'requestParticipation', true)].join('\n')
   const actions = new Function('env', `with (env) { ${functions}; return {
     resumeParticipation, requestParticipation,
@@ -204,19 +204,16 @@ test('a signed-out older post or reply draft continues through Join unchanged an
   }
 })
 
-test('a signed-out older draft opens the account app without rewriting the draft', async () => {
-  const profiles = [
-    [{ connected: false, identity_app_id: 42 }, { type: 'moebius:open-app', appId: 42 }],
-    [{ connected: false }, { type: 'moebius:open-app', appId: 'store', intent: 'app:identity' }],
-    [{ connected: true, handle: '', identity_app_id: 8 }, { type: 'moebius:open-app', appId: 8 }],
-  ]
+test('a signed-out older draft opens account Settings without rewriting the draft', async () => {
+  // Signing in and choosing a username both happen in Settings › Accounts › Möbius.
+  const profiles = [{ connected: false }, { connected: true, handle: '' }]
   for (const kind of ['post', 'reply']) {
-    for (const [me, message] of profiles) {
+    for (const me of profiles) {
       const saved = legacyDraft(kind)
       const flow = await signedOutBoard(saved, { me })
       await flow.resume()
       assert.deepEqual(flow.errors(), [])
-      assert.deepEqual(flow.messages, [[message, '*']])
+      assert.deepEqual(flow.messages, [[{ type: 'moebius:open-settings', section: 'mobius-account' }, '*']])
       assert.equal(flow.env.handoffPending.current, true)
       assert.equal(flow.joins, 0)
       assert.deepEqual(flow.writes, [])
@@ -228,7 +225,7 @@ test('a signed-out older draft opens the account app without rewriting the draft
 
 test('failed Join or account handoff keeps the older draft and a retry continues', async () => {
   for (const kind of ['post', 'reply']) {
-    for (const failure of [{ joinFailures: 1 }, { me: { connected: false, identity_app_id: 42 }, postMessageFailures: 1 }]) {
+    for (const failure of [{ joinFailures: 1 }, { me: { connected: false }, postMessageFailures: 1 }]) {
       const saved = legacyDraft(kind)
       const flow = await signedOutBoard(saved, failure)
       await flow.resume()
@@ -451,7 +448,6 @@ test('a maximum-size GIF and caption survive account handoff, reload and exact m
   })
   assert.ok(draft)
   assert.equal(await saveParticipationIntent(storage, draft), true)
-  accountHandoff({ identity_app_id: 42 }, () => {})
   const loaded = await loadParticipationIntent(storage)
   assert.deepEqual(loaded, draft)
   assert.equal(participationIntentMatches(loaded, draft), true)
@@ -516,21 +512,19 @@ test('concurrent large drafts preserve the CAS winner without losing media', asy
 })
 
 test('a post draft and attachment survive an account handoff without being submitted', async () => {
-  const storage = memoryStorage()
   const attachment = {
     mime: 'image/jpeg', data_b64: 'cGhvdG8=', w: 640, h: 480,
   }
   const intent = createParticipationIntent('post', {
     text: 'Still mine until I press Post', attachment,
   })
-  assert.equal(await saveParticipationIntent(storage, intent), true)
+  const flow = await signedOutBoard(intent, { me: { connected: false } })
+  await flow.resume()
 
-  const messages = []
-  accountHandoff({ identity_app_id: 42 }, (...args) => messages.push(args))
-
-  assert.deepEqual(await loadParticipationIntent(storage), intent)
-  assert.deepEqual(messages, [[{ type: 'moebius:open-app', appId: 42 }, '*']])
-  assert.equal(storage.values.has(PARTICIPATION_INTENT_PATH), true)
+  assert.deepEqual(await loadParticipationIntent(flow.storage), intent)
+  assert.deepEqual(flow.messages, [[{ type: 'moebius:open-settings', section: 'mobius-account' }, '*']])
+  assert.deepEqual(flow.writes, [])
+  assert.deepEqual(flow.published, [])
 })
 
 test('cancelled or incomplete sign-in leaves the exact reply draft waiting', async () => {
@@ -555,17 +549,14 @@ test('a combined reply photo and caption survive an account handoff as one draft
   assert.deepEqual(intent.thumbnail, thumbnail)
 })
 
-test('a missing Identity installation opens its exact Store listing', () => {
-  const messages = []
-  assert.equal(accountHandoff({}, (...args) => messages.push(args)), 'store')
-  assert.deepEqual(messages, [[{
-    type: 'moebius:open-app', appId: 'store', intent: 'app:identity',
-  }, '*']])
+test('signing in asks the shell for Settings › Accounts › Möbius, never another app or the Store', () => {
+  assert.equal(participationStep({ connected: false, joined: false }), 'sign-in')
+  assert.equal(participationActionLabel('sign-in'), 'Sign in to Möbius')
+  assert.deepEqual(ACCOUNT_SETTINGS_REQUEST, { type: 'moebius:open-settings', section: 'mobius-account' })
 })
 
 test('participation keeps account linking, directory consent and final action separate', () => {
-  assert.equal(participationStep({ connected: false, joined: false }), 'store')
-  assert.equal(participationStep({ connected: false, joined: false, identity_app_id: 8 }), 'identity')
+  assert.equal(participationStep({ connected: false, joined: false }), 'sign-in')
   assert.equal(participationStep({ connected: true, joined: false, name: 'Ada', handle: 'ada' }), 'join')
   assert.equal(participationStep({
     connected: true, joined: true, name: 'Ada', handle: 'ada',
@@ -573,11 +564,86 @@ test('participation keeps account linking, directory consent and final action se
 })
 
 test('a linked account without a username chooses one before taking part', () => {
-  const unnamed = { connected: true, name: 'Ada', handle: '', identity_app_id: 8 }
+  const unnamed = { connected: true, name: 'Ada', handle: '' }
   assert.equal(participationStep({ ...unnamed, joined: false }), 'username')
   // Members who joined before usernames were required are asked too.
   assert.equal(participationStep({ ...unnamed, joined: true }), 'username')
   assert.equal(participationActionLabel('username'), 'Choose a username')
+})
+
+// A minimal event target: the effect only adds, removes and receives events.
+function eventTarget(fields) {
+  const listeners = new Map()
+  return Object.assign(fields, {
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type).add(fn)
+    },
+    removeEventListener(type, fn) { listeners.get(type)?.delete(fn) },
+    async dispatch(type) { await Promise.all([...(listeners.get(type) || [])].map(fn => fn())) },
+    listenerCount() { return [...listeners.values()].reduce((sum, set) => sum + set.size, 0) },
+  })
+}
+
+test('returning from account Settings re-reads the profile until the username is chosen', async () => {
+  // Run the real App return effect. The shell signals a return by making the
+  // frame's document visible again and dispatching visibilitychange.
+  const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const start = app.indexOf('  useEffect(() => {\n    let refreshing = false')
+  assert.notEqual(start, -1)
+  const end = app.indexOf('\n  }, [loadFeed])', start)
+  assert.notEqual(end, -1)
+  const source = app.slice(start, end + '\n  }, [loadFeed])'.length)
+
+  const unnamed = { connected: true, joined: true, name: 'Ada', handle: '' }
+  // A failed read, a return before the username is chosen, then the username.
+  const responses = [null, unnamed, { ...unnamed, handle: 'ada' }]
+  let reads = 0, feeds = 0, unmount = null
+  const env = {
+    document: eventTarget({ visibilityState: 'hidden' }),
+    window: eventTarget({}),
+    meRef: { current: unnamed },
+    // Set when Social asked the shell to open account Settings.
+    handoffPending: { current: true },
+    async loadMe() {
+      const profile = responses[Math.min(reads++, responses.length - 1)]
+      if (profile) env.meRef.current = profile
+      return profile
+    },
+    async loadFeed() { feeds++ },
+    useEffect(effect) { unmount = effect() },
+  }
+  new Function('env', `with (env) { ${source} }`)(env)
+  const returnToSocial = () => {
+    env.document.visibilityState = 'visible'
+    return env.document.dispatch('visibilitychange')
+  }
+
+  await env.document.dispatch('visibilitychange')
+  assert.equal(reads, 0, 'a hidden pane does not read')
+
+  await returnToSocial()
+  assert.equal(reads, 1)
+  assert.equal(env.handoffPending.current, true, 'a failed read stays pending for the next return')
+  assert.equal(feeds, 0)
+
+  await returnToSocial()
+  assert.equal(reads, 2)
+  assert.equal(env.handoffPending.current, true, 'signed in without a username is still mid-handoff')
+
+  await returnToSocial()
+  assert.equal(reads, 3)
+  assert.equal(env.handoffPending.current, false)
+  assert.equal(feeds, 2)
+
+  await returnToSocial()
+  assert.equal(reads, 3, 'a finished member reconciles once, not on every return')
+
+  unmount()
+  assert.equal(env.document.listenerCount() + env.window.listenerCount(), 0)
+  env.handoffPending.current = true
+  await returnToSocial()
+  assert.equal(reads, 3, 'nothing reads after unmount')
 })
 
 test('only explicit completion clears a pending action', async () => {

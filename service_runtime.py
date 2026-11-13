@@ -141,8 +141,8 @@ async def owner_profile() -> dict | None:
 
 # Requests are forked from a preloaded process, so an in-memory cache would die
 # with each request. The installed-app list (~43 KB, p50 ~300 ms) changes only
-# on install/uninstall, while /me and every public /actor probe need two small
-# facts from it; keep just those facts on disk for a short freshness window.
+# on install/uninstall, while every public /actor probe needs its published
+# apps; keep just those on disk for a short freshness window.
 APP_DIRECTORY_CACHE_PATH = SERVER_ROOT / "cache" / "app-directory.json"
 APP_DIRECTORY_CACHE_TTL_SECONDS = 600
 
@@ -184,15 +184,11 @@ def _read_app_directory_cache() -> dict | None:
     return None
   if not 0 <= time.time() - fetched_at < APP_DIRECTORY_CACHE_TTL_SECONDS:
     return None
-  # A missing Identity app is not cached: the join flow must notice an install
-  # immediately rather than after the freshness window.
-  if not isinstance(cached.get("identity_app_id"), int):
-    return None
   return cached
 
 
 async def app_directory_facts() -> dict | None:
-  """Return ``{identity_app_id, public_apps}`` from a fresh cache or the platform.
+  """Return ``{public_apps}`` from a fresh cache or the platform.
 
   ``None`` means the platform list was unreachable; callers keep their prior
   degraded behavior for that case. Failures are not cached.
@@ -213,16 +209,7 @@ async def app_directory_facts() -> dict | None:
     return None
   if not isinstance(apps, list):
     return None
-  identity = next(
-    (app for app in apps if isinstance(app, dict) and app.get("slug") == "identity"),
-    None,
-  )
-  identity_id = identity.get("id") if isinstance(identity, dict) else None
-  facts = {
-    "fetched_at": time.time(),
-    "identity_app_id": identity_id if isinstance(identity_id, int) else None,
-    "public_apps": _published_apps(apps),
-  }
+  facts = {"fetched_at": time.time(), "public_apps": _published_apps(apps)}
   try:
     atomic_write(APP_DIRECTORY_CACHE_PATH, json.dumps(facts))
   except OSError:
@@ -251,12 +238,6 @@ async def public_actor_metadata() -> dict:
     "member_since": member_since,
     "apps": public_apps if isinstance(public_apps, list) else [],
   }
-
-
-async def identity_app_id() -> int | None:
-  directory = await app_directory_facts()
-  value = directory.get("identity_app_id") if directory else None
-  return value if isinstance(value, int) else None
 
 
 async def resolve_handle_hosts(handle: str) -> list[str] | None:

@@ -107,8 +107,6 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       social_routes, "_refresh_profile_cache", AsyncMock(return_value=state),
     ), patch.object(
       social_routes, "_avatar_path", return_value=avatar,
-    ), patch.object(
-      social_routes, "identity_app_id", AsyncMock(return_value=1),
     ):
       response = await social_routes._me_payload(None, None, include_avatar=False)
     self.assertNotIn("avatar", response)
@@ -130,8 +128,6 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       social_routes, "_refresh_profile_cache", AsyncMock(return_value=state),
     ), patch.object(
       social_routes, "_avatar_path", return_value=avatar,
-    ), patch.object(
-      social_routes, "identity_app_id", AsyncMock(return_value=1),
     ):
       response = await social_routes._me_payload(None, None, include_avatar=False)
     self.assertEqual(response["avatar"]["mime"], "image/png")
