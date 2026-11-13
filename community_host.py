@@ -38,6 +38,22 @@ DEVELOPMENT_REVISION = "development"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _hosts(name: str) -> list[str]:
+  raw = os.environ.get(name, "")
+  return [part.strip().lower() for part in raw.split(",") if part.strip()]
+
+
+def community_roles() -> dict[str, str]:
+  """Owner and admin hosts from the deployment settings; others are members.
+
+  COMMUNITY_OWNER_HOSTS and COMMUNITY_ADMIN_HOSTS are comma-separated member
+  hosts. A host listed in both is an owner.
+  """
+  roles = {host: "admin" for host in _hosts("COMMUNITY_ADMIN_HOSTS")}
+  roles.update({host: "owner" for host in _hosts("COMMUNITY_OWNER_HOSTS")})
+  return roles
+
+
 def source_revision() -> str:
   """Return the baked Git revision, allowing one explicit local-dev value."""
   revision = os.environ.get("SOCIAL_SOURCE_SHA", DEVELOPMENT_REVISION).strip()
@@ -120,6 +136,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     # The shared KLIPY key is a private deployment setting, read per request
     # so replacing it needs no rebuild of this image's source.
     gif_key=lambda: os.environ.get("KLIPY_APP_KEY", "").strip() or None,
+    # Community owner and admins are deployment settings (member hosts) who
+    # may moderate the board. Read per request, like the GIF key.
+    community_roles=community_roles,
   )
 
   @asynccontextmanager

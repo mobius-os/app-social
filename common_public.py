@@ -329,6 +329,79 @@ class CommonPublicStore:
   def directory_path(self) -> Path:
     return self.common_dir() / "directory.json"
 
+  def roles_path(self) -> Path:
+    return self.common_dir() / "roles.json"
+
+  def community_profile_path(self) -> Path:
+    return self.common_dir() / "community.json"
+
+  def community_profile(self) -> dict:
+    """The Community's name and description as the owner or an admin set them."""
+    saved = self._load_object(self.community_profile_path())
+    return {
+      "name": saved.get("name") if isinstance(saved.get("name"), str) else "",
+      "description": saved.get("description") if isinstance(saved.get("description"), str) else "",
+    }
+
+  def set_community_profile(self, name: object, description: object) -> dict:
+    """Save a new name and description; callers check the editor's role."""
+    if not isinstance(name, str) or not isinstance(description, str):
+      raise HTTPException(status_code=400, detail="Community details are invalid.")
+    name, description = name.strip(), description.strip()
+    if len(name) > COMMUNITY_NAME_LIMIT or len(description) > COMMUNITY_DESCRIPTION_LIMIT:
+      raise HTTPException(status_code=400, detail="Community details are too long.")
+    with self._mutation_lock(self._directory_lock, "directory"):
+      atomic_write(self.community_profile_path(), json.dumps(
+        {"name": name, "description": description, "updated_at": time.time()}, indent=2,
+      ))
+    return {"community": {"name": name, "description": description}}
+
+  def community_roles(self, seed: dict[str, str] | None = None) -> dict[str, str]:
+    """The saved owner/admin roles, or the deployment's seed before any change.
+
+    The deployment settings only name the first owner and admins. Once the
+    owner changes a role, the saved list is the whole truth and the settings
+    are no longer read.
+    """
+    path = self.roles_path()
+    if path.is_file():
+      saved = self._load_object(path).get("roles")
+      if isinstance(saved, dict):
+        return {host: role for host, role in saved.items()
+                if isinstance(host, str) and role in MODERATOR_ROLES}
+    return dict(seed or {})
+
+  def set_community_role(
+    self, actor: str, target: str, role: str, seed: dict[str, str] | None = None,
+  ) -> dict:
+    """Let the current owner make someone admin, remove admin, or hand over.
+
+    ``role`` is "admin", "owner", or "none" (no role). Anyone without a saved
+    role is an ordinary member; there is no stored member role.
+
+    Handing over ownership makes the previous owner an admin, so the community
+    always has exactly one owner and nobody loses access by surprise.
+    """
+    if role not in ("admin", "owner", "none"):
+      raise HTTPException(status_code=400, detail="Role is invalid.")
+    with self._mutation_lock(self._directory_lock, "directory"):
+      roles = self.community_roles(seed)
+      if roles.get(actor) != "owner":
+        raise HTTPException(status_code=403, detail="Only the community owner can change roles.")
+      if target == actor:
+        raise HTTPException(status_code=400, detail="The owner can’t change their own role.")
+      if not isinstance(self._load_object(self.directory_path()).get(target), dict):
+        raise HTTPException(status_code=400, detail="That person isn’t a community member.")
+      if role == "owner":
+        roles[target] = "owner"
+        roles[actor] = "admin"
+      elif role == "admin":
+        roles[target] = "admin"
+      else:
+        roles.pop(target, None)
+      atomic_write(self.roles_path(), json.dumps({"roles": roles, "updated_at": time.time()}, indent=2))
+      return {"roles": dict(sorted(roles.items()))}
+
   def board_dir(self) -> Path:
     path = self.common_dir() / "board"
     path.mkdir(parents=True, exist_ok=True)
@@ -1261,8 +1334,10 @@ class CommonPublicStore:
     if self._refresh_board_index(post, path) and owns_dirty_marker:
       self._clear_board_index_dirty()
 
-  def delete_reply(self, post_id: str, reply_id: str, host: str) -> dict:
-    """Remove one reply its own author asked to delete, with its media.
+  def delete_reply(
+    self, post_id: str, reply_id: str, host: str, *, moderator: bool = False,
+  ) -> dict:
+    """Remove one reply its author, or a community owner or admin, asked to delete.
 
     Like `delete_post`, this is a deliberate author action and idempotent. The
     id is remembered so a delayed retry of the original reply cannot bring the
@@ -1288,7 +1363,7 @@ class CommonPublicStore:
                      and reply.get("id") == reply_id), None)
       if target is None:
         return {"status": "deleted", "reply_count": len(replies)}
-      if target.get("host") != host:
+      if target.get("host") != host and not moderator:
         raise HTTPException(
           status_code=403, detail="Only the author host may delete this reply.",
         )
@@ -1369,13 +1444,14 @@ class CommonPublicStore:
       ))
     }
 
-  def delete_post(self, post_id: str, host: str) -> dict:
-    """Delete one post its own author asked to remove, and its media.
+  def delete_post(self, post_id: str, host: str, *, moderator: bool = False) -> dict:
+    """Delete one post its author, or a community owner or admin, asked to remove.
 
-    This is a deliberate author action, not the silent expiry/pruning the module
-    invariant forbids: only the host that authored the post may remove it, and a
-    repeat of the same delete is idempotent so a retry cannot error. Replies from
-    other hosts live inside the post record and are removed with it.
+    This is a deliberate author or moderator action, not the silent
+    expiry/pruning the module invariant forbids: only the authoring host or a
+    host the deployment names as owner or admin may remove it, and a repeat of the
+    same delete is idempotent so a retry cannot error. Replies from other hosts
+    live inside the post record and are removed with it.
     """
     try:
       self._ensure_board_index()
@@ -1386,7 +1462,7 @@ class CommonPublicStore:
       if not path.is_file():
         return {"status": "deleted"}
       post = self._load_object(path)
-      if post.get("host") != host:
+      if post.get("host") != host and not moderator:
         raise HTTPException(
           status_code=403,
           detail="Only the author host may delete this post.",
@@ -1552,9 +1628,15 @@ async def refresh_member_profile(
   store.set_member_avatar(host, rendition)
 
 
+# Community roles a deployment may assign; anyone unlisted is a member.
+MODERATOR_ROLES = frozenset({"owner", "admin"})
+COMMUNITY_NAME_LIMIT = 60
+COMMUNITY_DESCRIPTION_LIMIT = 500
+
+
 def read_board_page(
   store: CommonPublicStore, limit: int, before: str | None,
-  viewer: str | None = None,
+  viewer: str | None = None, roles: dict[str, str] | None = None,
 ) -> dict:
   """Return one stable page shared by public and owner-facing Board routes."""
   try:
@@ -1582,7 +1664,7 @@ def read_board_page(
     if position is not None:
       next_cursor = _encode_board_cursor(*position)
   return {
-    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True, "reactions": list(BOARD_REACTION_EMOJIS)},
+    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True, "reactions": list(BOARD_REACTION_EMOJIS), "roles": dict(sorted((roles or {}).items()))},
     "media_limits": {
       "gif_bytes": MAX_ATTACHMENT_BYTES,
       "static_bytes": MAX_STATIC_ATTACHMENT_BYTES,
@@ -1591,6 +1673,7 @@ def read_board_page(
       "max_images": MAX_BOARD_ATTACHMENTS,
       "envelope_bytes": MAX_ATTACHMENT_ENVELOPE_BYTES,
     },
+    "community": store.community_profile(),
     "posts": posts,
     "next_cursor": next_cursor,
   }
@@ -1715,6 +1798,7 @@ class _PublicEnvelopeAdmission:
 def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
   on_activity=None, on_register=None, gif_key: Callable[[], str | None] | None = None,
+  community_roles: Callable[[], dict[str, str]] | None = None,
 ) -> tuple[APIRouter, None]:
   """Build the community host's directory and public board surface.
 
@@ -1725,9 +1809,20 @@ def create_public_router(
   after each directory registration (the host refreshes the member's avatar).
   ``gif_key()`` returns the shared KLIPY app key from the host's private
   settings, handed only to verified members (see ``gifs/key``).
+  ``community_roles()`` maps member hosts to "owner" or "admin" from the
+  host's deployment settings; it only seeds the roles until the owner first
+  changes one (``board/role``), after which the saved list wins. Both
+  roles may delete any post or reply; every other member is an ordinary
+  member. The board lists the roles so each member's Social can label them.
   """
   admission = _PublicEnvelopeAdmission()
   content_paths = {f"{prefix}/board", f"{prefix}/board/reply"}
+
+  def roles_now() -> dict[str, str]:
+    return store.community_roles(community_roles() if community_roles is not None else {})
+
+  def moderates(host: str) -> bool:
+    return roles_now().get(host) in MODERATOR_ROLES
 
   class AdmittedEnvelopeRoute(APIRoute):
     async def handle(self, scope, receive, send):
@@ -1776,6 +1871,36 @@ def create_public_router(
     if not store.is_member(envelope["from"]):
       raise HTTPException(status_code=403, detail="Join Social to see People.")
     return store.search_directory(q)
+
+  @router.post("/board/role")
+  async def change_community_role(request: Request):
+    """The owner promotes, demotes, or hands ownership to another member."""
+    envelope = await read_envelope(request)
+    if envelope.get("v") != 0 or envelope.get("type") != "community_role":
+      raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+    target = envelope.get("target")
+    if not isinstance(target, str) or not target or len(target) > 253:
+      raise HTTPException(status_code=400, detail="Member is invalid.")
+    await verifier.verify_envelope(envelope)
+    if not store.is_member(envelope["from"]):
+      raise HTTPException(status_code=403, detail="Join Social first.")
+    return store.set_community_role(
+      envelope["from"], target.strip().lower(), envelope.get("role"),
+      community_roles() if community_roles is not None else {},
+    )
+
+  @router.post("/board/community")
+  async def edit_community_profile(request: Request):
+    """The owner or an admin edits the Community's name and description."""
+    envelope = await read_envelope(request)
+    if envelope.get("v") != 0 or envelope.get("type") != "community_profile":
+      raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+    await verifier.verify_envelope(envelope)
+    if not store.is_member(envelope["from"]):
+      raise HTTPException(status_code=403, detail="Join Social first.")
+    if not moderates(envelope["from"]):
+      raise HTTPException(status_code=403, detail="Only the owner or an admin can edit the Community.")
+    return store.set_community_profile(envelope.get("name"), envelope.get("description"))
 
   @router.post("/gifs/key")
   async def read_gif_key_for_member(request: Request):
@@ -1844,7 +1969,7 @@ def create_public_router(
   ):
     if viewer is not None and not valid_host(viewer):
       viewer = None
-    return read_board_page(store, limit, before, viewer)
+    return read_board_page(store, limit, before, viewer, roles_now())
 
   # Each image route also answers with the file type appended to its last
   # segment (see split_image_name).
@@ -1998,7 +2123,9 @@ def create_public_router(
     await verifier.verify_envelope(envelope)
     if not store.is_member(envelope["from"]):
       raise HTTPException(status_code=403, detail="Join Social first.")
-    return store.delete_post(post_id, envelope["from"])
+    return store.delete_post(
+      post_id, envelope["from"], moderator=moderates(envelope["from"]),
+    )
 
   # Reply deletion and edits use their own envelope types so an older host
   # rejects them (400/404) instead of reading them as a whole-post delete.
@@ -2014,7 +2141,10 @@ def create_public_router(
     await verifier.verify_envelope(envelope)
     if not store.is_member(envelope["from"]):
       raise HTTPException(status_code=403, detail="Join Social first.")
-    return store.delete_reply(post_id, reply_id, envelope["from"])
+    return store.delete_reply(
+      post_id, reply_id, envelope["from"],
+      moderator=moderates(envelope["from"]),
+    )
 
   @router.post("/board/edit")
   async def edit_on_board(request: Request):
