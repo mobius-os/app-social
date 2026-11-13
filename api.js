@@ -127,6 +127,11 @@ export const retryMessage = (peer, id) =>
   call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/retry`, {
     method: 'POST', body: JSON.stringify({}), timeoutMs: 60_000,
   })
+// updateId is the update's own stable id: a retry under it re-sends the same update.
+export const reactToMessage = (peer, id, emoji, on, updateId) =>
+  call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/reactions`, {
+    method: 'POST', body: JSON.stringify({ emoji, on, id: updateId }), timeoutMs: 30_000,
+  })
 export const publishPost = (text, attachment, attachments, thumbnails, id) =>
   call('publish', {
     method: 'POST',
@@ -364,6 +369,10 @@ export const sendGroupMessage = (id, gid, text, attachment, replyTo) =>
       ...(attachment ? { attachment } : {}),
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
+  })
+export const reactToGroupMessage = (gid, id, emoji, on, updateId) =>
+  call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/reactions`, {
+    method: 'POST', body: JSON.stringify({ emoji, on, id: updateId }), timeoutMs: 30_000,
   })
 export const retryGroupMessage = (gid, id) =>
   call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/retry`, {

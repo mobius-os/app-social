@@ -3,12 +3,12 @@ import { EmojiAdd, Heart } from '@openai/apps-sdk-ui/components/Icon'
 import { reactToPost } from '../api.js'
 import {
   BOARD_REACTION_EMOJIS, confirmedReactions, optimisticReactionChange,
-  reactionActionLabel, reactionKey, reactionState,
+  reactionActionLabel, reactionKey, reactionName, reactionState,
 } from '../reconciliation.js'
 import { EMOJI_ART } from '../emoji_art.js'
 import { reactionPickerPlacement } from './interactionRules.js'
 
-function FlatEmoji({ emoji }) {
+export function FlatEmoji({ emoji }) {
   return <img className="cn-flat-emoji" src={EMOJI_ART[emoji]} alt="" aria-hidden="true" draggable="false" />
 }
 
@@ -59,7 +59,7 @@ export function useBoardReactions({ refreshTarget, onError, onSettled }) {
 }
 
 export default function ReactionControls({
-  item, target, override, emojiReactions, canInteract, disabled,
+  item, target, override, emojiReactions, choices = [], canInteract, disabled,
   pickerFor, setPickerFor, onReact, onJoin, scrollRef,
 }) {
   const key = reactionKey(target)
@@ -151,10 +151,10 @@ export default function ReactionControls({
         if (event.key === 'Escape') { event.preventDefault(); close(true) }
       }}>
       <span className="cn-reaction-picker-title">Choose a reaction</span>
-      <div className="cn-reaction-grid">{BOARD_REACTION_EMOJIS.map(emoji => <button
+      <div className="cn-reaction-grid">{choices.map(emoji => <button
         key={emoji} type="button" className={reactions[emoji].reacted ? 'is-reacted' : ''}
         disabled={disabled} onClick={() => choose(emoji)} aria-pressed={reactions[emoji].reacted}
-        aria-label={`${reactions[emoji].reacted ? 'Remove' : 'Add'} ${emoji} reaction`}>
+        aria-label={`${reactions[emoji].reacted ? 'Remove' : 'Add'} ${reactionName(emoji)} reaction`}>
         <FlatEmoji emoji={emoji} />
       </button>)}</div>
     </div>}

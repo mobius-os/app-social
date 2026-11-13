@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft, Lock } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptMessageRequest, blockMessageRequest, clearUnread, clockTime,
-  declineMessageRequest, getPeer, listMessages, retryMessage, sendMessage,
+  declineMessageRequest, getPeer, listMessages, reactToMessage, retryMessage, sendMessage,
   watchLatestMessages,
 } from '../api.js'
+import { BOARD_REACTION_EMOJIS } from '../reconciliation.js'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
+import { ReactionRetryNote, supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
 import {
   DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
   withDayDividers,
@@ -37,6 +39,14 @@ export default function Thread({
     retryFailedText: 'This person still couldn’t be reached.',
   })
   const { messages, refresh } = timeline
+  const [pickerFor, setPickerFor] = useState(null)
+  const closePicker = useCallback(() => setPickerFor(null), [])
+  const messageReactions = useMessageReactions({
+    ownHost: me?.host,
+    send: (id, emoji, on, updateId) => reactToMessage(peer, id, emoji, on, updateId),
+    onError: error => showToast(error.message || 'The reaction couldn’t be sent.', 'error'),
+  })
+  const canReact = !requestPending && supportsMessageReactions(peerActor)
 
   // Messages are read only while this pane is actually visible to the owner.
   useEffect(() => {
@@ -102,8 +112,19 @@ export default function Thread({
         onOpenImage={onOpenImage}
         onImageUnavailable={() => showToast('This photo couldn’t be loaded.', 'error')}
         onReply={requestPending ? undefined : () => timeline.replyTo(replyTargetFor(message, author))}
+        reactions={{
+          state: messageReactions.stateFor(message),
+          choices: BOARD_REACTION_EMOJIS,
+          canReact,
+          disabled: Boolean(messageReactions.pending[message.id]),
+          open: pickerFor === message.id,
+          onToggle: () => setPickerFor(open => open === message.id ? null : message.id),
+          onClose: closePicker,
+          onReact: emoji => messageReactions.toggle(message, emoji),
+        }}
       />,
       <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline} />,
+      <ReactionRetryNote key={`react-${message.id}`} message={message} mine={mine} reactions={messageReactions} />,
     ]
   })
 

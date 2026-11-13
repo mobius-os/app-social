@@ -261,7 +261,7 @@ export default function Board({
   hasEarlier, onLoadEarlier,
   composing, setComposing, canInteract, accountState, participationIntent, intentState,
   participationBusy, onJoin, joinBusy, onRetryIntent, onRequestParticipation,
-  onCompleteParticipation, onDiscardParticipation, onPostConfirmed, emojiReactions = false, replyReactions = false,
+  onCompleteParticipation, onDiscardParticipation, onPostConfirmed, emojiReactions = false, replyReactions = false, reactionChoices = [],
   replyAttachments = false, authorEdits = false,
   boardTarget, onTargetHandled,
   composerMount, scrollRef,
@@ -1327,6 +1327,7 @@ export default function Board({
                 <ReactionControls item={post} target={{ postId: post.id }}
                   scrollRef={scrollRef}
                   override={reactionOverrides[post.id]} emojiReactions={emojiReactions}
+                  choices={reactionChoices}
                   canInteract={canInteract} disabled={handoffBusy || participationBusy || reactionPending[post.id]}
                   pickerFor={reactionPickerFor} setPickerFor={setReactionPickerFor}
                   onReact={(emoji) => toggleReaction(post, emoji)} onJoin={onJoin} />
@@ -1374,7 +1375,7 @@ export default function Board({
                             {replyReactions && !reply.pending && !reply.id.startsWith('local-') && <ReactionControls item={reply}
                               target={{ postId: post.id, replyId: reply.id }}
                               override={reactionOverrides[reactionKey({ postId: post.id, replyId: reply.id })]}
-                              emojiReactions canInteract={canInteract}
+                              emojiReactions choices={reactionChoices} canInteract={canInteract}
                               disabled={handoffBusy || participationBusy || reactionPending[reactionKey({ postId: post.id, replyId: reply.id })]}
                               pickerFor={reactionPickerFor} setPickerFor={setReactionPickerFor}
                               onReact={(emoji) => toggleReaction(reply, emoji, { postId: post.id, replyId: reply.id })}

@@ -1,5 +1,6 @@
 import { Reply, X } from '@openai/apps-sdk-ui/components/Icon'
 import { MessageImage } from './Media.jsx'
+import { MessageReactButton, MessageReactionRow } from './MessageReactions.jsx'
 import RichText from './RichText.jsx'
 
 function handleLabel(handle) {
@@ -43,28 +44,47 @@ function Quote({ reply }) {
 
 export default function MessageBubble({
   message, mine, author, tick, avatar, indent, conversationPath, onOpenImage, onImageUnavailable, onReply,
+  reactions,
 }) {
   const canReply = !!onReply && message.status !== 'sending'
+  // Reactions need a message both copies already hold.
+  const canReact = !!reactions?.canReact && message.status === 'delivered'
 
   return (
-    <div className={`cn-message-line ${mine ? 'is-mine' : 'is-theirs'}${indent ? ' no-avatar' : ''}`}>
-      {!mine && <span className="cn-message-avatar">{avatar}</span>}
-      <div
-        className={`cn-bubble ${mine ? 'is-mine' : 'is-theirs'}${message.status === 'failed' ? ' is-failed' : ''}${message.attachment ? ' has-attachment' : ''}`}
-      >
-        <Quote reply={message.reply_to} />
-        <MessageImage attachment={message.attachment} conversationPath={conversationPath}
-                      onOpen={onOpenImage} onUnavailable={onImageUnavailable} />
-        {message.text && <RichText className="cn-bubble-copy" text={message.text} />}
-        <span className="cn-bubble-time">{message.time}{tick}</span>
+    <>
+      <div className={`cn-message-line ${mine ? 'is-mine' : 'is-theirs'}${indent ? ' no-avatar' : ''}`}>
+        {!mine && <span className="cn-message-avatar">{avatar}</span>}
+        <div
+          className={`cn-bubble ${mine ? 'is-mine' : 'is-theirs'}${message.status === 'failed' ? ' is-failed' : ''}${message.attachment ? ' has-attachment' : ''}`}
+        >
+          <Quote reply={message.reply_to} />
+          <MessageImage attachment={message.attachment} conversationPath={conversationPath}
+                        onOpen={onOpenImage} onUnavailable={onImageUnavailable} />
+          {message.text && <RichText className="cn-bubble-copy" text={message.text} />}
+          <span className="cn-bubble-time">{message.time}{tick}</span>
+        </div>
+        {/* One reading order for every bubble; CSS places your own actions first. */}
+        {(canReply || canReact) && (
+          <div className="cn-bubble-actions">
+            {canReact && (
+              <MessageReactButton messageId={message.id} open={reactions.open}
+                                  disabled={reactions.disabled} onToggle={reactions.onToggle} />
+            )}
+            {canReply && (
+              <button className="cn-bubble-reply" type="button" onClick={onReply}
+                      aria-label={mine ? 'Reply to your message' : author ? `Reply to ${handleLabel(author)}` : 'Reply to message'}>
+                <Reply aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
-      {/* One reading order for every bubble; CSS places your own reply first. */}
-      {canReply && (
-        <button className="cn-bubble-reply" type="button" onClick={onReply}
-                aria-label={mine ? 'Reply to your message' : author ? `Reply to ${handleLabel(author)}` : 'Reply to message'}>
-          <Reply aria-hidden="true" />
-        </button>
+      {/* Its own line under the bubble, so the bubble's row keeps its shape. */}
+      {reactions && (
+        <MessageReactionRow messageId={message.id} mine={mine} state={reactions.state}
+                            choices={reactions.choices} canReact={canReact} disabled={reactions.disabled}
+                            open={reactions.open} onClose={reactions.onClose} onReact={reactions.onReact} />
       )}
-    </div>
+    </>
   )
 }

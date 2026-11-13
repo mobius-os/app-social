@@ -61,10 +61,35 @@ export function reconcileFeedPage(authoritative, current, pageSize) {
   return uniquePosts([...page, ...retained])
 }
 
+// Every reaction this version can draw, in presentation order; mirrors
+// BOARD_REACTION_EMOJIS in common_public.py. ':mobius:' is the Möbius logo.
 export const BOARD_REACTION_EMOJIS = [
+  '❤️', ':mobius:', '👍', '👎', '😂', '😮', '😢', '😡', '🎉', '🚀', '👀', '🙌', '🔥',
+  '✅', '💯', '🤔', '👏', '🙏', '💪', '🤝', '✨', '😍', '🤯', '🫡', '🫶',
+  '😊', '🥰', '😎', '🥳', '😭', '😅', '🙃', '😬', '🤗', '🤩', '😴', '🫠',
+  '💔', '💙', '💚', '💜', '👋', '✌️', '👌', '💡', '🎯', '🏆', '⭐',
+]
+
+// What a host accepted before it advertised its own list. Offering more than
+// this to such a host would only produce a refused tap.
+const LEGACY_BOARD_REACTIONS = [
   '❤️', '👍', '👎', '😂', '😮', '😢', '😡', '🎉', '🚀', '👀', '🙌', '🔥',
   '✅', '💯', '🤔', '👏', '🙏', '💪', '🤝', '✨', '😍', '🤯', '🫡', '🫶',
 ]
+
+const REACTION_NAMES = { ':mobius:': 'Möbius logo' }
+
+/** The reactions to offer in the picker: what both this app and the host know. */
+export function offeredReactions(capabilities) {
+  const advertised = Array.isArray(capabilities?.reactions) ? capabilities.reactions : LEGACY_BOARD_REACTIONS
+  const accepted = new Set(advertised)
+  return BOARD_REACTION_EMOJIS.filter(emoji => accepted.has(emoji))
+}
+
+/** A spoken name: the emoji itself, or the name of a picture reaction. */
+export function reactionName(emoji) {
+  return REACTION_NAMES[emoji] || emoji
+}
 
 export function reactionState(post, override) {
   if (override) return override
@@ -90,7 +115,7 @@ export function reactionState(post, override) {
 export function reactionActionLabel(reaction, emoji) {
   const count = Math.max(0, Number(reaction?.count) || 0)
   const action = reaction?.reacted ? 'Remove' : 'Add'
-  return `${action} ${emoji} reaction. ${count} ${count === 1 ? 'reaction' : 'reactions'}`
+  return `${action} ${reactionName(emoji)} reaction. ${count} ${count === 1 ? 'reaction' : 'reactions'}`
 }
 
 export function optimisticReactionChange(post, override, emoji) {

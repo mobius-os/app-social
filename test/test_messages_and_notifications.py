@@ -179,13 +179,49 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
 
   def test_every_emoji_is_preserved_in_legacy_compatible_activity_wording(self):
     for emoji in social_routes.BOARD_REACTION_EMOJIS:
+      if emoji in social_routes.BOARD_REACTION_NAMES:
+        continue
       self.assertEqual(social_routes._activity_line("like", "peer.example", "peer", emoji),
                        f"@peer reacted {emoji} to your post")
       self.assertEqual(social_routes._activity_line("like", "peer.example", "peer", emoji, "abcdef34"),
                        f"@peer reacted {emoji} to your reply")
     self.assertEqual(social_routes._activity_line("like", "peer.example", "peer"), "@peer liked your post")
+    self.assertEqual(social_routes._activity_line("like", "peer.example", "peer", ":mobius:"),
+                     "@peer reacted with the Möbius logo to your post")
+    # A newer host's reaction this version cannot name is still announced.
+    self.assertEqual(social_routes._activity_line("like", "peer.example", "peer", ":future:"),
+                     "@peer reacted to your post")
     self.assertEqual(social_routes._activity_line("reply", "peer.example", "peer", reply_id="abcdef34"),
                      "@peer replied to your post")
+
+  async def test_activity_announces_reactions_newer_than_this_version(self):
+    envelope = {
+      "v": 0, "type": "board_activity", "post_id": "abcdef12", "kind": "like",
+      "activity_id": "newer", "actor": "liker.example", "actor_handle": "liker",
+      "from": social_routes.COMMUNITY_HOST, "to": "self.example", "sent_at": 1.0,
+    }
+    sent = AsyncMock(return_value=True)
+    with tempfile.TemporaryDirectory() as directory:
+      with (
+        patch.object(social_routes, "_data_dir", return_value=directory),
+        patch.object(social_routes, "_own_host", return_value="self.example"),
+        patch.object(social_routes, "_read_envelope", new=AsyncMock(return_value=envelope)),
+        patch.object(social_routes, "_verify_peer_envelope", new=AsyncMock(return_value={})),
+        patch.object(social_routes, "notify", new=sent),
+      ):
+        for activity_id, emoji, line in (
+          ("logo", ":mobius:", "@liker reacted with the Möbius logo to your post"),
+          ("newer", ":not-yet-known:", "@liker reacted to your post"),
+        ):
+          envelope.update(activity_id=activity_id, emoji=emoji)
+          await social_routes.receive_board_activity(None)
+          self.assertEqual(sent.await_args.args[1], line)
+        for invalid in ("", "has space", "x" * 33, "bad\x00", 7):
+          envelope.update(activity_id=f"invalid-{invalid!r}", emoji=invalid)
+          with self.assertRaises(HTTPException) as caught:
+            await social_routes.receive_board_activity(None)
+          self.assertEqual(caught.exception.status_code, 400)
+    self.assertEqual(sent.await_count, 2)
 
   async def test_activity_accepts_only_the_host_emitted_protocol_kinds(self):
     envelope = {
