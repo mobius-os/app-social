@@ -5,9 +5,10 @@
 const REACTION_FIELDS = ['reactions', 'reaction_clock', 'reaction_updates', 'reaction_rev']
 const reactionRev = message => (Number.isInteger(message?.reaction_rev) ? message.reaction_rev : 0)
 
-// Edits work the same way: the copy holding the newer edit keeps its text.
-const EDIT_FIELDS = ['text', 'edited_at', 'edit']
-const editedAt = message => (Number.isFinite(message?.edited_at) ? message.edited_at : 0)
+// Edits work the same way with edit_rev, which the service advances on every
+// edit change, including a refused edit rolling back to the earlier text.
+const EDIT_FIELDS = ['text', 'edited_at', 'edit', 'edit_rev']
+export const editRev = message => (Number.isInteger(message?.edit_rev) ? message.edit_rev : 0)
 
 function keepFields(merged, source, fields) {
   for (const field of fields) {
@@ -19,7 +20,7 @@ function keepFields(merged, source, fields) {
 function mergeRow(earlier, later) {
   if (!earlier) return later
   const keepReactions = reactionRev(earlier) > reactionRev(later)
-  const keepEdit = editedAt(earlier) > editedAt(later)
+  const keepEdit = editRev(earlier) > editRev(later)
   if (!keepReactions && !keepEdit) return later
   const merged = { ...later }
   if (keepReactions) keepFields(merged, earlier, REACTION_FIELDS)

@@ -67,7 +67,7 @@ export default function MessageBubble({
           <MessageImage attachment={message.attachment} conversationPath={conversationPath}
                         onOpen={onOpenImage} onUnavailable={onImageUnavailable} />
           {editing
-            ? <MessageEditor text={message.text} onCancel={() => setEditing(false)}
+            ? <MessageEditor text={message.text} resendable={!!message.edit?.pending} onCancel={() => setEditing(false)}
                              onSave={async (text) => { await edits.onSave(message, text); setEditing(false) }} />
             : message.text && <RichText className="cn-bubble-copy" text={message.text} />}
           <span className="cn-bubble-time">
@@ -109,7 +109,7 @@ export default function MessageBubble({
 }
 
 /** In-place editor for one of your messages: Enter saves, Escape cancels. */
-function MessageEditor({ text, onSave, onCancel }) {
+function MessageEditor({ text, resendable, onSave, onCancel }) {
   const [value, setValue] = useState(text || '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -124,7 +124,8 @@ function MessageEditor({ text, onSave, onCancel }) {
 
   async function save() {
     if (busy || !value.trim()) return
-    if (unchanged) { onCancel(); return }
+    // Saving the same text again only matters for an edit not confirmed yet: it resends it.
+    if (unchanged && !resendable) { onCancel(); return }
     setBusy(true)
     setError('')
     try {

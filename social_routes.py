@@ -2216,12 +2216,12 @@ async def edit_direct_message(
 
   def begin(saved: dict):
     edit, new = begin_own_edit(saved, body.text, edit_id)
-    return new, edit
+    return new, (edit, new)
 
   def settle(outcome: str, detail: str | None = None):
     return lambda saved: (settle_own_edit(saved, edit_id, outcome, detail), None)
 
-  record, edit = await _change_saved_dm(app, peer, message_id, begin)
+  record, (edit, new) = await _change_saved_dm(app, peer, message_id, begin)
   if not edit.get("pending"):
     return edit_result(record)
   envelope = {
@@ -2233,9 +2233,13 @@ async def edit_direct_message(
     try:
       envelope["enc"] = _seal_payload(edit_id, encryption_key.get("key_b64"), payload)
     except Exception as exc:
+      # Nothing left this host. A first attempt is undone; an earlier attempt
+      # of a retried edit may still have arrived, so it stays pending.
       detail = "This person’s encryption key is invalid."
-      await _change_saved_dm(app, peer, message_id, settle("refused", detail))
-      raise HTTPException(status_code=409, detail=detail) from exc
+      await _change_saved_dm(
+        app, peer, message_id, settle("refused" if new else "uncertain", detail),
+      )
+      raise HTTPException(status_code=409 if new else 502, detail=detail) from exc
   else:
     envelope.update(payload)
   envelope["sig"] = _sign(envelope, _load_identity()["private_key_b64"])

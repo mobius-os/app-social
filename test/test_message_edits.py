@@ -58,7 +58,18 @@ class EditStateTests(unittest.TestCase):
     self.assertTrue(settle_own_edit(record, "e-1", "uncertain", "lost"))
     self.assertEqual(record["text"], "Hello")
     self.assertTrue(settle_own_edit(record, "e-1", "refused"))
-    self.assertEqual(record, {"text": "Hi"})
+    self.assertEqual({k: v for k, v in record.items() if k != "edit_rev"}, {"text": "Hi"})
+
+  def test_every_edit_change_including_a_rollback_advances_the_revision(self):
+    record = {"text": "Hi"}
+    begin_own_edit(record, "Hello", "e-1")
+    applied = record["edit_rev"]
+    settle_own_edit(record, "e-1", "uncertain", "lost")
+    pending = record["edit_rev"]
+    settle_own_edit(record, "e-1", "refused")
+    self.assertLess(applied, pending)
+    self.assertLess(pending, record["edit_rev"])
+    self.assertEqual(record["text"], "Hi")
 
   def test_an_edit_id_is_never_reused_for_different_text(self):
     record = {"text": "Hi"}
@@ -147,6 +158,36 @@ class DirectMessageEditTests(unittest.IsolatedAsyncioTestCase):
     result = await self.edit()
     self.assertTrue(result["pending"])
     self.assertEqual(self.stored("peer.example")["text"], "Hello")
+
+  async def test_saving_the_same_pending_edit_again_resends_it_under_its_id(self):
+    self.reply = lambda: (_ for _ in ()).throw(httpx.ConnectError("down"))
+    first = await self.edit()
+    self.assertEqual((first["pending"], first["edit_id"]), (True, EDIT_ID))
+    self.reply = lambda: httpx.Response(200, json={"status": "ok"})
+    second = await self.edit()
+    self.assertEqual([e["id"] for e in self.sent], [EDIT_ID, EDIT_ID])
+    self.assertFalse(second["pending"])
+    self.assertGreater(second["edit_rev"], first["edit_rev"])
+
+  async def test_a_local_sealing_failure_on_a_retry_keeps_the_edit_pending(self):
+    self.reply = lambda: (_ for _ in ()).throw(httpx.ConnectError("down"))
+    await self.edit()
+    # The peer's key turns invalid before the retry, so nothing is sent this time.
+    self.peer_actor["encryption_key"] = {"alg": "x25519", "key_b64": "not-a-key"}
+    with self.assertRaises(HTTPException) as caught:
+      await self.edit()
+    self.assertEqual(caught.exception.status_code, 502)
+    saved = self.stored("peer.example")
+    self.assertEqual(saved["text"], "Hello")  # the first attempt may have arrived
+    self.assertTrue(saved["edit"]["pending"])
+
+  async def test_a_local_sealing_failure_on_a_first_attempt_restores_the_text(self):
+    self.peer_actor["encryption_key"] = {"alg": "x25519", "key_b64": "not-a-key"}
+    with self.assertRaises(HTTPException) as caught:
+      await self.edit()
+    self.assertEqual(caught.exception.status_code, 409)
+    self.assertEqual(self.stored("peer.example")["text"], "Hi")
+    self.assertEqual(self.sent, [])
 
   async def test_older_peers_are_not_sent_edits(self):
     self.peer_actor = {"host": "peer.example"}

@@ -10,6 +10,8 @@ A stored message keeps:
 
 - ``text``: the current text, replaced by the newest edit;
 - ``edited_at``: when that newest edit was made (absent if never edited);
+- ``edit_rev``: counts every change to the fields above, including a rollback,
+  so a view holding two copies of one message keeps the newer state;
 - ``edit`` (author's copy only): the owner's newest edit,
   ``{"id", "at", "text", "pending", "before", "detail"}``. ``pending`` stays
   true until the other side confirms it; ``before`` is what a definite refusal
@@ -56,12 +58,18 @@ def _edited_at(record: dict) -> float:
   return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
+def bump_edit_rev(record: dict) -> None:
+  rev = record.get("edit_rev")
+  record["edit_rev"] = (rev if isinstance(rev, int) and not isinstance(rev, bool) else 0) + 1
+
+
 def apply_edit(record: dict, text: str, at: float) -> bool:
   """Apply one edit to this copy; False when it is not newer than the current text."""
   if at <= _edited_at(record):
     return False
   record["text"] = text
   record["edited_at"] = at
+  bump_edit_rev(record)
   return True
 
 
@@ -93,6 +101,7 @@ def settle_own_edit(record: dict, edit_id: str, outcome: str, detail: str | None
   edit = record.get("edit")
   if not isinstance(edit, dict) or edit.get("id") != edit_id:
     return False
+  bump_edit_rev(record)
   if outcome == "delivered":
     record["edit"] = {**edit, "pending": False, "detail": None}
   elif outcome == "uncertain":
@@ -116,6 +125,9 @@ def edit_result(record: dict) -> dict:
     "id": record.get("id"),
     "text": record.get("text"),
     "edited_at": record.get("edited_at"),
+    "edit_rev": record.get("edit_rev", 0),
+    # The pending edit's identity: saving the same text again resends it under this id.
+    "edit_id": edit.get("id"),
     "pending": bool(edit.get("pending")),
     "detail": edit.get("detail"),
   }
