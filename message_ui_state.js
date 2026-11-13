@@ -5,13 +5,25 @@
 const REACTION_FIELDS = ['reactions', 'reaction_clock', 'reaction_updates', 'reaction_rev']
 const reactionRev = message => (Number.isInteger(message?.reaction_rev) ? message.reaction_rev : 0)
 
-function mergeRow(earlier, later) {
-  if (!earlier || reactionRev(earlier) <= reactionRev(later)) return later
-  const merged = { ...later }
-  for (const field of REACTION_FIELDS) {
-    if (field in earlier) merged[field] = earlier[field]
+// Edits work the same way: the copy holding the newer edit keeps its text.
+const EDIT_FIELDS = ['text', 'edited_at', 'edit']
+const editedAt = message => (Number.isFinite(message?.edited_at) ? message.edited_at : 0)
+
+function keepFields(merged, source, fields) {
+  for (const field of fields) {
+    if (field in source) merged[field] = source[field]
     else delete merged[field]
   }
+}
+
+function mergeRow(earlier, later) {
+  if (!earlier) return later
+  const keepReactions = reactionRev(earlier) > reactionRev(later)
+  const keepEdit = editedAt(earlier) > editedAt(later)
+  if (!keepReactions && !keepEdit) return later
+  const merged = { ...later }
+  if (keepReactions) keepFields(merged, earlier, REACTION_FIELDS)
+  if (keepEdit) keepFields(merged, earlier, EDIT_FIELDS)
   return merged
 }
 

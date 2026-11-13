@@ -626,6 +626,20 @@ export const CSS = `
 .cn-bubble-reply:focus-visible { opacity: 1; pointer-events: auto; }
 .cn-bubble-reply:hover { background: var(--surface-2, var(--surface)); color: var(--text); }
 .cn-bubble-actions { display: flex; align-items: center; flex: 0 0 auto; }
+.cn-bubble-edited { margin-right: 6px; font-style: italic; opacity: .8; }
+.cn-bubble-editor { display: flex; flex-direction: column; gap: 8px; min-width: min(320px, 60vw); }
+.cn-bubble-editor textarea {
+  width: 100%; resize: vertical; padding: 8px 10px; border-radius: 12px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  background: color-mix(in srgb, var(--bg) 55%, transparent); color: var(--text);
+  font: inherit; font-size: 16px; line-height: 1.4; white-space: pre-wrap;
+}
+.cn-bubble-editor textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cn-bubble-editor-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.cn-bubble-editor-actions .cn-btn { min-height: 44px; padding: 0 14px; font-size: 13.5px; }
+.cn-bubble.is-mine .cn-bubble-editor .cn-btn-ghost { color: inherit; }
+.cn-bubble.is-mine .cn-bubble-editor .cn-btn-primary { background: var(--bg); color: var(--text); border-color: transparent; }
+.cn-bubble-editor-error { margin: 0; font-size: 13px; color: var(--danger-text, var(--danger)); }
 .cn-message-line.is-mine .cn-bubble-actions { order: -1; }
 .cn-bubble-react[aria-expanded="true"] { opacity: 1; pointer-events: auto; color: var(--accent-text, var(--accent)); }
 /* Reactions get their own line, tucked under the bubble and indented past
