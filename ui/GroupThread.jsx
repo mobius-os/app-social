@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptGroupInvitation, clearGroupUnread, clockTime, declineGroupInvitation,
-  getGroup, getPeer, listGroupMessages, reactToGroupMessage, requestStatus, retryGroupMessage,
+  editGroupMessage, getGroup, getPeer, listGroupMessages, reactToGroupMessage, requestStatus, retryGroupMessage,
   sendGroupMessage, watchLatestGroupMessages,
 } from '../api.js'
 import { BOARD_REACTION_EMOJIS } from '../reconciliation.js'
@@ -10,6 +10,7 @@ import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
 import { ReactionRetryNote, supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
+import { supportsMessageEdits, useMessageEdits } from './messageEdits.js'
 import GroupDetails from './GroupDetails.jsx'
 import {
   DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
@@ -54,12 +55,18 @@ export default function GroupThread({
   const isMember = requestStatus(currentGroup) === 'accepted'
   const hostedHere = !!me?.host && currentGroup.host === me.host
   const [hostReacts, setHostReacts] = useState(false)
+  const [hostEdits, setHostEdits] = useState(false)
   useEffect(() => {
     let active = true
     setHostReacts(false)
+    setHostEdits(false)
     if (hostedHere || !currentGroup.host) return () => { active = false }
     getPeer(currentGroup.host, undefined, { background: true })
-      .then(actor => { if (active) setHostReacts(supportsMessageReactions(actor)) })
+      .then(actor => {
+        if (!active) return
+        setHostReacts(supportsMessageReactions(actor))
+        setHostEdits(supportsMessageEdits(actor))
+      })
       .catch(() => {})
     return () => { active = false }
   }, [currentGroup.host, hostedHere])
@@ -71,6 +78,10 @@ export default function GroupThread({
     onError: error => showToast(error.message || 'The reaction couldn’t be sent.', 'error'),
   })
   const canReact = isMember && !currentGroup.deleted_at && (hostedHere || hostReacts)
+  const canEdit = isMember && !currentGroup.deleted_at && (hostedHere || hostEdits)
+  const saveEdit = useMessageEdits({
+    timeline, showToast, save: (id, text, editId) => editGroupMessage(gid, id, text, editId),
+  })
   useEffect(() => {
     if (foreground && isMember) clearGroupUnread(gid).catch(() => {})
   }, [gid, version, foreground, isMember])
@@ -136,6 +147,7 @@ export default function GroupThread({
           onClose: closePicker,
           onReact: emoji => messageReactions.toggle(message, emoji),
         }}
+        edits={{ canEdit, onSave: saveEdit }}
       />,
       <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline} />,
       <ReactionRetryNote key={`react-${message.id}`} message={message} mine={mine} reactions={messageReactions} />,

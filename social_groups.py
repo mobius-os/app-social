@@ -2,7 +2,7 @@
 
 A group lives on its creator's instance, the **group host**. The host owns the
 authoritative membership record; members keep their own copy of every message,
-exactly like 1:1 conversations. Eight signed envelope types extend the
+exactly like 1:1 conversations. Ten signed envelope types extend the
 protocol, all delivered to `/api/app-services/social/groups/inbox`:
 
 - `group_added`  host → invitee   invitation; carries group metadata
@@ -13,6 +13,8 @@ protocol, all delivered to `/api/app-services/social/groups/inbox`:
 - `group_deleted` host → member   the group is closed; retain local history
 - `group_react`   member → host    a member turns a reaction on or off
 - `group_reaction` host → member   the host's relay of a reaction
+- `group_edit`    member → host    the author replaces their message's text
+- `group_edited`  host → member    the host's relay of an edit, with the signed `group_edit`
 
 Like `group_message`, a `group_reaction` carries the member-signed
 `group_react` as `original`, so the host cannot forge someone's reaction.
@@ -89,6 +91,9 @@ from social_routes import (
 )
 from service_io import atomic_write
 from message_history import begin_message_mutation, load_page, mirror_message
+from message_edits import (
+  apply_edit, begin_own_edit, edit_result, settle_own_edit, supports_message_edits, validate_edit,
+)
 from message_reactions import (
   apply_reaction, begin_own_update, own_update_result, reaction_line, settle_own_update,
   supports_message_reactions, validate_reaction,
@@ -527,6 +532,7 @@ async def group_inbox(request: Request, db: object = Depends(get_db)):
   if envelope.get("type") not in (
     "group_added", "group_deleted", "group_post", "group_message",
     "group_accept", "group_decline", "group_react", "group_reaction",
+    "group_edit", "group_edited",
   ):
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   app = _common_app(db)
@@ -650,6 +656,10 @@ async def _accept_group_envelope(
     return await _host_accept_reaction(app, gid, envelope)
   if kind == "group_reaction":
     return await _member_accept_reaction(app, gid, envelope)
+  if kind == "group_edit":
+    return await _host_accept_edit(app, gid, envelope)
+  if kind == "group_edited":
+    return await _member_accept_edit(app, gid, envelope)
 
   if kind == "group_post":
     text = envelope.get("text")
@@ -950,6 +960,103 @@ async def _member_accept_reaction(app, gid: str, envelope: dict) -> dict:
   if applied:
     who = f"@{original_actor['handle']}" if original_actor.get("handle") else original["from"]
     await _notify_group_reaction(meta, record, who, emoji, on)
+  return {"status": "ok"}
+
+
+# ── edits ───────────────────────────────────────────────────────────────────
+# Only a message's author edits it. The author signs a ``group_edit``; the host
+# checks it against its own copy and relays it once to every other active
+# member inside a host-signed ``group_edited``. Members verify the author's
+# signature and their own copy's author, so the host cannot forge an edit.
+
+def _edit_fields(envelope: dict) -> tuple[str, str, float]:
+  message_id = envelope.get("message_id")
+  if not isinstance(message_id, str) or not _GID_RE.fullmatch(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  text, at = validate_edit(envelope.get("text"), envelope.get("at"))
+  return message_id, text, at
+
+
+def _edit_envelope(
+  identity: dict, gid: str, host: str, message_id: str, text: str, at: float, *, edit_id: str,
+) -> dict:
+  return _signed({
+    "v": 0, "type": "group_edit", "id": edit_id,
+    "from": _own_host(), "to": host, "gid": gid,
+    "message_id": message_id, "text": text, "at": at,
+    "sent_at": time.time(),
+  }, identity)
+
+
+async def _store_group_edit(app, gid: str, message_id: str, author: str, text: str, at: float):
+  """Apply one author edit to this copy; ``(applied, record)``, record None if unknown."""
+  def change(saved: dict):
+    if saved.get("author") != author:
+      raise HTTPException(status_code=403, detail="Only the author can edit this message.")
+    applied = apply_edit(saved, text, at)
+    return applied, applied
+
+  record, applied = await _change_group_message(app, gid, message_id, change)
+  return bool(applied), record
+
+
+def _edit_relays(group: dict, original: dict) -> dict[str, dict]:
+  identity = _load_identity()
+  return {
+    member: _signed({
+      "v": 0, "type": "group_edited",
+      "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"group-edited:{original['id']}:{member}")),
+      "from": _own_host(), "to": member, "gid": group["id"],
+      "original": original, "sent_at": time.time(),
+    }, identity)
+    for member in group["members"]
+    if member not in (_own_host(), original["from"]) and _host_member_active(group["members"][member])
+  }
+
+
+async def _host_accept_edit(app, gid: str, envelope: dict) -> dict:
+  sender = envelope["from"]
+  message_id, text, at = _edit_fields(envelope)
+  with _host_group_transaction(gid):
+    group = _load_host_group(gid)
+    if group is None:
+      raise HTTPException(status_code=404, detail="Unknown group.")
+    _require_open(group)
+    member = group["members"].get(sender)
+    if member is None or not _host_member_active(member):
+      raise HTTPException(status_code=403, detail="Not a member of this group.")
+    _applied, record = await _store_group_edit(app, gid, message_id, sender, text, at)
+    if record is None:
+      raise HTTPException(status_code=404, detail="Message not found.")
+    relays = _edit_relays(group, envelope)
+  delivered = await _fan_out(group, relays) if relays else {}
+  undelivered = [host for host in relays if not delivered.get(host)]
+  return {"status": "ok", "undelivered": len(undelivered)}
+
+
+async def _member_accept_edit(app, gid: str, envelope: dict) -> dict:
+  meta = _load_group_meta(app, gid)
+  if meta is None:
+    return {"status": "unknown_group"}
+  if envelope["from"] != meta.get("host"):
+    raise HTTPException(status_code=403, detail="Relay is not from the group host.")
+  _require_open(meta)
+  original = envelope.get("original")
+  if (
+    not isinstance(original, dict)
+    or original.get("type") != "group_edit"
+    or original.get("gid") != gid
+    or original.get("to") != meta["host"]
+  ):
+    raise HTTPException(status_code=403, detail="Original edit is invalid.")
+  try:
+    await _verify_peer_envelope(original)
+  except HTTPException as exc:
+    raise HTTPException(status_code=403, detail="Original edit signature is invalid.") from exc
+  message_id, text, at = _edit_fields(original)
+  _applied, record = await _store_group_edit(app, gid, message_id, original["from"], text, at)
+  if record is None:
+    return {"status": "unknown_message"}
   return {"status": "ok"}
 
 
@@ -1298,7 +1405,7 @@ class GroupReaction(BaseModel):
   id: str | None = None
 
 
-async def _deliver_reaction(host: str, envelope: dict) -> tuple[str, dict]:
+async def _deliver_to_host(host: str, envelope: dict) -> tuple[str, dict]:
   """``(outcome, reply)``: delivered, refused (the host said no), or uncertain."""
   try:
     response = await _post_signed_envelope(
@@ -1416,7 +1523,7 @@ async def react_to_group_message(
     update_id=update_id,
   )
   # Never hold the member lock while contacting the host.
-  outcome, reply = await _deliver_reaction(host, envelope)
+  outcome, reply = await _deliver_to_host(host, envelope)
   if outcome == "refused":
     await result("refused")
     raise HTTPException(status_code=409, detail="The group host refused the reaction.")
@@ -1429,6 +1536,99 @@ async def react_to_group_message(
       "uncertain", "Not everyone in the group has this reaction yet. Retry to send it again.",
     )
   return await result("delivered")
+
+
+class GroupEdit(BaseModel):
+  text: str
+  id: str | None = None
+
+
+@router.post("/{gid}/messages/{message_id}/edit")
+async def edit_group_message(
+  gid: str,
+  message_id: str,
+  body: GroupEdit,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Replace the text of one of the owner's group messages for everyone.
+
+  Saved here first, as pending; it is confirmed once the host and every member
+  it relays to have it. Only a definite refusal restores the earlier text.
+  """
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  _validate_gid(gid)
+  if not _GID_RE.fullmatch(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  edit_id = body.id or str(uuid.uuid4())
+  if not isinstance(edit_id, str) or not _GID_RE.fullmatch(edit_id):
+    raise HTTPException(status_code=400, detail="Edit id is invalid.")
+  validate_edit(body.text, time.time())
+  identity = _load_identity()
+  own = _own_host()
+  path = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
+  if not path.is_file():
+    raise HTTPException(status_code=404, detail="Message not found.")
+  saved = json.loads(path.read_text())
+  if saved.get("author") != own:
+    raise HTTPException(status_code=403, detail="You can only edit your own messages.")
+  if saved.get("status") != "delivered":
+    raise HTTPException(status_code=409, detail="Only delivered messages can be edited.")
+
+  def begin(record: dict):
+    edit, new = begin_own_edit(record, body.text, edit_id)
+    return new, edit
+
+  async def settle(outcome: str, detail: str | None = None) -> dict:
+    record, _ = await _change_group_message(
+      app, gid, message_id, lambda record: (settle_own_edit(record, edit_id, outcome, detail), None),
+    )
+    return edit_result(record or {})
+
+  async with _group_lock(gid):
+    with _host_group_transaction(gid):
+      group = _load_host_group(gid)
+      if group is not None:
+        _require_open(group)
+        record, edit = await _change_group_message(app, gid, message_id, begin)
+        if record is None:
+          raise HTTPException(status_code=404, detail="Message not found.")
+        original = _edit_envelope(
+          identity, gid, own, message_id, edit["text"], edit["at"], edit_id=edit_id,
+        )
+        relays = _edit_relays(group, original)
+  if group is not None:
+    delivered = await _fan_out(group, relays) if relays else {}
+    if any(not delivered.get(host) for host in relays):
+      return await settle("uncertain", "Not everyone in the group has this edit yet. Save it again to resend.")
+    return await settle("delivered")
+
+  meta = _load_group_meta(app, gid)
+  if meta is None:
+    raise HTTPException(status_code=404, detail="Unknown group.")
+  _require_open(meta)
+  _require_accepted_group(meta)
+  host = meta["host"]
+  try:
+    host_actor = await _fetch_actor(host)
+  except HTTPException as exc:
+    raise HTTPException(status_code=502, detail="The group host couldn’t be reached.") from exc
+  if not supports_message_edits(host_actor):
+    raise HTTPException(status_code=409, detail="This group’s host doesn’t support edits yet.")
+  record, edit = await _change_group_message(app, gid, message_id, begin)
+  if record is None:
+    raise HTTPException(status_code=404, detail="Message not found.")
+  envelope = _edit_envelope(identity, gid, host, message_id, edit["text"], edit["at"], edit_id=edit_id)
+  outcome, reply = await _deliver_to_host(host, envelope)
+  if outcome == "refused":
+    await settle("refused")
+    raise HTTPException(status_code=409, detail="The group host refused the edit.")
+  if outcome == "uncertain":
+    return await settle("uncertain", "The group host didn’t confirm this edit; it may have arrived. Save it again to make sure.")
+  if reply.get("undelivered"):
+    return await settle("uncertain", "Not everyone in the group has this edit yet. Save it again to resend.")
+  return await settle("delivered")
 
 
 @router.post("/{gid}/send")

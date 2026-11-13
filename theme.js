@@ -626,6 +626,39 @@ export const CSS = `
 .cn-bubble-reply:focus-visible { opacity: 1; pointer-events: auto; }
 .cn-bubble-reply:hover { background: var(--surface-2, var(--surface)); color: var(--text); }
 .cn-bubble-actions { display: flex; align-items: center; flex: 0 0 auto; }
+.cn-bubble-edited { margin-right: 6px; font-style: italic; opacity: .8; }
+.cn-bubble-editor { display: flex; flex-direction: column; gap: 6px; min-width: min(320px, 60vw); }
+.cn-bubble-editor textarea {
+  width: 100%; resize: vertical; padding: 8px 10px; border-radius: 12px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  background: color-mix(in srgb, var(--bg) 55%, transparent); color: var(--text);
+  font: inherit; font-size: 16px; line-height: 1.4; white-space: pre-wrap;
+}
+.cn-bubble-editor textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cn-bubble-editor-actions { display: flex; justify-content: flex-end; align-items: center; gap: 0; margin-bottom: -4px; }
+.cn-bubble-editor-actions .cn-bubble-time { margin: 0 0 0 6px; }
+.cn-edit-icon {
+  position: relative; width: 30px; height: 32px; display: grid; place-items: center; padding: 0; cursor: pointer;
+  border: 0; background: transparent; color: inherit;
+}
+/* The visible circle stays small; on touch the button keeps a 44px target around it. */
+.cn-edit-icon::before {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 26px; height: 26px; transform: translate(-50%, -50%);
+  border-radius: 50%; background: color-mix(in srgb, var(--bg) 35%, transparent);
+}
+.cn-edit-icon svg { position: relative; width: 15px; height: 15px; }
+.cn-edit-icon:hover::before { background: color-mix(in srgb, var(--bg) 60%, transparent); }
+.cn-edit-icon.is-save { color: var(--text); }
+.cn-edit-icon.is-save::before { background: var(--bg); }
+.cn-edit-icon:disabled { opacity: .5; cursor: default; }
+.cn-edit-icon:focus-visible { outline: none; }
+.cn-edit-icon:focus-visible::before { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* On touch each button stays 44px tall; the tap areas of the two side-by-side icons
+   overlap a little so the circles sit close together. */
+@media (hover: none) { .cn-edit-icon { width: 44px; height: 44px; margin: 0 -6px; } }
+/* A message being edited gets more room around its editor. */
+.cn-bubble.is-editing { padding: 14px 16px 12px; }
+.cn-bubble-editor-error { margin: 0; font-size: 13px; color: var(--danger-text, var(--danger)); }
 .cn-message-line.is-mine .cn-bubble-actions { order: -1; }
 .cn-bubble-react[aria-expanded="true"] { opacity: 1; pointer-events: auto; color: var(--accent-text, var(--accent)); }
 /* Reactions get their own line, tucked under the bubble and indented past

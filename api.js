@@ -132,6 +132,11 @@ export const reactToMessage = (peer, id, emoji, on, updateId) =>
   call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/reactions`, {
     method: 'POST', body: JSON.stringify({ emoji, on, id: updateId }), timeoutMs: 30_000,
   })
+// editId is the edit's stable id: saving again under it re-sends the same edit.
+export const editMessage = (peer, id, text, editId) =>
+  call(`conversations/${encodeURIComponent(peer)}/messages/${encodeURIComponent(id)}/edit`, {
+    method: 'POST', body: JSON.stringify({ text, id: editId }), timeoutMs: 30_000,
+  })
 export const publishPost = (text, attachment, attachments, thumbnails, id) =>
   call('publish', {
     method: 'POST',
@@ -373,6 +378,10 @@ export const sendGroupMessage = (id, gid, text, attachment, replyTo) =>
 export const reactToGroupMessage = (gid, id, emoji, on, updateId) =>
   call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/reactions`, {
     method: 'POST', body: JSON.stringify({ emoji, on, id: updateId }), timeoutMs: 30_000,
+  })
+export const editGroupMessage = (gid, id, text, editId) =>
+  call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/edit`, {
+    method: 'POST', body: JSON.stringify({ text, id: editId }), timeoutMs: 30_000,
   })
 export const retryGroupMessage = (gid, id) =>
   call(`groups/${encodeURIComponent(gid)}/messages/${encodeURIComponent(id)}/retry`, {
