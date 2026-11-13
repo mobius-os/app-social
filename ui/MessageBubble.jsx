@@ -68,13 +68,16 @@ export default function MessageBubble({
                         onOpen={onOpenImage} onUnavailable={onImageUnavailable} />
           {editing
             ? <MessageEditor text={message.text} resendable={!!message.edit?.pending} onCancel={() => setEditing(false)}
-                             onSave={async (text) => { await edits.onSave(message, text); setEditing(false) }} />
-            : message.text && <RichText className="cn-bubble-copy" text={message.text} />}
-          <span className="cn-bubble-time">
-            {message.edited_at ? <span className="cn-bubble-edited" title={message.edit?.pending ? 'Edit not confirmed yet' : undefined}>
-              edited{message.edit?.pending ? ' · unconfirmed' : ''}</span> : null}
-            {message.time}{tick}
-          </span>
+                             onSave={async (text) => { await edits.onSave(message, text); setEditing(false) }}
+                             time={<span className="cn-bubble-time">{message.time}{tick}</span>} />
+            : <>
+                {message.text && <RichText className="cn-bubble-copy" text={message.text} />}
+                <span className="cn-bubble-time">
+                  {message.edited_at ? <span className="cn-bubble-edited" title={message.edit?.pending ? 'Edit not confirmed yet' : undefined}>
+                    edited{message.edit?.pending ? ' · unconfirmed' : ''}</span> : null}
+                  {message.time}{tick}
+                </span>
+              </>}
         </div>
         {/* One reading order for every bubble; CSS places your own actions first. */}
         {(canReply || canReact || canEdit) && !editing && (
@@ -109,7 +112,7 @@ export default function MessageBubble({
 }
 
 /** In-place editor for one of your messages: Enter saves, Escape cancels. */
-function MessageEditor({ text, resendable, onSave, onCancel }) {
+function MessageEditor({ text, resendable, time, onSave, onCancel }) {
   const [value, setValue] = useState(text || '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -155,6 +158,8 @@ function MessageEditor({ text, resendable, onSave, onCancel }) {
                 aria-label={busy ? 'Saving edit' : 'Save edit'} title="Save (Enter)">
           <Check aria-hidden="true" />
         </button>
+        {/* Cancel and Save share the time's line, so editing adds no extra row. */}
+        {time}
       </div>
     </div>
   )
