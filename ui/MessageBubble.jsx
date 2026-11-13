@@ -61,7 +61,7 @@ export default function MessageBubble({
       <div className={`cn-message-line ${mine ? 'is-mine' : 'is-theirs'}${indent ? ' no-avatar' : ''}`}>
         {!mine && <span className="cn-message-avatar">{avatar}</span>}
         <div
-          className={`cn-bubble ${mine ? 'is-mine' : 'is-theirs'}${message.status === 'failed' ? ' is-failed' : ''}${message.attachment ? ' has-attachment' : ''}`}
+          className={`cn-bubble ${mine ? 'is-mine' : 'is-theirs'}${message.status === 'failed' ? ' is-failed' : ''}${message.attachment ? ' has-attachment' : ''}${editing ? ' is-editing' : ''}`}
         >
           <Quote reply={message.reply_to} />
           <MessageImage attachment={message.attachment} conversationPath={conversationPath}

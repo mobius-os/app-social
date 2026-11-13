@@ -635,17 +635,26 @@ export const CSS = `
   font: inherit; font-size: 16px; line-height: 1.4; white-space: pre-wrap;
 }
 .cn-bubble-editor textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.cn-bubble-editor-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.cn-bubble-editor-actions { display: flex; justify-content: flex-end; gap: 2px; }
 .cn-edit-icon {
-  width: 34px; height: 34px; display: grid; place-items: center; padding: 0; cursor: pointer;
-  border: 0; border-radius: 50%; background: color-mix(in srgb, var(--bg) 35%, transparent); color: inherit;
+  position: relative; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; cursor: pointer;
+  border: 0; background: transparent; color: inherit;
 }
-.cn-edit-icon svg { width: 18px; height: 18px; }
-.cn-edit-icon:hover { background: color-mix(in srgb, var(--bg) 60%, transparent); }
-.cn-edit-icon.is-save { background: var(--bg); color: var(--text); }
+/* The visible circle stays small; on touch the button keeps a 44px target around it. */
+.cn-edit-icon::before {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 26px; height: 26px; transform: translate(-50%, -50%);
+  border-radius: 50%; background: color-mix(in srgb, var(--bg) 35%, transparent);
+}
+.cn-edit-icon svg { position: relative; width: 15px; height: 15px; }
+.cn-edit-icon:hover::before { background: color-mix(in srgb, var(--bg) 60%, transparent); }
+.cn-edit-icon.is-save { color: var(--text); }
+.cn-edit-icon.is-save::before { background: var(--bg); }
 .cn-edit-icon:disabled { opacity: .5; cursor: default; }
-.cn-edit-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cn-edit-icon:focus-visible { outline: none; }
+.cn-edit-icon:focus-visible::before { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (hover: none) { .cn-edit-icon { width: 44px; height: 44px; } }
+/* A message being edited gets more room around its editor. */
+.cn-bubble.is-editing { padding: 14px 16px 12px; }
 .cn-bubble-editor-error { margin: 0; font-size: 13px; color: var(--danger-text, var(--danger)); }
 .cn-message-line.is-mine .cn-bubble-actions { order: -1; }
 .cn-bubble-react[aria-expanded="true"] { opacity: 1; pointer-events: auto; color: var(--accent-text, var(--accent)); }
