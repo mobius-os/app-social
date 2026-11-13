@@ -348,7 +348,8 @@ class CommonPublicStore:
     return dict(seed or {})
 
   def set_community_role(
-    self, actor: str, target: str, role: str, seed: dict[str, str] | None = None,
+    self, actor: str, target: str, role: str, sent_at: float,
+    seed: dict[str, str] | None = None,
   ) -> dict:
     """Let the current owner make someone admin, remove admin, or hand over.
 
@@ -357,6 +358,11 @@ class CommonPublicStore:
 
     Handing over ownership makes the previous owner an admin, so the community
     always has exactly one owner and nobody loses access by surprise.
+
+    ``sent_at`` is the signed time of the request. Each owner's changes apply
+    only in signing order: a retried, replayed or late-delivered older change
+    is refused, so it can never undo a newer one (for example restore an admin
+    the owner has since removed).
     """
     if role not in ("admin", "owner", "none"):
       raise HTTPException(status_code=400, detail="Role is invalid.")
@@ -364,6 +370,11 @@ class CommonPublicStore:
       roles = self.community_roles(seed)
       if roles.get(actor) != "owner":
         raise HTTPException(status_code=403, detail="Only the community owner can change roles.")
+      signed = self._load_object(self.roles_path()).get("signed_at")
+      signed = signed if isinstance(signed, dict) else {}
+      last = signed.get(actor)
+      if isinstance(last, (int, float)) and sent_at <= last:
+        raise HTTPException(status_code=409, detail="A newer role change has already been made.")
       if target == actor:
         raise HTTPException(status_code=400, detail="The owner can’t change their own role.")
       if not isinstance(self._load_object(self.directory_path()).get(target), dict):
@@ -375,7 +386,10 @@ class CommonPublicStore:
         roles[target] = "admin"
       else:
         roles.pop(target, None)
-      atomic_write(self.roles_path(), json.dumps({"roles": roles, "updated_at": time.time()}, indent=2))
+      signed[actor] = sent_at
+      atomic_write(self.roles_path(), json.dumps(
+        {"roles": roles, "signed_at": signed, "updated_at": time.time()}, indent=2,
+      ))
       return {"roles": dict(sorted(roles.items()))}
 
   def board_dir(self) -> Path:
@@ -1859,7 +1873,7 @@ def create_public_router(
       raise HTTPException(status_code=403, detail="Join Social first.")
     return store.set_community_role(
       envelope["from"], target.strip().lower(), envelope.get("role"),
-      community_roles() if community_roles is not None else {},
+      float(envelope["sent_at"]), community_roles() if community_roles is not None else {},
     )
 
   @router.post("/gifs/key")

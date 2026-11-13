@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -46,11 +47,20 @@ def _hosts(name: str) -> list[str]:
 def community_roles() -> dict[str, str]:
   """Owner and admin hosts from the deployment settings; others are members.
 
-  COMMUNITY_OWNER_HOSTS and COMMUNITY_ADMIN_HOSTS are comma-separated member
-  hosts. A host listed in both is an owner.
+  COMMUNITY_OWNER_HOSTS names the one owner host and COMMUNITY_ADMIN_HOSTS
+  lists admin hosts, comma-separated. A host listed in both is the owner. A
+  community has exactly one owner, so an owner setting naming several hosts
+  is refused: nobody is seeded as owner and a warning is logged.
   """
   roles = {host: "admin" for host in _hosts("COMMUNITY_ADMIN_HOSTS")}
-  roles.update({host: "owner" for host in _hosts("COMMUNITY_OWNER_HOSTS")})
+  owners = _hosts("COMMUNITY_OWNER_HOSTS")
+  if len(set(owners)) > 1:
+    logging.getLogger("social").warning(
+      "COMMUNITY_OWNER_HOSTS names %d hosts; a community has one owner, so none was set.",
+      len(set(owners)),
+    )
+  elif owners:
+    roles[owners[0]] = "owner"
   return roles
 
 
