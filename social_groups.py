@@ -2026,6 +2026,8 @@ def _apply_manage(group: dict, actor: str, action: str, *, target: str | None,
     return "already_member"
   if action == "remove":
     entry = members.get(target)
+    if entry is not None and entry.get("status") == "removed":
+      return "already_removed"  # the caller re-sends the removal notice
     if entry is None or entry.get("status") in _GONE_STATES:
       return "not_member"
     entry.pop("role", None)
@@ -2070,6 +2072,11 @@ async def _host_manage(
   Callers hold the group lifecycle lock and deliver outside the transaction.
   `skip` is the requesting admin, who receives the roster in the reply rather
   than a refresh it would have to accept while still waiting on this host.
+
+  Repeating a request is how a caller retries deliveries that failed: every
+  request, including a duplicate or one that changes nothing, re-sends the
+  current roster (members keep only the newer revision), and repeating a
+  removal re-sends its notice without inviting the person again.
   """
   with _host_group_transaction(gid):
     group = _load_host_group(gid)
@@ -2083,35 +2090,35 @@ async def _host_manage(
       # Nothing changes twice, but the reply still shows the group, so the
       # sender must be allowed to manage it now, not merely when first asked.
       _require_manager(group, actor)
-      return {"status": "duplicate", **_roster_view(group)}, {}
-    _authorize_manage(group, actor, action, target)
-    status = _apply_manage(
-      group, actor, action, target=target, handle=handle, name=name, admin=admin,
-      icon=icon,
-    )
-    changed = status not in ("already_member", "not_member", "unchanged")
-    if changed:
-      group["roster_revision"] = _roster_revision(group) + 1
-    if remembered is not None:
-      group["manage_ids"] = (seen + [remembered])[-_MANAGE_ID_MEMORY:]
-    if changed or remembered is not None:
-      atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
+      status = "duplicate"
+    else:
+      _authorize_manage(group, actor, action, target)
+      status = _apply_manage(
+        group, actor, action, target=target, handle=handle, name=name, admin=admin,
+        icon=icon,
+      )
+      changed = status not in ("already_member", "already_removed", "not_member", "unchanged")
+      if changed:
+        group["roster_revision"] = _roster_revision(group) + 1
+      if remembered is not None:
+        group["manage_ids"] = (seen + [remembered])[-_MANAGE_ID_MEMORY:]
+      if changed or remembered is not None:
+        atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
     view = _roster_view(group)
     await _store_group_meta(app, gid, view)
     identity = _load_identity()
     deliveries: dict[str, dict] = {}
-    # Adding someone who is already a member deliberately retries delivery.
-    if changed or action == "add":
-      for member, entry in group["members"].items():
-        if member in (_own_host(), skip) or entry.get("status") in _GONE_STATES:
-          continue
-        deliveries[member] = _added_envelope(identity, group, member)
-    if status == "removed":
+    for member, entry in group["members"].items():
+      if member in (_own_host(), skip) or entry.get("status") in _GONE_STATES:
+        continue
+      deliveries[member] = _added_envelope(identity, group, member)
+    removed_entry = group["members"].get(target) if action == "remove" else None
+    if removed_entry is not None and removed_entry.get("status") == "removed":
       deliveries[target] = _signed({
         "v": 0, "type": "group_removed", "id": str(uuid.uuid4()),
         "from": _own_host(), "to": target, "gid": gid,
         "group_name": group["name"],
-        "invitation_version": int(group["members"][target].get("invitation_version") or 1),
+        "invitation_version": int(removed_entry.get("invitation_version") or 1),
         "sent_at": time.time(),
       }, identity)
   icon_hash = _icon_hash(view["icon"]["data_b64"]) if view["icon"] else None

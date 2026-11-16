@@ -40,7 +40,7 @@ function useGroupChange(group, onUpdated, showToast) {
       showToast(failed.length
         ? `${success} ${failed.length === 1 ? 'One member’s' : `${failed.length} members’`} Social couldn’t be reached yet.`
         : success, failed.length ? 'error' : 'success')
-      after?.()
+      after?.(result)
       return true
     } catch (failure) {
       showToast(failure.message || 'That change couldn’t be saved.', 'error')
@@ -474,12 +474,16 @@ function MembersSection({
   }
   const touchEnd = () => { if (press.current !== 'fired') clearTimeout(press.current) }
 
+  // A removal whose notice didn't reach the person keeps this dialog open, so
+  // it can be sent again; repeating a removal never adds them back.
   function confirmRemove() {
     const member = removing
     change(() => removeGroupMember(group.gid, member.host), {
       source: 'group_remove_member',
-      success: `${memberName(member)} was removed. They keep earlier messages but won’t get new ones.`,
-      after: () => setRemoving(null),
+      success: member.unreached
+        ? `Retried the removal notice for ${memberName(member)}.`
+        : `${memberName(member)} was removed. They keep earlier messages but won’t get new ones.`,
+      after: result => setRemoving(result?.delivered?.[member.host] === false ? { ...member, unreached: true } : null),
     })
   }
 
@@ -528,12 +532,19 @@ function RemoveConfirm({ member, busy, onCancel, onConfirm }) {
   return <div className="cn-scrim" role="dialog" aria-modal="true" aria-label={`Remove ${memberName(member)}`} onClick={() => { if (!busy) onCancel() }}>
     <div ref={sheetRef} tabIndex={-1} className="cn-sheet cn-gc cn-gc-small" onClick={event => event.stopPropagation()}>
       <div className="cn-grabber" aria-hidden="true" />
-      <h3 className="cn-gc-title is-left">Remove {memberName(member)}?</h3>
-      <p className="cn-sheet-body">They keep the messages they already have but won’t get new ones. You can add them again later.</p>
+      {member.unreached ? <>
+        <h3 className="cn-gc-title is-left">{memberName(member)} hasn’t been told yet</h3>
+        <p className="cn-sheet-body">They’re removed from the group, but their Social couldn’t be reached. Send the notice again so their copy shows it. This won’t add them back.</p>
+      </> : <>
+        <h3 className="cn-gc-title is-left">Remove {memberName(member)}?</h3>
+        <p className="cn-sheet-body">They keep the messages they already have but won’t get new ones. You can add them again later.</p>
+      </>}
       <div className="cn-gc-footer">
         <span className="cn-gc-spacer" />
-        <button type="button" className="cn-btn cn-btn-secondary" disabled={busy} onClick={onCancel}>Cancel</button>
-        <button type="button" className="cn-btn cn-btn-danger" disabled={busy} onClick={onConfirm}>{busy ? 'Removing…' : 'Remove'}</button>
+        <button type="button" className="cn-btn cn-btn-secondary" disabled={busy} onClick={onCancel}>{member.unreached ? 'Close' : 'Cancel'}</button>
+        {member.unreached
+          ? <button type="button" className="cn-btn cn-btn-primary" disabled={busy} onClick={onConfirm}>{busy ? 'Sending…' : 'Send again'}</button>
+          : <button type="button" className="cn-btn cn-btn-danger" disabled={busy} onClick={onConfirm}>{busy ? 'Removing…' : 'Remove'}</button>}
       </div>
     </div>
   </div>

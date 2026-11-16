@@ -228,6 +228,43 @@ class GroupRoleTests(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual((reply["status"], self.group()["name"]), ("renamed", "Second"))
 
+  async def test_repeating_a_removal_resends_its_notice_without_reinviting(self):
+    await social_groups._manage(self.app, GID, "remove", target="member.example")
+    first = self.fan_out.await_args.args[1]["member.example"]
+
+    receipt = await social_groups._manage(self.app, GID, "remove", target="member.example")
+
+    self.assertEqual(receipt["status"], "already_removed")
+    again = self.fan_out.await_args.args[1]["member.example"]
+    self.assertEqual(again["type"], "group_removed")
+    self.assertEqual(again["invitation_version"], first["invitation_version"])
+    record = self.group()["members"]["member.example"]
+    self.assertEqual((record["status"], record["invitation_version"]), ("removed", 1))
+    self.assertNotIn("member.example", {m["host"] for m in receipt["members"]})
+    self.assertEqual(self.group()["roster_revision"], 1)
+
+  async def test_repeating_an_applied_change_retries_the_roster_refresh(self):
+    await social_groups._manage(self.app, GID, "rename", target=None, name="Ours")
+    self.fan_out.reset_mock()
+
+    receipt = await social_groups._manage(self.app, GID, "rename", target=None, name="Ours")
+
+    self.assertEqual(receipt["status"], "unchanged")
+    self.assertEqual(self.delivered_types(), {
+      "admin.example": "group_added", "member.example": "group_added",
+      "other.example": "group_added",
+    })
+
+  async def test_a_duplicate_admin_request_retries_delivery(self):
+    envelope = manage_envelope("admin.example", "rename", name="Ours")
+    await social_groups._host_accept_manage(self.app, GID, envelope)
+    self.fan_out.reset_mock()
+
+    replay = await social_groups._host_accept_manage(self.app, GID, envelope)
+
+    self.assertEqual((replay["status"], replay["name"]), ("duplicate", "Ours"))
+    self.assertEqual(set(self.delivered_types()), {"member.example", "other.example"})
+
 class MemberCopyTests(unittest.IsolatedAsyncioTestCase):
   def setUp(self):
     self.temporary = tempfile.TemporaryDirectory()
