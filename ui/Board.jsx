@@ -256,17 +256,37 @@ function ProfilePreview({ host, seed, onClose, onViewProfile, onMessage, canMess
   )
 }
 
+const ROLE_LABELS = { owner: 'Owner', admin: 'Admin' }
+
+export function RoleLabel({ role }) {
+  const label = ROLE_LABELS[role]
+  return label ? <span className={`cn-role-label is-${role}`}>{label}</span> : null
+}
+
+// Owners and admins can remove other people's posts, so name whose item goes.
+function deleteSheetText(target, ownHost) {
+  const item = target.reply || target
+  const whose = item.host === ownHost ? 'your' : item.handle ? `@${item.handle}’s` : 'this'
+  return target.reply
+    ? `This removes ${whose} reply from the conversation for everyone. This can’t be undone.`
+    : `This removes ${whose} message from the community chat for everyone. This can’t be undone.`
+}
+
 export default function Board({
   me, feed, feedState, onRefresh, onOpenPerson, onMessageUser, showToast, onOpenImage,
   hasEarlier, onLoadEarlier,
   composing, setComposing, canInteract, accountState, participationIntent, intentState,
   participationBusy, onJoin, joinBusy, onRetryIntent, onRequestParticipation,
   onCompleteParticipation, onDiscardParticipation, onPostConfirmed, emojiReactions = false, replyReactions = false, reactionChoices = [],
-  replyAttachments = false, authorEdits = false,
+  replyAttachments = false, authorEdits = false, communityRoles = {},
   boardTarget, onTargetHandled,
   composerMount, scrollRef,
 }) {
   const [draft, setDraft] = useState('')
+  // The community host names its owner and admins; both may delete anyone's
+  // post or reply. Everyone else is a member.
+  const roleOf = (host) => (host && Object.hasOwn(communityRoles, host) ? communityRoles[host] : null)
+  const moderating = Boolean(canInteract && me?.host && ['owner', 'admin'].includes(roleOf(me.host)))
   // One stable id per post draft, so a retry after a lost confirmation lands once.
   const [postMessageId, setPostMessageId] = useState(null)
   const [posting, setPosting] = useState(false)
@@ -392,6 +412,25 @@ export default function Board({
     if (post) scroller.scrollTop += post.getBoundingClientRect().top - anchor.top
     return () => { scroller.style.overflowAnchor = previousAnchor }
   }, [replyPost?.id, scrollRef])
+
+  // Opening a thread near the bottom would leave its reply box under the board
+  // composer: once the thread has its replies, scroll just far enough to show it.
+  const threadRevealed = useRef(null)
+  useEffect(() => {
+    if (!replyPost) { threadRevealed.current = null; return undefined }
+    if (threadRevealed.current === replyPost.id || replyState === 'idle' || replyState === 'loading') return undefined
+    threadRevealed.current = replyPost.id
+    const frame = requestAnimationFrame(() => {
+      const scroller = scrollRef?.current
+      const thread = document.getElementById(`cn-thread-${replyPost.id}`)
+      if (!scroller || !thread) return
+      const coveredBottom = parseFloat(scroller.style.scrollPaddingBottom) || 0
+      const visibleBottom = scroller.getBoundingClientRect().bottom - coveredBottom
+      const hidden = thread.getBoundingClientRect().bottom - visibleBottom
+      if (hidden > 0) scroller.scrollBy({ top: hidden + 8, behavior: 'smooth' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [replyPost?.id, replyState, scrollRef])
 
   function keepPostPosition(post) {
     const element = post && document.getElementById(`cn-post-${post.id}`)
@@ -1263,7 +1302,7 @@ export default function Board({
             ? () => setPreviewPost(previewPost?.id === post.id ? null : { id: post.id, host: post.host })
             : null
           return (
-            <article id={`cn-post-${post.id}`} tabIndex={-1} className={`cn-post${threadOpen ? ' has-thread' : ''}${me?.host && post.host === me.host ? ' is-mine' : ''}`} key={post.id}
+            <article id={`cn-post-${post.id}`} tabIndex={-1} className={`cn-post${threadOpen ? ' has-thread' : ''}${me?.host && post.host === me.host ? ' is-mine' : ''}${moderating && !mine ? ' is-moderated' : ''}`} key={post.id}
                      onClick={(event) => {
                        if (!event.target.closest('button, input, textarea, a, .cn-avatar')) openReplies(post)
                      }}>
@@ -1272,13 +1311,13 @@ export default function Board({
                 <div className="cn-post-head">
                   <button className="cn-person" onClick={togglePreview} disabled={!canInteract}>
                     <span className="cn-person-name">{post.handle ? `@${post.handle}` : 'Social member'}</span>
-                    <span className="cn-post-dot" aria-hidden="true">·</span>
-                    <span className="cn-meta">{postDateTime(post.created_at)}</span>
+                    <RoleLabel role={roleOf(post.host)} />
                     <EditedMark editedAt={post.edited_at} />
                   </button>
-                  {mine && !editingPost && (
+                  <time className="cn-meta cn-post-time" dateTime={post.created_at || undefined}>{postDateTime(post.created_at)}</time>
+                  {(mine || moderating) && !editingPost && (
                     <OwnActions kind="message" disabled={handoffBusy || participationBusy || Boolean(editing?.saving)}
-                      onEdit={authorEdits ? () => startEdit(post.id, null, post.text) : null}
+                      onEdit={mine && authorEdits ? () => startEdit(post.id, null, post.text) : null}
                       onDelete={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }} />
                   )}
                 </div>
@@ -1315,13 +1354,13 @@ export default function Board({
                     ? 'Reply to post'
                     : `${threadOpen ? 'Hide' : 'Show'} ${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}`}
                 >
-                  {Array.isArray(post.reply_authors) && post.reply_authors.length > 0 && (
+                  {Array.isArray(post.reply_authors) && post.reply_authors.length > 0 ? (
                     <span className="cn-reply-avatars" aria-hidden="true">
                       {post.reply_authors.map((author) => (
                         <Avatar key={author.host} name={author.handle} host={author.host} size="micro" remote lazy />
                       ))}
                     </span>
-                  )}
+                  ) : <Chat className="cn-reply-icon" aria-hidden="true" />}
                   <span>{replyActionLabel(replyCount)}</span>
                 </button>
                 <ReactionControls item={post} target={{ postId: post.id }}
@@ -1352,15 +1391,16 @@ export default function Board({
                           <Avatar name={reply.handle} host={reply.host} size="small" remote />
                           <div className="cn-reply-copy">
                             <div className="cn-reply-meta">
-                              <strong>{reply.handle ? `@${reply.handle}` : 'Social member'}</strong>
+                              <strong>{reply.handle ? `@${reply.handle}` : 'Social member'}
+                                <RoleLabel role={roleOf(reply.host)} /></strong>
                               <span className="cn-time">
                                 {reply.pending ? 'Sending…' : timeAgo(reply.created_at)}
                                 <EditedMark editedAt={reply.edited_at} />
                               </span>
-                              {canInteract && me?.host && reply.host === me.host && !reply.pending
+                              {canInteract && me?.host && (reply.host === me.host || moderating) && !reply.pending
                                 && !reply.id.startsWith('local-') && !isEditing(post.id, reply.id) && (
                                 <OwnActions kind="reply" compact disabled={handoffBusy || participationBusy || Boolean(editing?.saving)}
-                                  onEdit={authorEdits ? () => startEdit(post.id, reply, reply.text) : null}
+                                  onEdit={reply.host === me.host && authorEdits ? () => startEdit(post.id, reply, reply.text) : null}
                                   onDelete={() => { restoreDeleteFocus.current = true; setDeleteTarget({ post, reply }) }} />
                               )}
                             </div>
@@ -1422,10 +1462,9 @@ export default function Board({
                   <span className="cn-person-name">
                     {pending.handle ? `@${pending.handle}` : 'You'}
                   </span>
-                  <span className="cn-post-dot" aria-hidden="true">·</span>
-                  <span className="cn-meta cn-pending-status">
-                    {pending.phase === 'preparing' ? 'Preparing photo…' : 'Sending…'}
-                  </span>
+                </span>
+                <span className="cn-meta cn-post-time cn-pending-status">
+                  {pending.phase === 'preparing' ? 'Preparing photo…' : 'Sending…'}
                 </span>
               </div>
               <div className="cn-post-body">
@@ -1467,9 +1506,9 @@ export default function Board({
           </Composer>
           <GifPicker open={postGif.picking} onClose={postGif.close} onPick={pickPostGif} />
         </> : <div className="cn-board-join">
+          <span className="cn-board-join-text">Join to post, reply and react.</span>
           <button className="cn-btn cn-btn-primary" type="button" onClick={onJoin}
-                  disabled={joinBusy}>Join Social to message</button>
-          <p className="cn-composer-disclosure">Community is open to read. Join to message and open Chats and People.</p>
+                  disabled={joinBusy}>Join</button>
         </div>}
       </ComposerFooter>, composerMount)}
 
@@ -1480,11 +1519,7 @@ export default function Board({
                onClick={(e) => e.stopPropagation()}>
             <div className="cn-grabber" aria-hidden="true" />
             <h3 id="cn-delete-title" className="cn-sheet-title">{deleteTarget.reply ? 'Delete this reply?' : 'Delete this message?'}</h3>
-            <p className="cn-sheet-body">
-              {deleteTarget.reply
-                ? 'This removes your reply from the conversation for everyone. This can’t be undone.'
-                : 'This removes your message from the community chat for everyone. This can’t be undone.'}
-            </p>
+            <p className="cn-sheet-body">{deleteSheetText(deleteTarget, me?.host)}</p>
             <div className="cn-sheet-actions">
               <button className="cn-btn cn-btn-secondary" onClick={() => setDeleteTarget(null)}>
                 Cancel

@@ -59,11 +59,12 @@ test('an aborted target cannot reopen after a newer notification', async () => {
 
 test('leaving Community cancels its target before a private notification lookup begins', () => {
   const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
-  assert.match(source, /function selectTab\(next\) \{\s*if \(next !== 'board'\) finishBoardTarget\(\)/)
+  assert.match(source, /function showTab\(next\) \{\s*if \(next !== 'board'\) finishBoardTarget\(\)/)
+  assert.match(source, /function selectTab\(next\) \{[\s\S]*?showTab\(next\)/)
   assert.doesNotMatch(source, /setTab\('(messages|people)'\)/)
   for (const kind of ['dm', 'group']) {
     const branch = source.slice(source.indexOf(`else if (kind === '${kind}')`)).split('\n    }')[0]
-    assert.match(branch, /selectTab\('messages'\)[\s\S]*await api\./)
+    assert.match(branch, /showTab\('messages'\)[\s\S]*await api\./)
   }
 })
 

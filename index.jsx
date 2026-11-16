@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Chat, Globe, Users } from '@openai/apps-sdk-ui/components/Icon'
+import { Chat, Globe, SettingsCog, Users } from '@openai/apps-sdk-ui/components/Icon'
+import CommunitySettings from './ui/CommunitySettings.jsx'
 import { CSS } from './theme.js'
 import * as api from './api.js'
 import Board, { Avatar } from './ui/Board.jsx'
@@ -78,13 +79,22 @@ function JoinAccess({ area, me, loading, busy, error, onJoin }) {
   )
 }
 
-function MainNavigation({ className = '', tab, unread, boardActivity, onSelect }) {
+function MainNavigation({ className = '', tab, unread, boardActivity, onSelect, onCommunitySettings = null }) {
   return (
     <nav className={`cn-nav ${className}`.trim()} aria-label="Main navigation">
-      <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-label="Community" title="Community" aria-current={tab === 'board' ? 'page' : undefined} onClick={() => onSelect('board')}>
-        {boardActivity && <span className="cn-nav-dot" aria-label="New board activity" />}
-        <Globe aria-hidden="true" /><span className="cn-tab-label">Community</span>
-      </button>
+      {/* The settings cog is a sibling inside the Community pill, not nested in the tab button. */}
+      <span className={`cn-nav-slot${tab === 'board' && onCommunitySettings ? ' has-cog' : ''}`}>
+        <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-label="Community" title="Community" aria-current={tab === 'board' ? 'page' : undefined} onClick={() => onSelect('board')}>
+          {boardActivity && <span className="cn-nav-dot" aria-label="New board activity" />}
+          <Globe aria-hidden="true" /><span className="cn-tab-label">Community</span>
+        </button>
+        {tab === 'board' && onCommunitySettings && (
+          <button type="button" className="cn-nav-cog" aria-label="Community settings" title="Community settings"
+                  aria-haspopup="dialog" onClick={onCommunitySettings}>
+            <SettingsCog aria-hidden="true" />
+          </button>
+        )}
+      </span>
       <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} aria-label={unread ? `Chats, ${unread} unread` : 'Chats'} title="Chats" aria-current={tab === 'messages' ? 'page' : undefined} onClick={() => onSelect('messages')}>
         {unread > 0 && <span className="cn-badge">{unread}</span>}
         <Chat aria-hidden="true" /><span className="cn-tab-label">Chats</span>
@@ -112,6 +122,7 @@ export default function App({ appId, token }) {
   // stable boundary, while null explicitly means the first page is complete.
   const feedNextCursorRef = useRef(undefined)
   const [feedCapabilities, setFeedCapabilities] = useState({})
+  const [communitySettingsOpen, setCommunitySettingsOpen] = useState(false)
   const [boardTarget, setBoardTarget] = useState(null)
   const targetRequest = useRef(null)
   const boardScrollRef = useRef(null)
@@ -127,9 +138,20 @@ export default function App({ appId, token }) {
     setBoardTarget(null)
   }, [])
 
-  function selectTab(next) {
+  function showTab(next) {
     if (next !== 'board') finishBoardTarget()
     setTab(next)
+  }
+  // Each tab switch is a real browser history step, so browser Back and the
+  // phone back gesture move between tabs.
+  function selectTab(next) {
+    if (next === tab) return
+    const previous = tab
+    showTab(next)
+    window.mobius?.nav?.open?.('social-tab', {
+      onBack: () => showTab(previous),
+      onForward: () => showTab(next),
+    })
   }
   const [conversations, setConversations] = useState([])
   const [groups, setGroups] = useState([])
@@ -146,7 +168,6 @@ export default function App({ appId, token }) {
   const [creatingGroup, setCreatingGroup] = useState(false)
   const [participationIntent, setParticipationIntent] = useState(null)
   const [intentState, setIntentState] = useState('loading')
-  const [appIconUrl, setAppIconUrl] = useState(null)
   const navHandle = useRef(null)
   // The shell hides background panes without changing document visibility.
   const [foreground, setForeground] = useState(true)
@@ -376,9 +397,6 @@ export default function App({ appId, token }) {
     loadBootstrap()
     loadSavedParticipationIntent()
     const loadDeferred = () => {
-      api.getAppIcon(appId)
-        .then((blob) => setAppIconUrl(URL.createObjectURL(blob)))
-        .catch(() => {})
       if (meRef.current?.joined && meRef.current?.registration !== 'missing') {
         api.searchPeople('', undefined, { background: true })
           .then((found) => window.mobius?.storage?.set('cache/people.json', {
@@ -519,12 +537,12 @@ export default function App({ appId, token }) {
         if (!target) showToast('This community notification couldn’t be opened.', 'error')
       }
     } else if (kind === 'dm') {
-      selectTab('messages')
+      showTab('messages')
       if (!meRef.current?.joined || meRef.current?.registration === 'missing') return
       const convo = (await api.listConversations()).find((item) => item.peer === id)
       openThread(id, convo?.peer_handle, api.requestStatus(convo) === 'pending')
     } else if (kind === 'group') {
-      selectTab('messages')
+      showTab('messages')
       if (!meRef.current?.joined || meRef.current?.registration === 'missing') return
       openGroup(await api.getGroup(id))
     }
@@ -532,7 +550,7 @@ export default function App({ appId, token }) {
   useEffect(() => {
     const listener = (event) => {
       if (event.source !== window.parent || !event.data) return
-      onShellMessage.current(event.data).catch(() => selectTab('messages'))
+      onShellMessage.current(event.data).catch(() => showTab('messages'))
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
@@ -540,12 +558,12 @@ export default function App({ appId, token }) {
 
   // ── thread navigation with a real shell back target ───────────────────────
   function openAnyThread(next) {
-    selectTab('messages')
+    showTab('messages')
     navHandle.current?.close()
     let handle = null
     handle = window.mobius?.nav?.open?.('common-thread', {
       onBack: () => { navHandle.current = null; setThread(null); loadConversations() },
-      onForward: () => { selectTab('messages'); navHandle.current = handle; setThread(next) },
+      onForward: () => { showTab('messages'); navHandle.current = handle; setThread(next) },
     })
     navHandle.current = handle || null
     setThread(next)
@@ -653,11 +671,46 @@ export default function App({ appId, token }) {
     activeConversations.reduce((sum, c) => sum + (c.unread || 0), 0) +
     activeGroups.reduce((sum, g) => sum + (g.unread || 0), 0)
   const canParticipate = participationStep(me) === 'ready' && me?.registration !== 'missing'
+  const communityRoles = feedCapabilities.roles && typeof feedCapabilities.roles === 'object' ? feedCapabilities.roles : {}
+  const myRole = me?.host && Object.hasOwn(communityRoles, me.host) ? communityRoles[me.host] : null
+  const canEditCommunity = canParticipate && (myRole === 'owner' || myRole === 'admin')
 
   // ── render ────────────────────────────────────────────────────────────────
+  // The Social header and tabs stay on screen while a chat is open; a chat
+  // counts as the Chats tab, and choosing any tab leaves the chat.
+  const renderHeader = (activeTab, onSelect) => (
+    <header className="cn-header">
+      <div className="cn-header-top">
+      <h1 className="cn-title">Social</h1>
+      {meState === 'loading' ? (
+        <div className="cn-header-chip is-loading" aria-hidden="true">
+          <span className="cn-header-chip-avatar-skeleton" />
+          <span className="cn-header-chip-line-skeleton" />
+        </div>
+      ) : me?.handle ? (
+        <div className="cn-header-chip">
+          <Avatar name={me.handle} host={me?.host} size="small" remote />
+          <span>{`@${me.handle}`}</span>
+        </div>
+      ) : null}
+      </div>
+      <MainNavigation className="cn-nav-seg" tab={activeTab} unread={unread}
+                      boardActivity={boardActivity} onSelect={onSelect}
+                      onCommunitySettings={canEditCommunity ? () => setCommunitySettingsOpen(true) : null} />
+      {!canParticipate && meState !== 'loading' && (
+        <p className="cn-header-note">Community is open to read. Join to message and open Chats and People.</p>
+      )}
+    </header>
+  )
+  function leaveThreadFor(next) {
+    closeThread()
+    if (next !== tab) selectTab(next)
+  }
+
   if (thread && canParticipate) {
     return (
       <div className="cn-root"><style>{CSS}</style>
+        {renderHeader('messages', leaveThreadFor)}
         {thread.kind === 'group' ? (
           <GroupThread
             key={thread.group.gid}
@@ -668,6 +721,8 @@ export default function App({ appId, token }) {
             onBack={closeThread}
             showToast={showToast}
             onOpenImage={openLightbox}
+            onOpenPerson={(host) => { closeThread(); setProfileRequest(host); selectTab('people') }}
+            onMessageUser={(host, name) => openThread(host, name)}
           />
         ) : (
           <Thread
@@ -692,29 +747,7 @@ export default function App({ appId, token }) {
   return (
     <div className="cn-root">
       <style>{CSS}</style>
-      <header className="cn-header">
-        <div className="cn-brand">
-          {appIconUrl
-            ? <img className="cn-app-icon" src={appIconUrl} alt="" draggable="false" />
-            : <span className="cn-mark" aria-hidden="true"><span className="cn-mark-orbit" /></span>}
-          <h1 className="cn-title">Social</h1>
-        </div>
-        <MainNavigation className="cn-nav-wide" tab={tab} unread={unread}
-                        boardActivity={boardActivity} onSelect={selectTab} />
-        <MainNavigation className="cn-nav-mobile" tab={tab} unread={unread}
-                        boardActivity={boardActivity} onSelect={selectTab} />
-        {meState === 'loading' ? (
-          <div className="cn-header-chip is-loading" aria-hidden="true">
-            <span className="cn-header-chip-avatar-skeleton" />
-            <span className="cn-header-chip-line-skeleton" />
-          </div>
-        ) : me?.handle ? (
-          <div className="cn-header-chip">
-            <Avatar name={me.handle} host={me?.host} size="small" remote />
-            <span>{`@${me.handle}`}</span>
-          </div>
-        ) : null}
-      </header>
+      {renderHeader(tab, selectTab)}
 
       <div ref={boardScrollRef} className={`cn-scroll${tab === 'board' ? ' is-board' : ''}`}>
         {tab === 'board' && <div className="cn-content">
@@ -745,6 +778,7 @@ export default function App({ appId, token }) {
                  replyReactions={Boolean(feedCapabilities.reply_reactions)}
                  reactionChoices={offeredReactions(feedCapabilities)}
                  authorEdits={Boolean(feedCapabilities.author_edits)}
+                 communityRoles={communityRoles}
                  replyAttachments={Boolean(feedCapabilities.reply_attachments)}
                  boardTarget={boardTarget} onTargetHandled={finishBoardTarget}
                  composerMount={composerMount} scrollRef={boardScrollRef}
@@ -763,10 +797,9 @@ export default function App({ appId, token }) {
                       messageRequests={pendingConversations} groupRequests={pendingGroups}
                       loadState={messagesState} onRetry={loadConversations}
                       creating={creatingGroup} setCreating={setCreatingGroup}
-                      onOpenThread={(peer) => openThread(peer)}
+                      onOpenThread={(peer, name) => openThread(peer, name)}
                       onOpenMessageRequest={(peer, name) => openThread(peer, name, true)}
                       onOpenGroup={openGroup}
-                      onFindPeople={() => selectTab('people')}
                       onGroupsChanged={openCreatedGroup}
                       showToast={showToast} />
           ) : (
@@ -776,6 +809,8 @@ export default function App({ appId, token }) {
         )}
         {tab === 'people' && (
           canParticipate ? <People me={me} canMessage={canParticipate}
+                  communityRoles={communityRoles}
+                  onRolesChanged={() => loadFeed()}
                   onMessage={(host, name) => openThread(host, name)} showToast={showToast}
                   requestedProfile={profileRequest}
                   onProfileRequestHandled={() => setProfileRequest(null)} />
@@ -788,6 +823,11 @@ export default function App({ appId, token }) {
 
       {toast && <div className={`cn-toast${toast.kind ? ` is-${toast.kind}` : ''}`} role="status">{toast.text}</div>}
       <Lightbox image={lightbox} onClose={() => setLightbox(null)} />
+      {communitySettingsOpen && canEditCommunity && (
+        <CommunitySettings me={me} roles={communityRoles} showToast={showToast}
+                           onRolesChanged={() => loadFeed()}
+                           onClose={() => setCommunitySettingsOpen(false)} />
+      )}
     </div>
   )
 }

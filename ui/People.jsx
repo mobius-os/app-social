@@ -1,14 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search, Telescope } from '@openai/apps-sdk-ui/components/Icon'
-import { searchPeople } from '../api.js'
+import { searchPeople, sendMessage, setCommunityRole } from '../api.js'
+import { TEXT_LIMITS } from '../text_limits.js'
+import Composer from './Composer.jsx'
+import { GifButton, GifPicker, SelectedGifStrip, useGifChoice } from './Gifs.jsx'
+import { gifCaptionLimit, gifTextOverflow, withGif } from '../gifs.js'
 import { noteAvatarDigests } from '../avatarHints.js'
-import { Avatar, useProfile } from './Board.jsx'
+import { Avatar, RoleLabel, useProfile } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
 import { focusProfileReturnTarget, membershipDuration } from '../profile.js'
+import { roleChangedMessage, roleOf as roleIn } from './communityRoles.js'
 
 const DIRECTORY_CACHE_MAX_AGE_MS = 60_000
 
-export default function People({ me, canMessage, onMessage, showToast, requestedProfile, onProfileRequestHandled }) {
+export default function People({
+  me, canMessage, onMessage, showToast, requestedProfile, onProfileRequestHandled,
+  communityRoles = {}, onRolesChanged,
+}) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState(null)
   const [state, setState] = useState('loading')
@@ -23,7 +31,11 @@ export default function People({ me, canMessage, onMessage, showToast, requested
     restoreProfileFocus.current = true
     setSelectedHost(null)
   }
-  const profileRef = useModalFocus(Boolean(selectedHost), closeProfile)
+  const gifChoice = useGifChoice()
+  // The GIF picker is its own modal (portalled outside this sheet), so the
+  // profile hands over Escape and Tab while it is open and keeps its focus.
+  const profileRef = useModalFocus(Boolean(selectedHost) && !gifChoice.picking, closeProfile,
+                                   !gifChoice.picking)
 
   // A profile opened from the Board crosses into this People surface, so its
   // original avatar button is already disconnected when the sheet closes.
@@ -97,10 +109,56 @@ export default function People({ me, canMessage, onMessage, showToast, requested
   const { profile, state: profileState } = useProfile(selectedHost, selectedSeed, profileAttempt)
 
   const profileTenure = profileState === 'ready' && profile ? membershipDuration(profile) : ''
+  const roleOf = (host) => roleIn(communityRoles, host)
+  const isOwner = Boolean(canMessage && me?.host && roleOf(me.host) === 'owner')
+  const [roleBusy, setRoleBusy] = useState(false)
+  const [confirmHandover, setConfirmHandover] = useState(false)
+  useEffect(() => { setConfirmHandover(false) }, [selectedHost])
+  // The profile sheet carries its own message box, so a first message needs
+  // no detour through an empty thread. Sending opens the conversation.
+  const [draft, setDraft] = useState('')
+  const [sending, setSending] = useState(false)
+  useEffect(() => { setDraft(''); gifChoice.setGif(null); gifChoice.close() }, [selectedHost])
+  const profileOverLimit = gifTextOverflow(draft, gifChoice.gif, TEXT_LIMITS.message)
+  async function sendFromProfile(event) {
+    event.preventDefault()
+    const gif = gifChoice.gif
+    const text = withGif(draft, gif)
+    if (!text || sending || !profile || gifTextOverflow(draft, gif, TEXT_LIMITS.message)) return
+    const target = profile
+    setSending(true)
+    try {
+      const result = await sendMessage(crypto.randomUUID(), target.host, text, target.handle)
+      if (result?.status === 'failed') {
+        showToast(result.detail || 'This person couldn’t be reached.', 'error')
+      }
+      setDraft('')
+      gifChoice.setGif(null)
+      closeProfile()
+      onMessage(target.host, target.handle)
+    } catch (error) {
+      showToast(error.message || 'The message couldn’t be sent.', 'error')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  async function changeRole(target, role) {
+    setRoleBusy(true)
+    try {
+      await setCommunityRole(target.host, role)
+      showToast(roleChangedMessage(target, role), 'success')
+      setConfirmHandover(false)
+      await onRolesChanged?.()
+    } catch (error) {
+      showToast(error.message || 'The role couldn’t be changed.', 'error')
+    } finally {
+      setRoleBusy(false)
+    }
+  }
 
   return (
     <div className={`cn-content cn-screen${selectedHost ? ' has-dialog' : ''}`}>
-      <div className="cn-view-heading"><div><h2>People</h2><p>Find someone by their Möbius handle.</p></div></div>
       <div className="cn-search">
         <Search aria-hidden="true" />
         <input
@@ -185,21 +243,55 @@ export default function People({ me, canMessage, onMessage, showToast, requested
                 <div className="cn-profile-head">
                   <Avatar name={profile.handle} host={profile.host} size="large" remote />
                   <div className="cn-profile-copy">
-                    <h3 className="cn-profile-name">{profile.handle ? `@${profile.handle}` : 'Social member'}</h3>
+                    <h3 className="cn-profile-name">{profile.handle ? `@${profile.handle}` : 'Social member'}
+                      <RoleLabel role={roleOf(profile.host)} /></h3>
                     {profileTenure && <p className="cn-profile-tenure">{profileTenure}</p>}
                   </div>
                 </div>
                 {profile.bio ? <p className="cn-bio">{profile.bio}</p> : null}
-                <div className="cn-sheet-actions">
-                  {canMessage && profile.host !== me?.host && (
-                    <button
-                      className="cn-btn cn-btn-primary"
-                      onClick={() => { const p = profile; closeProfile(); onMessage(p.host, p.handle) }}
-                    >
-                      Message directly
-                    </button>
-                  )}
-                </div>
+                {canMessage && profile.host !== me?.host && (
+                  <Composer className="cn-profile-composer" value={draft}
+                            onChange={setDraft}
+                            onSubmit={sendFromProfile} disabled={sending}
+                            sendDisabled={sending || profileOverLimit > 0 || (!draft.trim() && !gifChoice.gif)}
+                            maxLength={gifCaptionLimit(TEXT_LIMITS.message, gifChoice.gif)}
+                            overLimit={profileOverLimit}
+                            placeholder={profile.handle ? `Message @${profile.handle}` : 'Message'}
+                            gifAction={<GifButton onClick={gifChoice.open} disabled={sending} />}>
+                    {gifChoice.gif && <SelectedGifStrip gif={gifChoice.gif} disabled={sending}
+                                                        onRemove={() => gifChoice.setGif(null)} />}
+                  </Composer>
+                )}
+                <GifPicker open={gifChoice.picking} onClose={gifChoice.close} onPick={gifChoice.pick} />
+                {isOwner && profile.host !== me?.host && (
+                  <section className="cn-role-manage" aria-label="Community role">
+                    <h4>Community role</h4>
+                    {confirmHandover ? (
+                      <>
+                        <p className="cn-sheet-body">
+                          Make {profile.handle ? `@${profile.handle}` : 'them'} the Community owner? You’ll become an admin,
+                          and only the new owner can change roles after this.
+                        </p>
+                        <div className="cn-sheet-actions">
+                          <button className="cn-btn cn-btn-secondary" disabled={roleBusy}
+                                  onClick={() => setConfirmHandover(false)}>Cancel</button>
+                          <button className="cn-btn cn-btn-danger" disabled={roleBusy}
+                                  onClick={() => changeRole(profile, 'owner')}>Make owner</button>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="cn-sheet-actions">
+                        {roleOf(profile.host) === 'admin'
+                          ? <button className="cn-btn cn-btn-secondary" disabled={roleBusy}
+                                    onClick={() => changeRole(profile, 'none')}>Remove admin</button>
+                          : <button className="cn-btn cn-btn-secondary" disabled={roleBusy}
+                                    onClick={() => changeRole(profile, 'admin')}>Make admin</button>}
+                        <button className="cn-btn cn-btn-ghost" disabled={roleBusy}
+                                onClick={() => setConfirmHandover(true)}>Make owner…</button>
+                      </div>
+                    )}
+                  </section>
+                )}
               </>
             )}
           </div>

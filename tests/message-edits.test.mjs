@@ -40,7 +40,7 @@ test('Edit is offered only on your own delivered text, right after the reaction 
   assert.match(bubble, /const canEdit = mine && !!edits\?\.canEdit && message\.status === 'delivered'/)
   assert.match(bubble, /!splitGifMessage\(message\.text\)/)
   assert.ok(bubble.indexOf('<MessageReactButton') < bubble.indexOf('aria-label="Edit message"'))
-  assert.ok(bubble.indexOf('aria-label="Edit message"') < bubble.indexOf('className="cn-bubble-reply" type="button" onClick={onReply}'))
+  assert.ok(bubble.indexOf('aria-label="Edit message"') < bubble.indexOf('onClick={onReply}'))
   // Enter saves and Escape cancels, inside the bubble.
   assert.match(bubble, /event\.key === 'Escape'[\s\S]*onCancel\(\)/)
   assert.match(bubble, /event\.key === 'Enter' && !event\.shiftKey/)
