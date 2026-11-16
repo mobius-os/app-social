@@ -629,7 +629,7 @@ export const CSS = `
   flex: 1; min-height: 0; overflow-y: auto; padding: 18px 16px;
   display: flex; flex-direction: column; gap: 8px;
 }
-.cn-message-log { display: flex; flex-direction: column; gap: 8px; }
+.cn-message-log { display: flex; flex-direction: column; gap: 8px; container-type: inline-size; }
 .cn-history-more {
   align-self: center; min-height: 44px; padding: 7px 13px; margin-bottom: 4px;
   border: 1px solid var(--border); border-radius: 999px;
@@ -866,8 +866,11 @@ export const CSS = `
   box-shadow: 0 6px 18px color-mix(in srgb, #000 30%, transparent);
   opacity: 0; pointer-events: none; transition: opacity .12s ease;
 }
-/* Always at the bubble's top-right corner: theirs grow outward, yours grow inward (they sit at the edge). */
-.cn-message-line.is-theirs .cn-msg-toolbar { left: calc(100% - 28px); }
+/* Both grow inward from the conversation's edge, so they never leave it: yours
+   from the bubble's top-right, theirs from the start of the message row (the
+   row, not the bubble, positions it) and never wider than the conversation. */
+.cn-message-line.is-theirs .cn-bubble-wrap { position: static; }
+.cn-message-line.is-theirs .cn-msg-toolbar { left: 0; width: max-content; max-width: 100cqw; flex-wrap: wrap; }
 .cn-message-line.is-mine .cn-msg-toolbar { right: 10px; }
 .cn-message-line.is-mine .cn-msg-menu { left: auto; right: 0; }
 .cn-message-line.is-mine .cn-msg-toolbar .cn-bubble-reply { order: 0; }

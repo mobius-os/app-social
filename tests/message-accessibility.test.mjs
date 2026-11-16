@@ -47,7 +47,7 @@ test('message chrome stays legible, uncopied and at least 44px to touch', () => 
   assert.match(CSS, /\.cn-failed-note svg \{[^}]*color: var\(--danger\);/)
   assert.match(CSS, /\.cn-history-more \{[^}]*min-height: 44px;/)
   assert.match(CSS, /\.cn-inbox-heading button \{[^}]*min-height: 44px;/)
-  assert.match(CSS, /\.cn-message-log \{ display: flex; flex-direction: column; gap: 8px; \}/)
+  assert.match(CSS, /\.cn-message-log \{ display: flex; flex-direction: column; gap: 8px;[^}]*\}/)
 })
 
 test('the message log announces arrivals, not the backlog present when it opens', () => {
