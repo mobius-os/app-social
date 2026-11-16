@@ -1982,6 +1982,13 @@ def _require_manager(group: dict, actor: str) -> str:
   return role
 
 
+def _active_member_count(group: dict) -> int:
+  # Removed and declined entries stay as lifecycle history but hold no place.
+  return sum(
+    1 for entry in group["members"].values() if entry.get("status") not in _GONE_STATES
+  )
+
+
 def _authorize_manage(group: dict, actor: str, action: str, target: str | None) -> None:
   """The creator manages everything; an admin manages ordinary members."""
   if _require_manager(group, actor) == "creator":
@@ -2005,9 +2012,11 @@ def _apply_manage(group: dict, actor: str, action: str, *, target: str | None,
   members = group["members"]
   if action == "add":
     entry = members.get(target)
+    if (entry is None or entry.get("status") in _GONE_STATES) and (
+      _active_member_count(group) >= MAX_GROUP_MEMBERS
+    ):
+      raise HTTPException(status_code=400, detail="The group is full.")
     if entry is None:
-      if len(members) >= MAX_GROUP_MEMBERS:
-        raise HTTPException(status_code=400, detail="The group is full.")
       members[target] = {
         "handle": handle, "invited_at": time.time(), "status": "invited",
         "invitation_id": str(uuid.uuid4()), "invitation_version": 1,

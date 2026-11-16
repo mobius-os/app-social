@@ -265,6 +265,28 @@ class GroupRoleTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual((replay["status"], replay["name"]), ("duplicate", "Ours"))
     self.assertEqual(set(self.delivered_types()), {"member.example", "other.example"})
 
+  async def test_removed_members_free_their_place_but_keep_their_history(self):
+    members = {HOST: {"handle": "creator", "status": "active"}}
+    for index in range(1, social_groups.MAX_GROUP_MEMBERS):
+      members[f"m{index}.example"] = {"handle": f"m{index}", "status": "active"}
+    self.write_group(members)
+    with self.assertRaises(HTTPException) as raised:
+      await social_groups._manage(self.app, GID, "add", target="new.example")
+    self.assertEqual(raised.exception.status_code, 400)
+
+    await social_groups._manage(self.app, GID, "remove", target="m1.example")
+    receipt = await social_groups._manage(self.app, GID, "add", target="new.example")
+
+    self.assertEqual(receipt["status"], "added")
+    self.assertEqual(self.group()["members"]["m1.example"]["status"], "removed")
+    # Full again: neither someone new nor the removed person fits.
+    for target in ("other-new.example", "m1.example"):
+      with self.subTest(target=target):
+        with self.assertRaises(HTTPException) as raised:
+          await social_groups._manage(self.app, GID, "add", target=target)
+        self.assertEqual(raised.exception.status_code, 400)
+
+
 class MemberCopyTests(unittest.IsolatedAsyncioTestCase):
   def setUp(self):
     self.temporary = tempfile.TemporaryDirectory()
