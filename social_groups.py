@@ -244,22 +244,29 @@ async def _apply_member_group_lifecycle(
       )
       status = "deleted"
     elif kind == "group_removed":
-      if not meta:
-        return "unknown_group"
       if meta.get("deleted_at"):
         return "deleted"
-      if invitation_version < int(meta.get("invitation_version") or 0):
+      current_version = int(meta.get("invitation_version") or 0)
+      if invitation_version < current_version:
         return "stale"  # a delayed removal must not undo a later re-invitation
-      if meta.get("removed_at"):
-        return "removed"
+      if meta.get("removed_at") and invitation_version == current_version:
+        return "already_removed"
       merged = dict(meta)
+      if not meta:
+        # The removal overtook the first invitation. Keep it as a hidden
+        # tombstone so that delayed invitation cannot open a request.
+        merged.update(gid=gid, host=sender, name=updates.get("name") or "Group", members=[])
+        status = "removed_unseen"
+      else:
+        status = "already_removed" if meta.get("removed_at") else "removed"
       merged.update(
-        removed_at=time.time(), unread=0, request_count=0,
+        # Only a strictly newer membership (a re-invitation) reopens the group.
+        invitation_version=invitation_version,
+        removed_at=meta.get("removed_at") or time.time(), unread=0, request_count=0,
         request_status=(
-          "declined" if _group_request_state(meta) == "pending" else "accepted"
+          "accepted" if meta and _group_request_state(meta) == "accepted" else "declined"
         ),
       )
-      status = "removed"
     else:
       if meta.get("deleted_at"):
         _require_open(meta)
@@ -788,7 +795,7 @@ async def _accept_group_envelope(
       ):
         raise HTTPException(status_code=400, detail="Invitation version is invalid.")
       status = await _apply_member_group_lifecycle(
-        app, gid, sender, kind, {}, invitation_version=removed_version,
+        app, gid, sender, kind, {"name": name}, invitation_version=removed_version,
       )
       if status == "removed":
         await notify(

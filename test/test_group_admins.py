@@ -366,6 +366,43 @@ class MemberCopyTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(status, "stale")
     self.assertNotIn("removed_at", self.meta())
 
+  async def removal(self, version):
+    return await social_groups._apply_member_group_lifecycle(
+      self.app, GID, "creator.example", "group_removed", {"name": "Friends"},
+      invitation_version=version,
+    )
+
+  async def test_a_removal_before_the_first_invitation_is_kept(self):
+    self.path.parent.rmdir()
+
+    removed = await self.removal(1)
+    delayed = await self.roster(members=[{"host": HOST}])
+
+    self.assertEqual((removed, delayed), ("removed_unseen", "stale"))
+    meta = self.meta()
+    self.assertEqual((meta["host"], meta["request_status"]), ("creator.example", "declined"))
+    self.assertTrue(meta["removed_at"])
+    self.assertEqual(await self.roster(version=2, invitation="newer-invite"), "pending")
+
+  async def test_a_newer_removal_records_its_membership(self):
+    self.write_meta()
+
+    removed = await self.removal(2)
+    delayed = await self.roster(version=2, invitation="second-invite")
+
+    self.assertEqual((removed, delayed), ("removed", "stale"))
+    self.assertEqual(self.meta()["invitation_version"], 2)
+    self.assertTrue(self.meta()["removed_at"])
+    self.assertEqual(self.meta()["request_status"], "accepted")
+
+  async def test_a_repeated_removal_notice_changes_nothing(self):
+    self.write_meta()
+    await self.removal(1)
+    removed_at = self.meta()["removed_at"]
+
+    self.assertEqual(await self.removal(1), "already_removed")
+    self.assertEqual(self.meta()["removed_at"], removed_at)
+
   async def test_only_an_admin_copy_forwards_management_to_the_host(self):
     self.write_meta(members=[{"host": HOST}])
     with self.assertRaises(HTTPException) as raised:
