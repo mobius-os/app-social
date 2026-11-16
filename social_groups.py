@@ -1969,20 +1969,27 @@ async def _discover_handle(host: str, fallback: str = "") -> str:
     return fallback[:MAX_NAME_CHARS]  # unreachable now; metadata heals later
 
 
-def _authorize_manage(group: dict, actor: str, action: str, target: str | None) -> None:
-  """The creator manages everything; an admin manages ordinary members."""
+def _require_manager(group: dict, actor: str) -> str:
+  """The actor's current role, if it may manage (and so see) this group now."""
   role = _member_role(group, actor)
   if role == "creator":
-    if target == group["host"] and action in ("remove", "set_admin"):
-      raise HTTPException(
-        status_code=409, detail="The creator's place in the group can't be changed.",
-      )
-    return
+    return role
   if role != "admin" or not _host_member_active(group["members"][actor]):
     raise HTTPException(
       status_code=403,
       detail="Only the group's creator or an admin can manage this group.",
     )
+  return role
+
+
+def _authorize_manage(group: dict, actor: str, action: str, target: str | None) -> None:
+  """The creator manages everything; an admin manages ordinary members."""
+  if _require_manager(group, actor) == "creator":
+    if target == group["host"] and action in ("remove", "set_admin"):
+      raise HTTPException(
+        status_code=409, detail="The creator's place in the group can't be changed.",
+      )
+    return
   if action == "set_admin":
     raise HTTPException(status_code=403, detail="Only the group's creator can choose admins.")
   if action == "remove" and target is not None and _member_role(group, target) in (
@@ -2070,7 +2077,12 @@ async def _host_manage(
       raise HTTPException(status_code=404, detail="Unknown group.")
     _require_open(group)
     seen = group.get("manage_ids") or []
-    if request_id is not None and request_id in seen:
+    # Remembered per sender: one sender can never replay another's request id.
+    remembered = f"{actor} {request_id}" if request_id is not None else None
+    if remembered is not None and remembered in seen:
+      # Nothing changes twice, but the reply still shows the group, so the
+      # sender must be allowed to manage it now, not merely when first asked.
+      _require_manager(group, actor)
       return {"status": "duplicate", **_roster_view(group)}, {}
     _authorize_manage(group, actor, action, target)
     status = _apply_manage(
@@ -2080,9 +2092,9 @@ async def _host_manage(
     changed = status not in ("already_member", "not_member", "unchanged")
     if changed:
       group["roster_revision"] = _roster_revision(group) + 1
-    if request_id is not None:
-      group["manage_ids"] = (seen + [request_id])[-_MANAGE_ID_MEMORY:]
-    if changed or request_id is not None:
+    if remembered is not None:
+      group["manage_ids"] = (seen + [remembered])[-_MANAGE_ID_MEMORY:]
+    if changed or remembered is not None:
       atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
     view = _roster_view(group)
     await _store_group_meta(app, gid, view)

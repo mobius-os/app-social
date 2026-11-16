@@ -198,6 +198,36 @@ class GroupRoleTests(unittest.IsolatedAsyncioTestCase):
     self.assertNotIn("removed_at", record)
 
 
+  async def test_a_replay_from_a_removed_admin_reveals_nothing(self):
+    rename = manage_envelope("admin.example", "rename", name="Ours")
+    await social_groups._host_accept_manage(self.app, GID, rename)
+    await social_groups._manage(self.app, GID, "remove", target="admin.example")
+    await social_groups._manage(self.app, GID, "add", target="later.example")
+    self.fan_out.reset_mock()
+
+    with self.assertRaises(HTTPException) as raised:
+      await social_groups._host_accept_manage(self.app, GID, rename)
+
+    self.assertEqual(raised.exception.status_code, 403)
+    self.fan_out.assert_not_awaited()
+
+  async def test_remembered_request_ids_belong_to_their_sender(self):
+    self.write_group({
+      HOST: {"handle": "creator", "status": "active"},
+      "admin.example": {"handle": "ada", "status": "active", "role": "admin"},
+      "second.example": {"handle": "sam", "status": "active", "role": "admin"},
+    })
+    await social_groups._host_accept_manage(
+      self.app, GID, manage_envelope("admin.example", "rename", name="First"),
+    )
+
+    # The same id from another admin is that admin's own, new request.
+    reply = await social_groups._host_accept_manage(
+      self.app, GID, manage_envelope("second.example", "rename", name="Second"),
+    )
+
+    self.assertEqual((reply["status"], self.group()["name"]), ("renamed", "Second"))
+
 class MemberCopyTests(unittest.IsolatedAsyncioTestCase):
   def setUp(self):
     self.temporary = tempfile.TemporaryDirectory()
