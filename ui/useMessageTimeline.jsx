@@ -332,6 +332,7 @@ export function useMessageTimeline({
     trackScroll, scrollRef, inputRef, fileRef, draft, setDraft, sending, retrying, retry,
     processingImage, selectedImage, setSelectedImage, chooseImage, selectImage, gifChoice,
     replyTarget, replyTo, cancelReply, send, cancelRefresh: () => { refreshRequest.current += 1 },
+    updateMessages,
   }
 }
 

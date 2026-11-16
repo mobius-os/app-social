@@ -99,6 +99,10 @@ from common_public import (
 )
 from common_transport import DEFAULT_MAX_RESPONSE_BYTES, FederationTransportError, federation_request
 from service_io import atomic_write
+from message_edits import (
+  MESSAGE_EDITS_FEATURE, apply_edit, begin_own_edit, edit_result, settle_own_edit,
+  supports_message_edits, validate_edit,
+)
 from message_reactions import (
   MESSAGE_REACTIONS_FEATURE, apply_reaction, begin_own_update, own_update_result,
   reaction_line, settle_own_update, supports_message_reactions, validate_reaction,
@@ -707,7 +711,7 @@ def _key_actor_doc(identity: dict) -> dict:
       "key_b64": _encryption_public_key(identity["enc_private_key_b64"]),
     },
     "inbox": f"{PUBLIC_SERVICE_PATH}/inbox",
-    "features": [MESSAGE_REACTIONS_FEATURE],
+    "features": [MESSAGE_REACTIONS_FEATURE, MESSAGE_EDITS_FEATURE],
   }
 
 
@@ -1225,12 +1229,14 @@ async def receive_message(request: Request, db=Depends(get_db)):
   if not _joined_for_federation():
     raise HTTPException(status_code=403, detail="Join Social before receiving messages.")
   envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") not in ("message", "message_reaction"):
+  if envelope.get("v") != 0 or envelope.get("type") not in ("message", "message_reaction", "message_edit"):
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   if envelope.get("to") != _own_host():
     raise HTTPException(status_code=400, detail="Envelope is addressed elsewhere.")
   if envelope["type"] == "message_reaction":
     return await _receive_message_reaction(envelope, db)
+  if envelope["type"] == "message_edit":
+    return await _receive_message_edit(envelope, db)
   message_id = envelope.get("id")
   if not isinstance(message_id, str) or not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
@@ -1318,6 +1324,52 @@ async def _store_dm_reaction(
       owns_dirty_marker=owns_dirty_marker,
     )
     return True, record, state
+
+
+async def _receive_message_edit(envelope: dict, db) -> dict:
+  """Apply a peer's edit to one of their own messages in our conversation."""
+  event_id = envelope.get("id")
+  if not isinstance(event_id, str) or not _valid_id(event_id):
+    raise HTTPException(status_code=400, detail="Edit id is invalid.")
+  await _verify_peer_envelope(envelope)
+  sealed = "enc" in envelope
+  if sealed:
+    payload = _open_payload(
+      event_id, envelope.get("enc"), _load_identity()["enc_private_key_b64"],
+      {"message_id", "text", "at"},
+    )
+  else:
+    payload = envelope
+  message_id = payload.get("message_id")
+  if not isinstance(message_id, str) or not _valid_id(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  text, at = validate_edit(payload.get("text"), payload.get("at"))
+  sender = envelope["from"]
+  app = _common_app(db)
+  async with fs_locks.app_storage_lock(app.id):
+    convo = _conversation_dir(app, sender)
+    meta_path = convo / "meta.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+    if meta.get("request_status") == "blocked":
+      return {"status": "ok"}
+    path = convo / "msgs" / f"{message_id}.json"
+    if not path.is_file():
+      raise HTTPException(status_code=404, detail="Message not found.")
+    record = json.loads(path.read_text())
+    # Only the author edits: in our copy of this conversation that is an
+    # incoming message from the sender.
+    if record.get("dir") != "in" or record.get("peer") != sender:
+      raise HTTPException(status_code=403, detail="Only the author can edit this message.")
+    if record.get("encrypted") is True and not sealed:
+      raise HTTPException(status_code=400, detail="This edit must be encrypted.")
+    if apply_edit(record, text, at):
+      owns_dirty_marker = begin_message_mutation("dm", sender)
+      atomic_write(path, json.dumps(record))
+      version = _bump_version(app, history_covered=False)
+      mirror_message(
+        "dm", sender, record, path, version=version, owns_dirty_marker=owns_dirty_marker,
+      )
+  return {"status": "ok"}
 
 
 async def _receive_message_reaction(envelope: dict, db) -> dict:
@@ -1980,7 +2032,7 @@ class MessageReaction(BaseModel):
   id: str | None = None
 
 
-async def _change_own_dm_reaction(app, peer_host: str, message_id: str, change) -> tuple:
+async def _change_saved_dm(app, peer_host: str, message_id: str, change) -> tuple:
   """Run ``change(record)`` on a saved DM under the storage lock; save if it says so."""
   async with fs_locks.app_storage_lock(app.id):
     path = _message_path(app, peer_host, message_id)
@@ -2064,7 +2116,7 @@ async def react_to_direct_message(
       settle_own_update(saved, own, body.emoji, update_id, outcome, detail), None,
     )
 
-  record, (update, new) = await _change_own_dm_reaction(app, peer, message_id, begin)
+  record, (update, new) = await _change_saved_dm(app, peer, message_id, begin)
   if not update.get("pending"):
     return own_update_result(record, update)
 
@@ -2080,7 +2132,7 @@ async def react_to_direct_message(
       # Nothing left this host. A first attempt is undone; an earlier attempt
       # of a retried update may still have arrived, so it stays pending.
       detail = "This person’s encryption key is invalid."
-      await _change_own_dm_reaction(
+      await _change_saved_dm(
         app, peer, message_id, settle("refused" if new else "uncertain", detail),
       )
       raise HTTPException(status_code=409 if new else 502, detail=detail) from exc
@@ -2095,7 +2147,7 @@ async def react_to_direct_message(
     outcome, detail = "delivered", None
   except Exception as exc:
     outcome, detail = _reaction_failure(exc)
-  record, _ = await _change_own_dm_reaction(app, peer, message_id, settle(outcome, detail))
+  record, _ = await _change_saved_dm(app, peer, message_id, settle(outcome, detail))
   if outcome == "refused":
     raise HTTPException(status_code=409, detail=detail)
   current = (record.get("reaction_updates") or {}).get(body.emoji)
@@ -2103,6 +2155,106 @@ async def react_to_direct_message(
     # A newer update for this reaction replaced this one while it was sent.
     return {**own_update_result(record, {**update, "pending": False}), "superseded": True}
   return own_update_result(record, current)
+
+
+class MessageEdit(BaseModel):
+  text: str
+  # Chosen by the app so that a retry re-sends this exact edit.
+  id: str | None = None
+
+
+def _edit_failure(exc: Exception) -> tuple[str, str]:
+  """Classify a failed edit send: ``refused`` only when the peer said no."""
+  if isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500 \
+      and exc.response.status_code not in (408, 429):
+    return "refused", "This person’s Social refused the edit."
+  if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+    return "uncertain", "The reply was lost; this edit may have arrived. Save it again to make sure."
+  return "uncertain", "This person couldn’t be reached. Save the edit again to resend it."
+
+
+@router.post("/conversations/{peer_host}/messages/{message_id}/edit")
+async def edit_direct_message(
+  peer_host: str,
+  message_id: str,
+  body: MessageEdit,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Replace the text of one of the owner's sent messages, on both copies.
+
+  The edit is saved here, as pending, before it is sent; only a definite
+  refusal from the peer restores the earlier text.
+  """
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  peer = _request_peer(peer_host)
+  if not _valid_id(message_id):
+    raise HTTPException(status_code=400, detail="Message id is invalid.")
+  edit_id = body.id or str(uuid.uuid4())
+  if not _valid_id(edit_id):
+    raise HTTPException(status_code=400, detail="Edit id is invalid.")
+  validate_edit(body.text, time.time())
+  record = await _load_message(app, peer, message_id)
+  if record.get("dir") != "out":
+    raise HTTPException(status_code=403, detail="You can only edit your own messages.")
+  if record.get("status") != "delivered":
+    raise HTTPException(status_code=409, detail="Only delivered messages can be edited.")
+  try:
+    actor = await _fetch_actor(peer)
+  except HTTPException as exc:
+    raise HTTPException(status_code=502, detail="This person couldn’t be reached.") from exc
+  if not supports_message_edits(actor):
+    raise HTTPException(status_code=409, detail="This person’s Social doesn’t support edits yet.")
+  encryption_key = actor.get("encryption_key")
+  peer_encrypts = isinstance(encryption_key, dict) and encryption_key.get("alg") == "x25519"
+  if record.get("encrypted") is True and not peer_encrypts:
+    raise HTTPException(
+      status_code=409,
+      detail="This person no longer publishes an encryption key, so the edit wasn’t sent.",
+    )
+
+  def begin(saved: dict):
+    edit, new = begin_own_edit(saved, body.text, edit_id)
+    return new, (edit, new)
+
+  def settle(outcome: str, detail: str | None = None):
+    return lambda saved: (settle_own_edit(saved, edit_id, outcome, detail), None)
+
+  record, (edit, new) = await _change_saved_dm(app, peer, message_id, begin)
+  if not edit.get("pending"):
+    return edit_result(record)
+  envelope = {
+    "v": 0, "type": "message_edit", "id": edit_id,
+    "from": _own_host(), "to": peer, "sent_at": time.time(),
+  }
+  payload = {"message_id": message_id, "text": edit["text"], "at": edit["at"]}
+  if peer_encrypts:
+    try:
+      envelope["enc"] = _seal_payload(edit_id, encryption_key.get("key_b64"), payload)
+    except Exception as exc:
+      # Nothing left this host. A first attempt is undone; an earlier attempt
+      # of a retried edit may still have arrived, so it stays pending.
+      detail = "This person’s encryption key is invalid."
+      await _change_saved_dm(
+        app, peer, message_id, settle("refused" if new else "uncertain", detail),
+      )
+      raise HTTPException(status_code=409 if new else 502, detail=detail) from exc
+  else:
+    envelope.update(payload)
+  envelope["sig"] = _sign(envelope, _load_identity()["private_key_b64"])
+  try:
+    response = await _post_signed_envelope(
+      _peer_service_url(peer, "inbox"), envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
+    )
+    response.raise_for_status()
+    outcome, detail = "delivered", None
+  except Exception as exc:
+    outcome, detail = _edit_failure(exc)
+  record, _ = await _change_saved_dm(app, peer, message_id, settle(outcome, detail))
+  if outcome == "refused":
+    raise HTTPException(status_code=409, detail=detail)
+  return edit_result(record)
 
 
 async def _require_community_media_support(

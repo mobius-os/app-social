@@ -2,13 +2,14 @@ import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft, Lock } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptMessageRequest, blockMessageRequest, clearUnread, clockTime,
-  declineMessageRequest, getPeer, listMessages, reactToMessage, retryMessage, sendMessage,
+  declineMessageRequest, editMessage, getPeer, listMessages, reactToMessage, retryMessage, sendMessage,
   watchLatestMessages,
 } from '../api.js'
 import { BOARD_REACTION_EMOJIS } from '../reconciliation.js'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
 import { ReactionRetryNote, supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
+import { supportsMessageEdits, useMessageEdits } from './messageEdits.js'
 import {
   DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
   withDayDividers,
@@ -47,6 +48,10 @@ export default function Thread({
     onError: error => showToast(error.message || 'The reaction couldn’t be sent.', 'error'),
   })
   const canReact = !requestPending && supportsMessageReactions(peerActor)
+  const canEdit = !requestPending && supportsMessageEdits(peerActor)
+  const saveEdit = useMessageEdits({
+    timeline, showToast, save: (id, text, editId) => editMessage(peer, id, text, editId),
+  })
 
   // Messages are read only while this pane is actually visible to the owner.
   useEffect(() => {
@@ -122,6 +127,7 @@ export default function Thread({
           onClose: closePicker,
           onReact: emoji => messageReactions.toggle(message, emoji),
         }}
+        edits={{ canEdit, onSave: saveEdit }}
       />,
       <DeliveryNote key={`fail-${message.id}`} message={message} timeline={timeline} />,
       <ReactionRetryNote key={`react-${message.id}`} message={message} mine={mine} reactions={messageReactions} />,
