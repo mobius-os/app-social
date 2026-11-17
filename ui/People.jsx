@@ -9,7 +9,7 @@ import { noteAvatarDigests } from '../avatarHints.js'
 import { Avatar, RoleLabel, useProfile } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
 import { focusProfileReturnTarget, membershipDuration, profileSendIdentity } from '../profile.js'
-import { roleChangedMessage, roleOf as roleIn } from './communityRoles.js'
+import { roleChangedMessage, roleOf as roleIn, sortByRole } from './communityRoles.js'
 
 const DIRECTORY_CACHE_MAX_AGE_MS = 60_000
 
@@ -192,7 +192,7 @@ export default function People({
       )}
 
       <div className="cn-people-list">
-        {(results || []).map((user) => (
+        {sortByRole(results || [], communityRoles).map((user) => (
           <button className="cn-row" key={user.host}
                   onClick={(event) => {
                     profileReturnFocus.current = event.currentTarget
@@ -202,7 +202,10 @@ export default function People({
             <Avatar name={user.handle} host={user.host} remote lazy />
             <span className="cn-row-copy">
               <span className="cn-row-top">
-                <strong>{user.handle ? `@${user.handle}` : 'Social member'}{user.host === me?.host ? ' (you)' : ''}</strong>
+                <span className="cn-row-name">
+                  <strong>{user.handle ? `@${user.handle}` : 'Social member'}{user.host === me?.host ? ' (you)' : ''}</strong>
+                  <RoleLabel role={roleOf(user.host)} />
+                </span>
               </span>
               {user.bio ? <span className="cn-preview">{user.bio}</span> : null}
             </span>

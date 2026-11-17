@@ -207,6 +207,13 @@ export const setCommunityRole = (host, role) =>
   call('community/role', { method: 'POST', body: JSON.stringify({ host, role }) })
 export const getPeer = (host, signal, { background = false } = {}) =>
   call(`peer/${encodeURIComponent(host)}`, { signal, background })
+export async function getAppIcon(appId) {
+  const response = await fetch(`/api/apps/${appId}/icon`, {
+    headers: { Authorization: `Bearer ${bearer}` },
+  })
+  if (!response.ok) throw new Error('icon unavailable')
+  return response.blob()
+}
 export const getPeerAvatars = (hosts, { background = false, digests = {} } = {}) =>
   call('peer-avatars', {
     method: 'POST', body: JSON.stringify({ hosts, avatars: digests }), background,

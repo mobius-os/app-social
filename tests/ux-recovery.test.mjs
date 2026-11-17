@@ -262,19 +262,23 @@ test('confirmed deletion never restores focus to the disappearing trigger', () =
   assert.match(focus, /if \(restore && opener/)
 })
 
-test('navigation is one full-width segmented control under the page title at every width', () => {
+test('navigation uses one component inside both desktop and mobile toolbars', () => {
   const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
+  const wide = theme.slice(theme.indexOf('@media (min-width: 720px)'), theme.indexOf('@media (max-width: 480px)'))
   assert.match(app, /function MainNavigation\(/)
+  assert.match(app, /className="cn-nav-wide"/)
+  assert.match(app, /className="cn-nav-mobile"/)
   assert.match(app, /<span className="cn-tab-label">Community<\/span>/)
   assert.match(app, /<span className="cn-tab-label">Chats<\/span>/)
   assert.match(app, /<span className="cn-tab-label">People<\/span>/)
   assert.match(app, /<h1 className="cn-title">Social<\/h1>/)
+  assert.match(theme, /\.cn-nav-wide \{ display: none; \}/)
+  assert.match(wide, /\.cn-nav-mobile \{ display: none; \}/)
+  assert.match(wide, /\.cn-nav-wide \{[\s\S]*display: flex;[\s\S]*margin: 0 0 0 auto;/)
+  assert.match(wide, /\.cn-nav-wide \.cn-nav-item \{[\s\S]*min-height: 44px;/)
   const header = app.slice(app.indexOf('<header className="cn-header">'), app.indexOf('</header>'))
-  assert.equal(header.match(/<MainNavigation /g)?.length, 1)
-  assert.match(header, /className="cn-nav-seg"/)
-  assert.doesNotMatch(theme, /\.cn-header \.cn-tab-label \{ display: none; \}/)
-  assert.match(theme, /\.cn-nav-item \{[^}]*flex: 1 1 0;[^}]*min-height: 44px;/s)
+  assert.match(header, /className="cn-nav-mobile"/)
   assert.match(theme, /\.cn-composer-footer\s*\{[^}]*position: absolute;[^}]*bottom:/s)
 })
 

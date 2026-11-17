@@ -29,26 +29,13 @@ test('only the owner sees role controls, and handing over asks first', () => {
   assert.match(read('api.js'), /call\('community\/role'/)
 })
 
-test('only the owner or an admin gets the Community settings cog', () => {
+test('People shows each member’s role, sorted owner first; there is no separate settings popup', () => {
+  const people = read('ui/People.jsx')
   const app = read('index.jsx')
-  const sheet = read('ui/CommunitySettings.jsx')
-  assert.match(app, /const canEditCommunity = canParticipate && \(myRole === 'owner' \|\| myRole === 'admin'\)/)
-  // The cog lives inside the Community tab's pill, and only for an owner or admin.
-  assert.match(app, /onCommunitySettings=\{canEditCommunity \? \(\) => setCommunitySettingsOpen\(true\) : null\}/)
-  assert.match(app, /\{tab === 'board' && onCommunitySettings && \(\s*<button type="button" className="cn-nav-cog" aria-label="Community settings"/)
-  assert.match(sheet, /useModalFocus\(true,/)
-})
-
-test('Community settings has Permissions; only the owner gets role pickers', () => {
-  const sheet = read('ui/CommunitySettings.jsx')
-  // A section list whose current entry is marked as the page.
-  assert.match(sheet, /permissions: \{ label: 'Permissions'/)
-  assert.match(sheet, /aria-current=\{view === key \? 'page' : undefined\}/)
-  assert.doesNotMatch(sheet, /role="tab"|role="tablist"|aria-selected/)
-  assert.match(sheet, /const isOwner = roleOf\(roles, me\?\.host\) === 'owner'/)
-  assert.match(sheet, /\{isOwner && !self && \(/)
-  // Choosing Owner asks first; other choices apply at once.
-  assert.match(sheet, /if \(next === 'owner'\) setHandover\(person\)/)
+  assert.match(people, /sortByRole\(results \|\| \[\], communityRoles\)\.map/)
+  assert.match(people, /<RoleLabel role=\{roleOf\(user\.host\)\} \/>/)
+  assert.doesNotMatch(app, /CommunitySettings|cn-nav-cog|onCommunitySettings/)
+  assert.doesNotMatch(read('mobius.json'), /CommunitySettings/)
 })
 
 test('members sort owner first, then admins, then everyone else by handle', async () => {

@@ -98,7 +98,6 @@
     "gifs.js",
     "gif_config.js",
     "ui/Gifs.jsx",
-    "ui/CommunitySettings.jsx",
     "ui/communityRoles.js"
   ],
   "store": {
