@@ -1369,6 +1369,12 @@ export const CSS = `
 .cn-new-chat-search { margin: 0 4px 8px; flex-shrink: 0; }
 .cn-new-chat-search input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
 .cn-new-chat-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.cn-new-chat-toggle {
+  display: flex; align-items: center; gap: 10px; min-height: 44px; margin-bottom: 8px;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.cn-new-chat-toggle input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.cn-new-chat-toggle:has(input:disabled) { cursor: default; }
 .cn-group-member-list strong { font-size: 14px; }
 .cn-group-member-list .cn-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cn-group-status { padding-block: 16px; font-size: 14px; color: var(--muted); }

@@ -87,6 +87,7 @@
     "ui/interactionRules.js",
     "ui/historyScroll.js",
     "ui/modalFocus.js",
+    "ui/newConversation.js",
     "ui/GroupDetails.jsx",
     "ui/GroupPicture.jsx",
     "boardNavigation.js",

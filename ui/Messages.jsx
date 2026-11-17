@@ -4,6 +4,7 @@ import { chatListTime, createGroup, searchPeople } from '../api.js'
 import GroupPicture from './GroupPicture.jsx'
 import { Avatar } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
+import { memberLabel, newConversationPlan } from './newConversation.js'
 import { gifPreviewText } from '../gifs.js'
 import { noteAvatarDigests } from '../avatarHints.js'
 
@@ -213,9 +214,11 @@ export default function Messages({
 }
 
 // One picker for every new conversation: choosing one person opens your chat
-// with them; choosing more asks for a group name and creates the group.
+// with them; choosing more, or turning on "Create a group", creates a group
+// (which may start with one invitee or with nobody yet).
 function NewConversationSheet({ me, canCreateGroup, onClose, onMessage, onCreated, showToast }) {
   const [name, setName] = useState('')
+  const [asGroup, setAsGroup] = useState(false)
   const [selected, setSelected] = useState({})
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
@@ -247,9 +250,8 @@ function NewConversationSheet({ me, canCreateGroup, onClose, onMessage, onCreate
   }, [me?.host, peopleAttempt])
 
   const chosen = (people || []).filter(user => selected[user.host])
-  const isGroup = chosen.length > 1
-  // A blank name falls back to the members' handles.
-  const defaultGroupName = chosen.map(user => (user.handle ? `@${user.handle}` : 'Social member')).join(', ').slice(0, 80)
+  const plan = newConversationPlan({ chosen, asGroup, name, canCreateGroup, created, busy })
+  const { isGroup } = plan
 
   async function submit(event) {
     event.preventDefault()
@@ -258,8 +260,8 @@ function NewConversationSheet({ me, canCreateGroup, onClose, onMessage, onCreate
       if (chosen.length === 1) onMessage(chosen[0].host, chosen[0].handle)
       return
     }
-    const groupName = name.trim() || defaultGroupName
-    if (!canCreateGroup) return
+    const { groupName } = plan
+    if (!canCreateGroup || !groupName) return
     submitting.current = true
     setBusy(true)
     setError('')
@@ -286,12 +288,7 @@ function NewConversationSheet({ me, canCreateGroup, onClose, onMessage, onCreate
 
   const locked = busy || !!created
   const visiblePeople = (people || []).filter(user => (user.handle || '').toLowerCase().includes(query.trim().replace(/^@/, '').toLowerCase()))
-  const only = chosen[0]
-  const action = created ? 'Open group'
-    : isGroup ? 'Create group'
-    : only ? `Message ${only.handle ? `@${only.handle}` : 'them'}`
-    : 'Choose someone'
-  const actionDisabled = busy || (!created && (chosen.length === 0 || (isGroup && !canCreateGroup)))
+  const { action, disabled: actionDisabled } = plan
   return (
     <div className="cn-scrim cn-scrim-plain" role="dialog" aria-modal="true" aria-label="New conversation" onClick={busy ? undefined : onClose}>
       <form ref={sheetRef} tabIndex={-1} className="cn-sheet cn-group-create" onClick={event => event.stopPropagation()} onSubmit={submit}>
@@ -316,16 +313,23 @@ function NewConversationSheet({ me, canCreateGroup, onClose, onMessage, onCreate
               <input type="checkbox" checked={!!selected[user.host]} disabled={locked}
                      onChange={event => setSelected(prior => ({ ...prior, [user.host]: event.target.checked }))} />
               <Avatar name={user.handle} host={user.host} size="small" remote lazy />
-              <span className="cn-row-copy"><strong>{user.handle ? `@${user.handle}` : 'Social member'}</strong></span>
+              <span className="cn-row-copy"><strong>{memberLabel(user)}</strong></span>
             </label>)}
             {visiblePeople.length === 0 && <p className="cn-group-status">No matching people in this directory.</p>}
           </div>}
         </div>
         <div className="cn-group-create-footer">
-          {(isGroup || created) && <div className="cn-new-chat-group">
-            <label className="cn-field-label" htmlFor="cn-group-name">Group name (optional) · {chosen.length} people</label>
+          {canCreateGroup && !created && <label className="cn-new-chat-toggle">
+            <input type="checkbox" checked={isGroup} disabled={locked || plan.groupForced}
+                   onChange={event => setAsGroup(event.target.checked)} />
+            <span>Create a group</span>
+          </label>}
+          {isGroup && <div className="cn-new-chat-group">
+            <label className="cn-field-label" htmlFor="cn-group-name">
+              {plan.defaultName ? 'Group name (optional)' : 'Group name'} · {chosen.length === 0 ? 'just you for now' : chosen.length === 1 ? '1 person invited' : `${chosen.length} people invited`}
+            </label>
             <input id="cn-group-name" className="cn-input" value={name} onChange={event => setName(event.target.value)} maxLength={80}
-                   placeholder={defaultGroupName} disabled={locked} />
+                   placeholder={plan.defaultName || 'Name your group'} disabled={locked} />
             {!canCreateGroup && <p className="cn-meta">You can’t create groups right now.</p>}
           </div>}
           {error && <div className="cn-directory-error" role="alert">{error}</div>}
