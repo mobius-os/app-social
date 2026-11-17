@@ -49,3 +49,25 @@ test('profile dismissal focuses the connected opener or the visible fallback', (
   assert.equal(focusProfileReturnTarget(detached, fallback), true)
   assert.deepEqual(focused, ['opener', 'fallback'])
 })
+
+test('a profile send keeps its id until the recipient or text changes', async () => {
+  const { profileSendIdentity } = await import('../profile.js')
+  let next = 0
+  const newId = () => `id-${++next}`
+  const first = profileSendIdentity(null, 'ada.example', 'Hello', newId)
+  assert.deepEqual(first, { id: 'id-1', host: 'ada.example', text: 'Hello' })
+  // The reply was lost: Send again reuses the same message.
+  assert.equal(profileSendIdentity(first, 'ada.example', 'Hello', newId), first)
+  assert.equal(profileSendIdentity(first, 'ada.example', 'Hello!', newId).id, 'id-2')
+  assert.equal(profileSendIdentity(first, 'bo.example', 'Hello', newId).id, 'id-3')
+})
+
+test('the profile composer sends under the kept id and forgets it once confirmed', async () => {
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../ui/People.jsx', import.meta.url), 'utf8')
+  const send = source.slice(source.indexOf('async function sendFromProfile'), source.indexOf('async function changeRole'))
+  assert.match(send, /profileSendIdentity\(unconfirmed\.current, target\.host, text\)/)
+  assert.match(send, /sendMessage\(attempt\.id, /)
+  assert.doesNotMatch(send, /randomUUID/)
+  assert.ok(send.indexOf('unconfirmed.current = null') > send.indexOf('await sendMessage'))
+})

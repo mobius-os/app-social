@@ -8,7 +8,7 @@ import { gifCaptionLimit, gifTextOverflow, withGif } from '../gifs.js'
 import { noteAvatarDigests } from '../avatarHints.js'
 import { Avatar, RoleLabel, useProfile } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
-import { focusProfileReturnTarget, membershipDuration } from '../profile.js'
+import { focusProfileReturnTarget, membershipDuration, profileSendIdentity } from '../profile.js'
 import { roleChangedMessage, roleOf as roleIn } from './communityRoles.js'
 
 const DIRECTORY_CACHE_MAX_AGE_MS = 60_000
@@ -118,6 +118,8 @@ export default function People({
   // no detour through an empty thread. Sending opens the conversation.
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
+  // The message whose reply was lost, so pressing Send again resends it.
+  const unconfirmed = useRef(null)
   useEffect(() => { setDraft(''); gifChoice.setGif(null); gifChoice.close() }, [selectedHost])
   const profileOverLimit = gifTextOverflow(draft, gifChoice.gif, TEXT_LIMITS.message)
   async function sendFromProfile(event) {
@@ -127,8 +129,11 @@ export default function People({
     if (!text || sending || !profile || gifTextOverflow(draft, gif, TEXT_LIMITS.message)) return
     const target = profile
     setSending(true)
+    const attempt = profileSendIdentity(unconfirmed.current, target.host, text)
+    unconfirmed.current = attempt
     try {
-      const result = await sendMessage(crypto.randomUUID(), target.host, text, target.handle)
+      const result = await sendMessage(attempt.id, target.host, text, target.handle)
+      unconfirmed.current = null
       if (result?.status === 'failed') {
         showToast(result.detail || 'This person couldn’t be reached.', 'error')
       }
@@ -137,7 +142,12 @@ export default function People({
       closeProfile()
       onMessage(target.host, target.handle)
     } catch (error) {
-      showToast(error.message || 'The message couldn’t be sent.', 'error')
+      // No reply (or a server error) means it may already be saved or
+      // delivered: its id is kept, so Send again confirms this same message.
+      const uncertain = !error.status || error.status >= 500
+      showToast(uncertain
+        ? 'Your message wasn’t confirmed. Send again to make sure; it won’t be sent twice.'
+        : error.message || 'The message couldn’t be sent.', 'error')
     } finally {
       setSending(false)
     }
