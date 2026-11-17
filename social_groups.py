@@ -740,6 +740,7 @@ async def _accept_group_envelope(
         return {"status": "accepted"}
       if envelope.get("invitation_id") != member.get("invitation_id"):
         raise HTTPException(status_code=409, detail="This invitation has been replaced.")
+      published = _members_snapshot(group)
       if kind == "group_accept":
         if status == "active":
           return {"status": "accepted"}
@@ -750,20 +751,37 @@ async def _accept_group_envelope(
           handle=str(actor.get("handle") or member.get("handle") or "")[:MAX_NAME_CHARS],
           joined_at=time.time(),
         )
-        atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
-        members = _members_snapshot(group)
       else:
         if status == "declined":
           return {"status": "declined"}
         if status == "active":
           raise HTTPException(status_code=409, detail="An active member cannot decline an invitation.")
         member["status"] = "declined"
-        atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
-        members = _members_snapshot(group)
+      members = _members_snapshot(group)
+      # A changed roster (a decline, or an acceptance that brings a new
+      # handle) gets a newer revision, so a delayed older refresh can't undo it.
+      roster_changed = members != published
+      if roster_changed:
+        group["roster_revision"] = _roster_revision(group) + 1
+      atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
       # Keep the local UI snapshot in the same authoritative transaction. A
       # later membership transition must not be overwritten by this older
       # roster after it has already committed.
-      await _store_group_meta(app, gid, {"members": members})
+      await _store_group_meta(app, gid, {
+        "members": members, "roster_revision": _roster_revision(group),
+      })
+      refreshes: dict[str, dict] = {}
+      if roster_changed:
+        # Everyone else learns the new roster now. The sender is waiting on
+        # this reply, so it gets no refresh it would have to accept meanwhile.
+        identity = _load_identity()
+        refreshes = {
+          host: _added_envelope(identity, group, host)
+          for host, entry in group["members"].items()
+          if host not in (_own_host(), sender) and entry.get("status") not in _GONE_STATES
+        }
+    if refreshes:
+      await _fan_out({}, refreshes)
     if kind == "group_accept":
       return {"status": "accepted"}
     return {"status": "declined"}

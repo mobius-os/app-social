@@ -287,6 +287,50 @@ class GroupRoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 400)
 
 
+  def invite_pending(self, handle="nia"):
+    group = self.group()
+    group["members"]["new.example"] = {
+      "handle": handle, "status": "invited", "invitation_version": 1,
+      "invitation_id": "55555555-5555-4555-8555-555555555555",
+    }
+    social_groups._host_group_path(GID).write_text(json.dumps(group))
+
+  async def answer(self, kind, handle="nia"):
+    return await social_groups._accept_group_envelope(None, self.app, {
+      "v": 0, "type": kind, "id": "66666666-6666-4666-8666-666666666666",
+      "from": "new.example", "to": HOST, "gid": GID, "sent_at": 1,
+      "invitation_id": "55555555-5555-4555-8555-555555555555",
+    }, {"handle": handle})
+
+  async def test_a_decline_publishes_a_newer_roster_to_the_others(self):
+    self.invite_pending()
+
+    await self.answer("group_decline")
+
+    self.assertEqual(self.group()["roster_revision"], 1)
+    sent = self.fan_out.await_args.args[1]
+    self.assertEqual(set(sent), {"admin.example", "member.example", "other.example"})
+    self.assertEqual(sent["other.example"]["roster_revision"], 1)
+    self.assertNotIn("new.example", {m["host"] for m in sent["other.example"]["members"]})
+    meta = json.loads((self.storage / "groups" / GID / "meta.json").read_text())
+    self.assertEqual(meta["roster_revision"], 1)
+
+  async def test_an_acceptance_advances_the_roster_only_when_it_changes(self):
+    self.invite_pending()
+    await self.answer("group_accept")  # same handle: the published roster is unchanged
+    self.assertEqual(social_groups._roster_revision(self.group()), 0)
+    self.fan_out.assert_not_awaited()
+
+    self.invite_pending(handle="")
+    await self.answer("group_accept", handle="nia")
+
+    self.assertEqual(self.group()["roster_revision"], 1)
+    sent = self.fan_out.await_args.args[1]
+    self.assertNotIn("new.example", sent)
+    roster = {m["host"]: m.get("handle") for m in sent["member.example"]["members"]}
+    self.assertEqual(roster["new.example"], "nia")
+
+
 class MemberCopyTests(unittest.IsolatedAsyncioTestCase):
   def setUp(self):
     self.temporary = tempfile.TemporaryDirectory()
@@ -402,6 +446,19 @@ class MemberCopyTests(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(await self.removal(1), "already_removed")
     self.assertEqual(self.meta()["removed_at"], removed_at)
+
+  async def test_a_declined_invitee_stays_gone_in_either_delivery_order(self):
+    with_invitee = [{"host": "creator.example", "role": "creator"}, {"host": HOST}, {"host": "new.example"}]
+    without = with_invitee[:2]
+    for order in ((0, 1), (1, 0)):
+      with self.subTest(order=order):
+        self.write_meta(members=[], roster_revision=0)
+        rosters = [(0, with_invitee), (1, without)]
+        for index in order:
+          revision, members = rosters[index]
+          await self.roster(members=members, roster_revision=revision)
+        self.assertEqual(self.meta()["members"], without)
+        self.assertEqual(self.meta()["roster_revision"], 1)
 
   async def test_only_an_admin_copy_forwards_management_to_the_host(self):
     self.write_meta(members=[{"host": HOST}])
