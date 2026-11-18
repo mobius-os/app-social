@@ -566,7 +566,8 @@ class MessagingBanTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(source.count('await _refuse_banned_messaging(envelope["from"])'), 3)
     groups = Path(social_groups.__file__).read_text()
     self.assertIn('if envelope["type"] not in _GROUP_LEAVING_KINDS:', groups)
-    self.assertGreaterEqual(groups.count("await _refuse_banned_messaging()"), 5)
+    # Member-to-host traffic checks the group host, not only the local owner.
+    self.assertEqual(groups.count("  await _refuse_banned_group_host(app, gid)\n"), 5)
     # Outgoing traffic checks its destinations too, not only the local owner.
     self.assertEqual(source.count("  await _refuse_banned_messaging(peer)\n"), 3)
     self.assertIn("  await _refuse_banned_messaging(*member_hosts)\n", groups)

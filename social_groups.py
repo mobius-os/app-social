@@ -575,6 +575,15 @@ async def _fan_out(group: dict, envelopes_by_host: dict[str, dict]) -> dict:
   return {host: False for host in envelopes_by_host} | dict(zip(hosts, results))
 
 
+async def _refuse_banned_group_host(app, gid: str) -> None:
+  """Refuse member-to-host group traffic when this owner or the group's host is banned.
+
+  Callers validate ``gid`` first. Leaving and removal don't call this.
+  """
+  host = (_load_group_meta(app, gid) or {}).get("host")
+  await _refuse_banned_messaging(*([host] if isinstance(host, str) and host != _own_host() else []))
+
+
 def _added_envelope(identity: dict, group: dict, member: str) -> dict:
   member_record = group["members"][member]
   invitation_id = member_record.get("invitation_id")
@@ -1437,8 +1446,8 @@ async def accept_group_invitation(
   """Join only after the owner explicitly accepts the host's invitation."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   _validate_gid(gid)
+  await _refuse_banned_group_host(app, gid)
   identity = _load_identity()
   if not identity.get("joined_at"):
     raise HTTPException(status_code=409, detail="Join Social before accepting groups.")
@@ -1628,8 +1637,8 @@ async def retry_group_message(
   """Retry the owner's saved outgoing group post without a new identity."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   _validate_gid(gid)
+  await _refuse_banned_group_host(app, gid)
   if not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   return await _retry_saved_group_message(app, gid, message_id)
@@ -1680,8 +1689,8 @@ async def react_to_group_message(
   """
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   _validate_gid(gid)
+  await _refuse_banned_group_host(app, gid)
   if not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   update_id = body.id or str(uuid.uuid4())
@@ -1796,8 +1805,8 @@ async def edit_group_message(
   """
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   _validate_gid(gid)
+  await _refuse_banned_group_host(app, gid)
   if not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   edit_id = body.id or str(uuid.uuid4())
@@ -1880,8 +1889,8 @@ async def send_group_message(
   """Send while open; host acceptance serializes with membership and deletion."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   _validate_gid(gid)
+  await _refuse_banned_group_host(app, gid)
   text = body.text.strip()
   attachment = _validate_attachment(body.attachment)
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
@@ -2276,6 +2285,9 @@ async def _request_manage(app, gid: str, action: str, **fields) -> dict:
   host = meta.get("host")
   if not _valid_host(host or "") or host == _own_host():
     raise HTTPException(status_code=409, detail="Group host is invalid.")
+  if action != "remove":
+    # Removal still reaches a banned host, as leaving does.
+    await _refuse_banned_messaging(host)
   if action == "set_admin":
     raise HTTPException(status_code=403, detail="Only the group's creator can choose admins.")
   if _own_role(meta) != "admin":
