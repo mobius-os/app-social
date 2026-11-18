@@ -2076,8 +2076,8 @@ async def retry_direct_message(
   """Retry a persisted outgoing message without creating a new identity."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   peer = _request_peer(peer_host)
+  await _refuse_banned_messaging(peer)
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   record = await _attempt_direct_delivery(app, peer, message_id)
@@ -2141,8 +2141,8 @@ async def react_to_direct_message(
   """
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   peer = _request_peer(peer_host)
+  await _refuse_banned_messaging(peer)
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   update_id = body.id or str(uuid.uuid4())
@@ -2253,8 +2253,8 @@ async def edit_direct_message(
   """
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   peer = _request_peer(peer_host)
+  await _refuse_banned_messaging(peer)
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   edit_id = body.id or str(uuid.uuid4())

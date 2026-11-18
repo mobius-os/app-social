@@ -60,5 +60,79 @@ class RelayedAuthorBanTests(unittest.IsolatedAsyncioTestCase):
       edit.assert_not_called()
 
 
+class OutgoingDestinationBanTests(unittest.IsolatedAsyncioTestCase):
+  """The sender refuses banned recipients itself, so older receivers can't let them through."""
+
+  def setUp(self):
+    from service_runtime import Principal
+    self.owner = Principal("owner", None, None)
+    self.app = SimpleNamespace(id=7, slug="social")
+    for patcher in (
+      patch.object(social_routes, "_own_host", return_value=ME),
+      patch.object(social_groups, "_own_host", return_value=ME),
+      patch.object(social_routes, "_community_bans", new=AsyncMock(return_value={BANNED})),
+      patch.object(social_groups, "_community_bans", new=AsyncMock(return_value={BANNED})),
+      patch.object(social_routes, "_require_member", return_value=self.app),
+      patch.object(social_groups, "_require_member", return_value=self.app),
+    ):
+      patcher.start()
+      self.addCleanup(patcher.stop)
+
+  async def test_direct_retry_reaction_and_edit_to_a_banned_peer_are_refused(self):
+    attempts = {
+      "retry": lambda peer: social_routes.retry_direct_message(
+        peer, MESSAGE_ID, db=None, principal=self.owner),
+      "reaction": lambda peer: social_routes.react_to_direct_message(
+        peer, MESSAGE_ID, social_routes.MessageReaction(emoji="🎉", on=True), db=None,
+        principal=self.owner),
+      "edit": lambda peer: social_routes.edit_direct_message(
+        peer, MESSAGE_ID, social_routes.MessageEdit(text="edited"), db=None, principal=self.owner),
+    }
+    with patch.object(social_routes, "_post_signed_envelope", new=AsyncMock()) as sent:
+      for name, attempt in attempts.items():
+        # The peer is normalised before the check, as it is for sending.
+        with self.subTest(name), self.assertRaises(HTTPException) as caught:
+          await attempt(" Bad.Example ")
+        self.assertEqual((caught.exception.status_code, caught.exception.detail),
+                         (403, social_routes.BANNED_PERSON))
+      sent.assert_not_called()
+
+  async def test_a_new_group_never_invites_a_banned_member(self):
+    with (patch.object(social_groups, "_load_identity", return_value={"joined_at": 1.0}),
+          patch.object(social_groups, "_fan_out", new=AsyncMock()) as fan_out,
+          patch.object(social_groups, "_store_group_meta", new=AsyncMock()) as stored):
+      with self.assertRaises(HTTPException) as caught:
+        await social_groups.create_group(
+          social_groups.CreateGroup(name="Friends", members=["good.example", "BAD.example"]),
+          db=None, principal=self.owner,
+        )
+    self.assertEqual((caught.exception.status_code, caught.exception.detail),
+                     (403, social_routes.BANNED_PERSON))
+    fan_out.assert_not_called()
+    stored.assert_not_called()
+
+  async def test_group_fan_out_skips_banned_members_except_to_let_them_go(self):
+    delivered = []
+
+    async def deliver(host, envelope):
+      delivered.append((host, envelope["type"]))
+      return True
+
+    with patch.object(social_groups, "_deliver", new=deliver):
+      for kind in ("group_message", "group_reaction", "group_edited", "group_added"):
+        delivered.clear()
+        with self.subTest(kind):
+          result = await social_groups._fan_out({}, {
+            "good.example": {"type": kind}, BANNED: {"type": kind},
+          })
+          self.assertEqual(result, {"good.example": True, BANNED: False})
+          self.assertEqual(delivered, [("good.example", kind)])
+      for kind in ("group_removed", "group_deleted"):
+        delivered.clear()
+        with self.subTest(kind):
+          self.assertEqual(await social_groups._fan_out({}, {BANNED: {"type": kind}}), {BANNED: True})
+          self.assertEqual(delivered, [(BANNED, kind)])
+
+
 if __name__ == "__main__":
   unittest.main()

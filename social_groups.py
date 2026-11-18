@@ -105,6 +105,7 @@ from social_routes import (
   _message_preview,
   _own_host,
   _joined_for_federation,
+  _community_bans,
   _require_member,
   _same_outgoing_intent,
   _refuse_banned_messaging,
@@ -553,13 +554,25 @@ def _signed(envelope: dict, identity: dict) -> dict:
   return envelope
 
 
+# Group traffic that only ends someone's part in a group, allowed even under a ban.
+_GROUP_LEAVING_KINDS = frozenset({"group_deleted", "group_removed", "group_decline"})
+
+
 async def _fan_out(group: dict, envelopes_by_host: dict[str, dict]) -> dict:
-  """Deliver per-member envelopes concurrently; returns host → delivered."""
-  hosts = list(envelopes_by_host)
+  """Deliver per-member envelopes concurrently; returns host → delivered.
+
+  Banned members get only the envelopes that end their part in a group, so an
+  older receiver that doesn't know about the ban never gets anything else.
+  """
+  banned = await _community_bans() if envelopes_by_host else set()
+  hosts = [
+    host for host, envelope in envelopes_by_host.items()
+    if host not in banned or envelope.get("type") in _GROUP_LEAVING_KINDS
+  ]
   results = await asyncio.gather(
     *(_deliver(h, envelopes_by_host[h]) for h in hosts)
   )
-  return dict(zip(hosts, results))
+  return {host: False for host in envelopes_by_host} | dict(zip(hosts, results))
 
 
 def _added_envelope(identity: dict, group: dict, member: str) -> dict:
@@ -691,10 +704,6 @@ async def _notify_group_message(
 
 
 # ── peer surface ────────────────────────────────────────────────────────────
-
-# Group traffic that only ends someone's part in a group, allowed even under a ban.
-_GROUP_LEAVING_KINDS = frozenset({"group_deleted", "group_removed", "group_decline"})
-
 
 @router.post("/inbox")
 async def group_inbox(request: Request, db: object = Depends(get_db)):
@@ -1329,7 +1338,6 @@ async def create_group(
   """Create a group hosted on this instance and invite its first members."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  await _refuse_banned_messaging()
   name = body.name.strip()[:MAX_NAME_CHARS]
   if not name:
     raise HTTPException(status_code=400, detail="Give the group a name.")
@@ -1345,6 +1353,7 @@ async def create_group(
       member_hosts.append(host)
   if len(member_hosts) + 1 > MAX_GROUP_MEMBERS:
     raise HTTPException(status_code=400, detail="Too many members.")
+  await _refuse_banned_messaging(*member_hosts)
 
   gid = str(uuid.uuid4())
   members = {
