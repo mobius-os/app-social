@@ -1850,6 +1850,7 @@ class DecryptedMessageAdmissionTests(unittest.IsolatedAsyncioTestCase):
           patch.object(routes, "_own_host", return_value="self.example"),
           patch.object(routes, "_read_envelope", new=AsyncMock(return_value=envelope)),
           patch.object(routes, "_load_identity", return_value={"enc_private_key_b64": self.private}),
+          patch.object(routes, "_community_bans", new=AsyncMock(return_value=set())),
           patch.object(routes, "_common_app") as stored):
       unsigned = HTTPException(status_code=401, detail="Signature is invalid.")
       with patch.object(routes, "_verify_peer_envelope", new=AsyncMock(side_effect=unsigned)), \

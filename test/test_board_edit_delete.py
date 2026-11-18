@@ -392,6 +392,183 @@ class CommunityRoleChangeTests(unittest.TestCase):
         self.assertEqual(change("owner.example", "member.example", "none").status_code, 403)
 
 
+class CommunityBanTests(unittest.TestCase):
+  """Owners and admins ban ordinary members from posting; the host enforces it."""
+
+  ROLES = {"owner.example": "owner", "admin.example": "admin"}
+
+  def _store(self, root):
+    store = common_public.CommonPublicStore(root)
+    for host in ("owner.example", "admin.example", "member.example", "other.example"):
+      store.register(host, host.split(".")[0], "")
+    return store
+
+  def test_moderators_ban_and_unban_members_but_never_each_other(self):
+    with tempfile.TemporaryDirectory() as root:
+      store = self._store(root)
+      self.assertEqual(store.set_member_ban("admin.example", "member.example", True, 1.0, self.ROLES),
+                       {"banned": ["member.example"]})
+      self.assertEqual(store.set_member_ban("owner.example", "member.example", False, 2.0, self.ROLES),
+                       {"banned": []})
+      refusals = (
+        ("member.example", "other.example", 403),   # ordinary members can't ban
+        ("admin.example", "owner.example", 400),    # nor can anyone ban a moderator
+        ("owner.example", "admin.example", 400),
+        ("admin.example", "admin.example", 400),
+        ("owner.example", "stranger.example", 400),  # only directory members
+      )
+      for actor, target, status in refusals:
+        with self.subTest(actor=actor, target=target):
+          with self.assertRaises(HTTPException) as caught:
+            store.set_member_ban(actor, target, True, 3.0, self.ROLES)
+          self.assertEqual(caught.exception.status_code, status)
+      self.assertEqual(store.banned_members(), set())
+
+  def test_an_older_ban_change_never_undoes_a_newer_one(self):
+    with tempfile.TemporaryDirectory() as root:
+      store = self._store(root)
+      store.set_member_ban("admin.example", "member.example", True, 10.0, self.ROLES)
+      store.set_member_ban("owner.example", "member.example", False, 20.0, self.ROLES)
+      # The admin's ban replayed, or a different moderator's late older ban.
+      for actor, sent_at in (("admin.example", 10.0), ("owner.example", 15.0)):
+        with self.assertRaises(HTTPException) as caught:
+          store.set_member_ban(actor, "member.example", True, sent_at, self.ROLES)
+        self.assertEqual(caught.exception.status_code, 409)
+      self.assertEqual(store.banned_members(), set())
+
+  def test_a_banned_member_can_read_and_delete_but_not_post_reply_edit_or_react(self):
+    with tempfile.TemporaryDirectory() as data_dir, \
+        patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "owner.example",
+                                "COMMUNITY_ADMIN_HOSTS": "admin.example"}):
+      root = Path(data_dir)
+      keys = {host: _peer(root, host) for host in ("owner.example", "admin.example", "member.example")}
+      store = self._store(data_dir)
+      post_id, mine = str(uuid.uuid4()), str(uuid.uuid4())
+      _seed(store, post_id, mine, reply_host="member.example")
+
+      def send(host, path, body):
+        return client.post(f"/api/common/{path}", json=_signed(keys[host], {
+          "v": 0, "from": host, "sent_at": time.time(), **body}))
+
+      def ban(actor, banned):
+        return send(actor, "board/ban", {"type": "community_ban", "target": "member.example",
+                                         "banned": banned})
+
+      writes = {
+        "post": ("board", {"type": "board_post", "id": str(uuid.uuid4()), "text": "Hi"}),
+        "reply": ("board/reply", {"type": "board_reply", "post_id": post_id,
+                                  "id": str(uuid.uuid4()), "text": "Hi"}),
+        "edit": ("board/edit", {"type": "board_edit", "post_id": post_id,
+                                "reply_id": mine, "text": "changed"}),
+        "react": ("board/react", {"type": "board_react", "post_id": post_id, "emoji": "❤️"}),
+      }
+      with TestClient(community_host.create_app(data_dir)) as client:
+        self.assertEqual(client.get("/api/common/board").json()["capabilities"]["banned"], [])
+        self.assertEqual(ban("member.example", True).status_code, 403)
+        banned = ban("admin.example", True)
+        self.assertEqual(banned.json(), {"banned": ["member.example"]}, banned.text)
+        self.assertEqual(client.get("/api/common/board").json()["capabilities"]["banned"],
+                         ["member.example"])
+        for name, (path, body) in writes.items():
+          with self.subTest(write=name):
+            refused = send("member.example", path, body)
+            self.assertEqual((refused.status_code, refused.json()["detail"]),
+                             (403, common_public.BANNED_FROM_POSTING))
+        # Removing their own content stays possible.
+        removed = send("member.example", "board/reply/delete",
+                       {"type": "board_reply_delete", "post_id": post_id, "reply_id": mine})
+        self.assertEqual(removed.json(), {"status": "deleted", "reply_count": 0})
+        self.assertEqual(ban("owner.example", False).json(), {"banned": []})
+        path, body = writes["post"]
+        self.assertEqual(send("member.example", path, body).status_code, 200)
+
+  def test_a_banned_member_made_admin_is_no_longer_banned(self):
+    with tempfile.TemporaryDirectory() as data_dir, \
+        patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "owner.example",
+                                "COMMUNITY_ADMIN_HOSTS": "admin.example"}):
+      store = self._store(data_dir)
+      store.set_member_ban("owner.example", "member.example", True, 1.0, self.ROLES)
+      store.set_community_role("owner.example", "member.example", "admin", 2.0, self.ROLES)
+      with TestClient(community_host.create_app(data_dir)) as client:
+        self.assertEqual(client.get("/api/common/board").json()["capabilities"]["banned"], [])
+
+
+class CommunityLockoutTests(unittest.TestCase):
+  """A ban locks the member out of the board and People, not just posting."""
+
+  def test_a_banned_member_sees_no_board_and_no_one_in_people(self):
+    with tempfile.TemporaryDirectory() as data_dir, \
+        patch.dict(os.environ, {"COMMUNITY_OWNER_HOSTS": "owner.example",
+                                "COMMUNITY_ADMIN_HOSTS": "admin.example"}):
+      root = Path(data_dir)
+      keys = {host: _peer(root, host) for host in ("owner.example", "member.example", "other.example")}
+      store = CommunityBanTests()._store(data_dir)
+      _seed(store, str(uuid.uuid4()), str(uuid.uuid4()))
+      store.set_member_ban("owner.example", "member.example", True, 1.0,
+                           {"owner.example": "owner", "admin.example": "admin"})
+
+      def search(host, q=""):
+        return client.post("/api/common/directory/search", json=_signed(keys[host], {
+          "v": 0, "type": "directory_read", "from": host, "q": q, "sent_at": time.time()})).json()
+
+      with TestClient(community_host.create_app(data_dir)) as client:
+        locked = client.get("/api/common/board", params={"viewer": "member.example"}).json()
+        self.assertEqual((locked["posts"], locked["viewer_banned"]), ([], True))
+        self.assertEqual(locked["capabilities"]["banned"], ["member.example"])
+        self.assertTrue(client.get("/api/common/board", params={"viewer": "other.example"}).json()["posts"])
+        # Only their own entry, so their Social still knows it is registered.
+        self.assertEqual(search("member.example"),
+                         {"users": [{"host": "member.example", "handle": "member", "bio": ""}],
+                          "viewer_banned": True})
+        self.assertNotIn("member.example", [user["host"] for user in search("other.example")["users"]])
+        # Moderators still find them, to unban them.
+        self.assertIn("member.example", [user["host"] for user in search("owner.example")["users"]])
+
+
+class MessagingBanTests(unittest.IsolatedAsyncioTestCase):
+  """Each instance refuses messages to or from a banned member."""
+
+  async def test_messaging_is_refused_for_a_banned_peer_or_a_banned_owner(self):
+    with patch.object(social_routes, "_own_host", return_value="me.example"):
+      with patch.object(social_routes, "_community_bans", new=AsyncMock(return_value={"bad.example"})):
+        await social_routes._refuse_banned_messaging("good.example")
+        with self.assertRaises(HTTPException) as caught:
+          await social_routes._refuse_banned_messaging("bad.example")
+        self.assertEqual((caught.exception.status_code, caught.exception.detail),
+                         (403, social_routes.BANNED_PERSON))
+      with patch.object(social_routes, "_community_bans", new=AsyncMock(return_value={"me.example"})):
+        with self.assertRaises(HTTPException) as caught:
+          await social_routes._refuse_banned_messaging()
+        self.assertEqual(caught.exception.detail, common_public.BANNED_FROM_COMMUNITY)
+
+  async def test_the_ban_list_is_saved_from_the_board_and_kept_when_the_host_is_down(self):
+    with tempfile.TemporaryDirectory() as data_dir, \
+        patch.object(social_routes, "_common_dir", return_value=Path(data_dir)), \
+        patch.object(social_routes, "_own_host", return_value="me.example"):
+      board = AsyncMock(return_value=httpx.Response(200, json={"capabilities": {"banned": ["bad.example"]}, "posts": []},
+        request=httpx.Request("GET", "https://community.example/board")))
+      with patch.object(social_routes, "federation_request", new=board):
+        self.assertEqual(await social_routes._community_bans(), {"bad.example"})
+        # Fresh: no second board read.
+        self.assertEqual(await social_routes._community_bans(), {"bad.example"})
+      self.assertEqual(board.await_count, 1)
+      saved = social_routes._saved_community_bans()
+      social_routes.atomic_write(social_routes._community_bans_path(),
+                                 '{"banned": ["bad.example"], "fetched_at": 0}')
+      with patch.object(social_routes, "federation_request", new=AsyncMock(side_effect=httpx.ConnectError("down"))):
+        self.assertEqual(await social_routes._community_bans(), {"bad.example"})
+      self.assertGreater(social_routes._saved_community_bans()["fetched_at"], saved["fetched_at"] - 1)
+
+  async def test_send_and_both_inboxes_check_the_ban(self):
+    import social_groups
+    source = Path(social_routes.__file__).read_text()
+    self.assertIn("  await _refuse_banned_messaging(to_host)\n", source)
+    self.assertEqual(source.count('await _refuse_banned_messaging(envelope["from"])'), 3)
+    groups = Path(social_groups.__file__).read_text()
+    self.assertIn('if envelope["type"] not in _GROUP_LEAVING_KINDS:', groups)
+    self.assertGreaterEqual(groups.count("await _refuse_banned_messaging()"), 6)
+
+
 @contextmanager
 def _owner_relay(host):
   with ExitStack() as stack:
@@ -488,6 +665,32 @@ class OwnerRelayTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual((empty.status_code, empty.detail), (400, "Text can’t be empty."))
     other = await self._relay(400, "Something unexpected.")
     self.assertEqual((other.status_code, other.detail), (502, "Your edit couldn’t be saved."))
+
+  async def test_a_ban_reaches_the_host_and_its_refusal_reaches_the_member(self):
+    host = AsyncMock(return_value=httpx.Response(200, json={"banned": ["member.example"]},
+      request=httpx.Request("POST", "https://community.example/board/ban")))
+    with _owner_relay(host):
+      result = await social_routes.change_member_ban(
+        social_routes.CommunityBan(host=" Member.Example ", banned=True), db=None, principal=None)
+    self.assertEqual(result, {"banned": ["member.example"]})
+    envelope = host.await_args.args[1]
+    self.assertEqual((envelope["type"], envelope["target"], envelope["banned"]),
+                     ("community_ban", "member.example", True))
+    banned = common_public.BANNED_FROM_POSTING
+    for name, action in {
+      "post": lambda: social_routes.publish_post(
+        social_routes.PublishPost(text="Hello"), db=None, principal=None),
+      "reply": lambda: social_routes.reply_to_post(
+        social_routes.ReplyPost(post_id="abcdef12", id="12abcdef", text="x"), db=None, principal=None),
+      "reaction": lambda: social_routes.react_to_post(
+        social_routes.ReactionPost(post_id="abcdef12", emoji="❤️"), db=None, principal=None),
+    }.items():
+      with self.subTest(action=name):
+        self.assertEqual((await self._call(_host_reply(403, banned), action)).detail, banned)
+    self.assertEqual((await self._relay(403, banned)).detail, banned)
+    unverified = await self._call(_host_reply(403, "Signature is invalid."), lambda: social_routes.react_to_post(
+      social_routes.ReactionPost(post_id="abcdef12", emoji="❤️"), db=None, principal=None))
+    self.assertIn("could not verify", unverified.detail)
 
   async def test_retrying_a_deleted_reply_stops_instead_of_reposting(self):
     error = await self._call(_host_reply(410, "This reply was deleted."),

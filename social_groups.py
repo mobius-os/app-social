@@ -107,6 +107,7 @@ from social_routes import (
   _joined_for_federation,
   _require_member,
   _same_outgoing_intent,
+  _refuse_banned_messaging,
   _verify_peer_envelope,
   _write_app_attachment,
 )
@@ -691,6 +692,10 @@ async def _notify_group_message(
 
 # ── peer surface ────────────────────────────────────────────────────────────
 
+# Group traffic that only ends someone's part in a group, allowed even under a ban.
+_GROUP_LEAVING_KINDS = frozenset({"group_deleted", "group_removed", "group_decline"})
+
+
 @router.post("/inbox")
 async def group_inbox(request: Request, db: object = Depends(get_db)):
   """Verify peer authority before serializing against the group lifecycle."""
@@ -711,6 +716,9 @@ async def group_inbox(request: Request, db: object = Depends(get_db)):
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   app = _common_app(db)
   actor = await _verify_peer_envelope(envelope)
+  if envelope["type"] not in _GROUP_LEAVING_KINDS:
+    # Banned people can still leave or be removed, but nothing else.
+    await _refuse_banned_messaging(envelope["from"])
   async with _group_lock(gid):
     return await _accept_group_envelope(db, app, envelope, actor)
 
@@ -1316,6 +1324,7 @@ async def create_group(
   """Create a group hosted on this instance and invite its first members."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
+  await _refuse_banned_messaging()
   name = body.name.strip()[:MAX_NAME_CHARS]
   if not name:
     raise HTTPException(status_code=400, detail="Give the group a name.")
@@ -1414,6 +1423,7 @@ async def accept_group_invitation(
   """Join only after the owner explicitly accepts the host's invitation."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
+  await _refuse_banned_messaging()
   _validate_gid(gid)
   identity = _load_identity()
   if not identity.get("joined_at"):
@@ -1604,6 +1614,7 @@ async def retry_group_message(
   """Retry the owner's saved outgoing group post without a new identity."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
+  await _refuse_banned_messaging()
   _validate_gid(gid)
   if not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
@@ -1655,6 +1666,7 @@ async def react_to_group_message(
   """
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
+  await _refuse_banned_messaging()
   _validate_gid(gid)
   if not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
@@ -1770,6 +1782,7 @@ async def edit_group_message(
   """
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
+  await _refuse_banned_messaging()
   _validate_gid(gid)
   if not _GID_RE.fullmatch(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
@@ -1853,6 +1866,7 @@ async def send_group_message(
   """Send while open; host acceptance serializes with membership and deletion."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
+  await _refuse_banned_messaging()
   _validate_gid(gid)
   text = body.text.strip()
   attachment = _validate_attachment(body.attachment)
@@ -2337,6 +2351,7 @@ async def add_group_member(
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
   host = _clean_member_host(body.host)
+  await _refuse_banned_messaging(host)
   handle = await _discover_handle(host, body.handle or "")
   return await _manage(app, gid, "add", target=host, handle=handle)
 

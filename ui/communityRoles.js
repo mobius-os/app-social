@@ -12,6 +12,11 @@ export function sortByRole(people, roles) {
     || (a.handle || a.host).localeCompare(b.handle || b.host))
 }
 
+export function banChangedMessage(person, banned) {
+  const name = person.handle ? `@${person.handle}` : 'This member'
+  return banned ? `${name} is banned from the Community.` : `${name} can use the Community again.`
+}
+
 export function roleChangedMessage(person, role) {
   const name = person.handle ? `@${person.handle}` : 'They'
   if (role === 'owner') return `${name} is now the Community owner. You’re an admin.`

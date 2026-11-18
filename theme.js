@@ -161,7 +161,29 @@ export const CSS = `
 .cn-profile-name .cn-role-label { vertical-align: 4px; }
 .cn-role-manage { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
 .cn-role-manage h4 { margin: 0 0 8px; color: var(--muted); font: 650 13px/1.2 var(--font); }
-.cn-role-manage .cn-sheet-actions { flex-wrap: wrap; }
+.cn-role-manage .cn-sheet-actions { flex-wrap: wrap; align-items: center; justify-content: flex-start; margin-top: 0; }
+.cn-ban-btn {
+  min-height: 38px; padding: 0 16px; border-radius: 999px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: transparent; color: var(--danger-text, var(--danger)); font: 600 14px var(--font);
+  transition: background-color .15s ease;
+}
+.cn-ban-btn:hover { background: color-mix(in srgb, var(--danger) 9%, transparent); }
+.cn-ban-btn.is-unban { border-color: var(--border); color: var(--text); }
+.cn-ban-btn.is-unban:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.cn-ban-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cn-ban-btn:disabled { opacity: .5; cursor: default; }
+.cn-role-label.is-banned {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger-text, var(--danger));
+}
+.cn-banned-screen {
+  width: min(calc(100% - 32px), 720px); margin: 24px auto; padding: 28px 24px; border-radius: 18px; text-align: center;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+}
+.cn-banned-screen h2 { margin: 0 0 8px; font-size: 19px; font-weight: 720; color: var(--danger-text, var(--danger)); }
+.cn-banned-screen p { margin: 0 auto; max-width: 440px; color: var(--muted); font-size: 14.5px; line-height: 1.5; }
 .cn-role-label.is-owner {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent-text, var(--accent));
@@ -431,13 +453,23 @@ export const CSS = `
   text-align: left; color: inherit; font-family: var(--font); cursor: pointer;
   position: relative; transition: background 0.15s ease;
 }
-.cn-row + .cn-row::before {
+.cn-row + .cn-row::before, .cn-people-item + .cn-people-item > .cn-row::before {
   content: ""; position: absolute; top: 0; left: 57px; right: 4px; height: 1px;
   background: var(--border); opacity: 0.6;
 }
 .cn-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .cn-row:active { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .cn-row-copy { min-width: 0; flex: 1; }
+/* People rows: owners and admins see Ban on the right while hovering or focusing a row. */
+.cn-people-item { position: relative; }
+.cn-quick-ban {
+  position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
+  background: var(--bg); opacity: 0; pointer-events: none; transition: opacity .12s ease;
+}
+.cn-people-item:hover .cn-quick-ban, .cn-people-item:focus-within .cn-quick-ban { opacity: 1; pointer-events: auto; }
+.cn-people-item.has-quick-ban:hover > .cn-row, .cn-people-item.has-quick-ban:focus-within > .cn-row { padding-right: 104px; }
+@media (hover: none) { .cn-quick-ban { display: none; } .cn-people-item.has-quick-ban > .cn-row { padding-right: 8px !important; } }
+@media (prefers-reduced-motion: reduce) { .cn-quick-ban { transition: none; } }
 .cn-row-name { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; min-width: 0; }
 .cn-row-name strong { overflow: hidden; text-overflow: ellipsis; }
 .cn-row-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
