@@ -1,24 +1,24 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronLeft, SettingsCog } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptGroupInvitation, clearGroupUnread, clockTime, declineGroupInvitation,
   editGroupMessage, getGroup, getPeer, listGroupMessages, reactToGroupMessage, requestStatus, retryGroupMessage,
   sendGroupMessage, watchLatestGroupMessages,
 } from '../api.js'
 import { BOARD_REACTION_EMOJIS } from '../reconciliation.js'
-import { GroupAvatar } from './Messages.jsx'
+import GroupPicture from './GroupPicture.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { replyTargetFor } from './MessageBubble.jsx'
 import { ReactionRetryNote, supportsMessageReactions, useMessageReactions } from './MessageReactions.jsx'
 import { supportsMessageEdits, useMessageEdits } from './messageEdits.js'
-import GroupDetails from './GroupDetails.jsx'
+import GroupSettings from './GroupDetails.jsx'
 import {
   DeliveryNote, DeliveryTick, MessageTimeline, TimelineComposer, useMessageTimeline,
   withDayDividers,
 } from './useMessageTimeline.jsx'
 
 export default function GroupThread({
-  group, me, version, foreground, onBack, showToast, onOpenImage,
+  group, me, version, foreground, onBack, showToast, onOpenImage, onOpenPerson, onMessageUser,
 }) {
   const [details, setDetails] = useState(false)
   const [currentGroup, setCurrentGroup] = useState(group)
@@ -34,7 +34,7 @@ export default function GroupThread({
     refreshExtra: () => getGroup(gid),
     onRefreshed: setCurrentGroup,
     pinnedTop: pending,
-    sendBlocked: !!currentGroup.deleted_at,
+    sendBlocked: !!(currentGroup.deleted_at || currentGroup.removed_at),
     signals: { created: 'group_message', error: 'group_send' },
     deliver: ({ id, text, attachment, reply }) =>
       sendGroupMessage(id, gid, text, attachment, reply),
@@ -77,8 +77,8 @@ export default function GroupThread({
     send: (id, emoji, on, updateId) => reactToGroupMessage(gid, id, emoji, on, updateId),
     onError: error => showToast(error.message || 'The reaction couldn’t be sent.', 'error'),
   })
-  const canReact = isMember && !currentGroup.deleted_at && (hostedHere || hostReacts)
-  const canEdit = isMember && !currentGroup.deleted_at && (hostedHere || hostEdits)
+  const canReact = isMember && !currentGroup.deleted_at && !currentGroup.removed_at && (hostedHere || hostReacts)
+  const canEdit = isMember && !currentGroup.deleted_at && !currentGroup.removed_at && (hostedHere || hostEdits)
   const saveEdit = useMessageEdits({
     timeline, showToast, save: (id, text, editId) => editGroupMessage(gid, id, text, editId),
   })
@@ -108,6 +108,25 @@ export default function GroupThread({
   }
 
   const memberCount = (currentGroup.members || []).length
+  // Who is in the group, shown after the count: "You" first, then handles.
+  // A member saved without a handle borrows it from the cached people list.
+  const [knownHandles, setKnownHandles] = useState({})
+  useEffect(() => {
+    let active = true
+    window.mobius?.storage?.get('cache/people.json').then(cached => {
+      if (!active || !Array.isArray(cached?.users)) return
+      setKnownHandles(Object.fromEntries(cached.users.filter(user => user.handle).map(user => [user.host, user.handle])))
+    }).catch(() => null)
+    return () => { active = false }
+  }, [])
+  const memberNames = (currentGroup.members || [])
+    .map(member => {
+      if (member.host === me?.host) return 'You'
+      const handle = member.handle || knownHandles[member.host]
+      return handle ? `@${handle}` : 'Social member'
+    })
+    .sort((a, b) => (a === 'You' ? -1 : b === 'You' ? 1 : 0))
+    .join(', ')
   let lastAuthor = null
   const rendered = withDayDividers(messages, (message, startsDay) => {
     if (startsDay) lastAuthor = null
@@ -185,26 +204,35 @@ export default function GroupThread({
 
   return (
     <div className={`cn-thread cn-screen${details ? ' has-dialog' : ''}`}>
-      <div className="cn-thread-bar">
-        <button className="cn-btn cn-btn-ghost cn-btn-icon" onClick={onBack} aria-label="Back">
-          <ArrowLeft />
+      <div className="cn-thread-back-row">
+        <button type="button" className="cn-back-link" onClick={onBack} aria-label="Back to Chats">
+          <ChevronLeft aria-hidden="true" /><span>Chats</span>
         </button>
-        <GroupAvatar name={currentGroup.name} />
+      </div>
+      <div className="cn-thread-bar">
+        <GroupPicture gid={gid} hash={currentGroup.icon_hash} name={currentGroup.name} />
         <span className="cn-thread-heading">
           <span className="cn-person-name">{currentGroup.name}</span>
-          <span className="cn-meta">{currentGroup.deleted_at ? 'Group closed' : `${memberCount} ${memberCount === 1 ? 'person' : 'people'}`}</span>
+          <span className="cn-meta cn-group-members-line" title={memberNames}>{currentGroup.deleted_at ? 'Group closed' : currentGroup.removed_at ? 'Removed' : `${memberCount} ${memberCount === 1 ? 'person' : 'people'}${memberNames ? ` · ${memberNames}` : ''}`}</span>
         </span>
-        <button className="cn-btn cn-btn-secondary" onClick={() => setDetails(true)} aria-label="Group details">Details</button>
+        <button type="button" className="cn-header-cog" onClick={() => setDetails(true)} aria-label="Group settings"
+                title="Group settings" aria-haspopup="dialog">
+          <SettingsCog aria-hidden="true" />
+        </button>
       </div>
       <MessageTimeline timeline={timeline} header={invitationPanel} empty={emptyState}>
         {rendered}
       </MessageTimeline>
       {currentGroup.deleted_at ? <div className="cn-group-closed" role="status">This group has been closed. You can still read its earlier messages.</div>
+        : currentGroup.removed_at ? <div className="cn-group-closed" role="status">You were removed from this group. You can still read its earlier messages.</div>
         : pending ? <div className="cn-request-quiet" role="status">Accept this invitation to send messages.</div>
         : <TimelineComposer timeline={timeline} onOpenImage={onOpenImage} />}
-      {details && <GroupDetails group={currentGroup} me={me} onClose={() => setDetails(false)}
+      {details && <GroupSettings group={currentGroup} me={me} knownHandles={knownHandles} showToast={showToast}
+        onClose={() => setDetails(false)}
         onUpdated={updated => { timeline.cancelRefresh(); setCurrentGroup(updated) }}
-        onDeleted={() => { showToast('Group deleted', 'success'); onBack() }} />}
+        onDeleted={() => { setDetails(false); showToast('Group deleted', 'success'); onBack() }}
+        onOpenPerson={host => onOpenPerson?.(host)}
+        onMessage={(host, handle) => onMessageUser?.(host, handle)} />}
     </div>
   )
 }

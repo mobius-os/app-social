@@ -54,3 +54,10 @@ export function membershipDuration(profile) {
   const started = timestamp(profile?.member_since) ?? timestamp(profile?.joined_at, true)
   return started ? `Member since ${monthYear.format(started)}` : 'New member'
 }
+
+// A message sent from a profile keeps one id while its recipient and text are
+// unchanged. Sending again after a lost reply reuses it, and the service then
+// answers with the saved message instead of creating or delivering a second.
+export function profileSendIdentity(prior, host, text, newId = () => crypto.randomUUID()) {
+  return prior && prior.host === host && prior.text === text ? prior : { id: newId(), host, text }
+}

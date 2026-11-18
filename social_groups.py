@@ -2,7 +2,7 @@
 
 A group lives on its creator's instance, the **group host**. The host owns the
 authoritative membership record; members keep their own copy of every message,
-exactly like 1:1 conversations. Ten signed envelope types extend the
+exactly like 1:1 conversations. Twelve signed envelope types extend the
 protocol, all delivered to `/api/app-services/social/groups/inbox`:
 
 - `group_added`  host → invitee   invitation; carries group metadata
@@ -13,8 +13,25 @@ protocol, all delivered to `/api/app-services/social/groups/inbox`:
 - `group_deleted` host → member   the group is closed; retain local history
 - `group_react`   member → host    a member turns a reaction on or off
 - `group_reaction` host → member   the host's relay of a reaction
+- `group_manage`  admin → host     an admin asks the host to change the group
+- `group_removed` host → member    the member was removed; retain local history
 - `group_edit`    member → host    the author replaces their message's text
 - `group_edited`  host → member    the host's relay of an edit, with the signed `group_edit`
+
+A group may have a small picture (`group_icon`, a 128px static image of at most
+`MAX_GROUP_ICON_BYTES`). The host keeps it in its record and sends it inside
+every `group_added` roster refresh, so it fits the control-envelope budget and
+older members simply ignore the field. A refresh from an updated host always
+carries the key (null when there is no picture); its absence means an older
+host, and the member's saved picture is left alone.
+
+Roles live only in the host's record. The creator (the host) can do every
+management action; an admin may add, reinvite and remove ordinary members and
+rename the group. Only the creator appoints admins or deletes the group. An
+admin's request is a signed `group_manage` the host authorizes against its own
+roster, so no member can grant itself authority. Roster refreshes carry each
+member's role and a `roster_revision`, so a delayed refresh never undoes a
+newer one.
 
 Like `group_message`, a `group_reaction` carries the member-signed
 `group_react` as `original`, so the host cannot forge someone's reaction.
@@ -31,8 +48,12 @@ Owner surface (owner JWT or the Social app's scoped token):
   POST /api/services/social/groups/{gid}/read          mark saved messages read
   POST /api/services/social/groups/{gid}/accept        accept + join a remote group
   POST /api/services/social/groups/{gid}/decline       decline a remote invitation
-  POST /api/services/social/groups/{gid}/members       add a member (host only)
-  DELETE /api/services/social/groups/{gid}             close a group (host only)
+  POST /api/services/social/groups/{gid}/members       add a member (creator or admin)
+  DELETE /api/services/social/groups/{gid}/members/{host}  remove a member (creator or admin)
+  PATCH /api/services/social/groups/{gid}              rename the group (creator or admin)
+  PUT /api/services/social/groups/{gid}/icon           set or clear the picture (creator or admin)
+  POST /api/services/social/groups/{gid}/admins        appoint or demote an admin (creator)
+  DELETE /api/services/social/groups/{gid}             close a group (creator only)
 
 Host-side authoritative records live in `<data_dir>/common/groups/`; each
 instance's own copy of group conversations lives in the Social app's per-app
@@ -90,6 +111,7 @@ from social_routes import (
   _write_app_attachment,
 )
 from service_io import atomic_write
+from common_public import image_thumbnail_bytes as _image_thumbnail_bytes
 from message_history import begin_message_mutation, load_page, mirror_message
 from message_edits import (
   apply_edit, begin_own_edit, edit_result, settle_own_edit, supports_message_edits, validate_edit,
@@ -141,6 +163,8 @@ def _validate_gid(gid: str) -> None:
 def _require_open(group: dict) -> None:
   if group.get("deleted_at"):
     raise HTTPException(status_code=410, detail="This group has been deleted.")
+  if group.get("removed_at"):
+    raise HTTPException(status_code=410, detail="You're no longer a member of this group.")
 
 
 
@@ -177,7 +201,12 @@ async def _store_group_meta(app, gid: str, updates: dict) -> None:
     path = _group_dir(app, gid) / "meta.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     meta = json.loads(path.read_text()) if path.is_file() else {}
+    updates = dict(updates)
+    has_icon = "icon" in updates
+    icon = updates.pop("icon", None)
     meta.update(updates)
+    if has_icon:
+      _write_member_icon(app, gid, meta, icon)
     atomic_write(path, json.dumps(meta))
     _bump_version(app)
 
@@ -214,8 +243,32 @@ async def _apply_member_group_lifecycle(
         request_status="accepted" if prior_state == "accepted" else "declined",
       )
       status = "deleted"
+    elif kind == "group_removed":
+      if meta.get("deleted_at"):
+        return "deleted"
+      current_version = int(meta.get("invitation_version") or 0)
+      if invitation_version < current_version:
+        return "stale"  # a delayed removal must not undo a later re-invitation
+      if meta.get("removed_at") and invitation_version == current_version:
+        return "already_removed"
+      merged = dict(meta)
+      if not meta:
+        # The removal overtook the first invitation. Keep it as a hidden
+        # tombstone so that delayed invitation cannot open a request.
+        merged.update(gid=gid, host=sender, name=updates.get("name") or "Group", members=[])
+        status = "removed_unseen"
+      else:
+        status = "already_removed" if meta.get("removed_at") else "removed"
+      merged.update(
+        # Only a strictly newer membership (a re-invitation) reopens the group.
+        invitation_version=invitation_version,
+        removed_at=meta.get("removed_at") or time.time(), unread=0, request_count=0,
+        request_status=(
+          "accepted" if meta and _group_request_state(meta) == "accepted" else "declined"
+        ),
+      )
     else:
-      if meta:
+      if meta.get("deleted_at"):
         _require_open(meta)
       current_version = meta.get("invitation_version", 0)
       if invitation_version < current_version:
@@ -225,11 +278,32 @@ async def _apply_member_group_lifecycle(
         and meta.get("invitation_id") not in (None, invitation_id)
       ):
         return "stale"
+      rejoining = bool(meta.get("removed_at"))
+      if rejoining and invitation_version == current_version:
+        return "stale"  # the roster of the membership that was removed
       request_state = _group_request_state(meta) if meta else "pending"
-      if request_state == "declined" and meta.get("invitation_id") != invitation_id:
+      if rejoining or (
+        request_state == "declined" and meta.get("invitation_id") != invitation_id
+      ):
         request_state = "pending"
+      incoming_revision = updates.get("roster_revision")
+      if (
+        isinstance(incoming_revision, int)
+        and incoming_revision < _roster_revision(meta)
+      ):
+        # A delayed refresh keeps its invitation facts but not its older roster.
+        updates = {
+          key: value for key, value in updates.items()
+          if key not in ("members", "name", "roster_revision", "icon")
+        }
       merged = dict(meta)
+      merged.pop("removed_at", None)
+      updates = dict(updates)
+      has_icon = "icon" in updates
+      icon = updates.pop("icon", None)
       merged.update(updates)
+      if has_icon:
+        _write_member_icon(app, gid, merged, icon)
       merged.update(
         request_status=request_state,
         request_count=(
@@ -352,13 +426,111 @@ async def _mark_group_read(app, gid: str) -> bool:
     return True
 
 
+_GONE_STATES = ("declined", "removed")
+
+
+def _member_role(group: dict, host: str) -> str:
+  """The host's own record is the only authority for a member's role."""
+  if host == group.get("host"):
+    return "creator"
+  member = group["members"].get(host) or {}
+  if member.get("status") in _GONE_STATES:
+    return "none"
+  return "admin" if member.get("role") == "admin" else "member"
+
+
 def _members_snapshot(group: dict) -> list[dict]:
-  # Privacy contract: only host + handle circulate; display names never do.
-  return [
-    {"host": h, "handle": str(m.get("handle") or "")[:MAX_NAME_CHARS]}
-    for h, m in group["members"].items()
-    if m.get("status") != "declined"
-  ]
+  # Privacy contract: only host, handle and role circulate; display names never do.
+  snapshot = []
+  for h, m in group["members"].items():
+    if m.get("status") in _GONE_STATES:
+      continue
+    entry = {"host": h, "handle": str(m.get("handle") or "")[:MAX_NAME_CHARS]}
+    role = _member_role(group, h)
+    if role != "member":
+      entry["role"] = role
+    snapshot.append(entry)
+  return snapshot
+
+
+def _roster_revision(group_or_meta: dict) -> int:
+  revision = group_or_meta.get("roster_revision")
+  if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+    return 0
+  return revision
+
+
+def _roster_view(group: dict) -> dict:
+  """What members' copies show: the name, picture, roster and its revision."""
+  return {
+    "name": group["name"], "members": _members_snapshot(group),
+    "roster_revision": _roster_revision(group), "icon": _icon_wire(group.get("icon")),
+  }
+
+
+# ── group picture ───────────────────────────────────────────────────────────
+
+MAX_GROUP_ICON_BYTES = 10_240
+GROUP_ICON_SIDES = (128, 96, 64)
+_ICON_MIMES = ("image/webp", "image/png", "image/jpeg")
+
+
+def _icon_wire(icon: Any) -> dict | None:
+  """The exact protocol shape of a saved picture, or None."""
+  if not isinstance(icon, dict):
+    return None
+  return {key: icon[key] for key in ("mime", "data_b64", "w", "h") if key in icon} or None
+
+
+def _icon_hash(data_b64: str) -> str:
+  return hashlib.sha256(data_b64.encode()).hexdigest()[:20]
+
+
+def _render_group_icon(value: Any) -> dict | None:
+  """Re-encode an untrusted image into the small square-bounded group picture."""
+  if value is None:
+    return None
+  checked = _validate_attachment(value)
+  if checked is None or value.get("mime") == "image/gif":
+    raise HTTPException(status_code=400, detail="Choose a still image for the group picture.")
+  for side in GROUP_ICON_SIDES:
+    try:
+      mime, data = _image_thumbnail_bytes(checked, max_side=side)
+    except Exception as exc:
+      raise HTTPException(status_code=400, detail="This image couldn't be used.") from exc
+    if len(data) <= MAX_GROUP_ICON_BYTES:
+      from PIL import Image
+      import io
+      with Image.open(io.BytesIO(data)) as image:
+        width, height = image.size
+      return {
+        "mime": mime, "data_b64": base64.b64encode(data).decode(), "w": width, "h": height,
+      }
+  raise HTTPException(status_code=400, detail="This image is too detailed for a group picture.")
+
+
+def _received_icon(value: Any) -> dict | None:
+  """A member's check of the host's picture; anything unusable shows no picture."""
+  try:
+    checked = _validate_attachment(value, thumbnail=True)
+  except HTTPException:
+    return None
+  if checked is None or value["mime"] not in _ICON_MIMES or len(checked[1]) > MAX_GROUP_ICON_BYTES:
+    return None
+  return _icon_wire(value)
+
+
+def _write_member_icon(app, gid: str, meta: dict, icon: dict | None) -> None:
+  """Save the picture beside meta.json; meta keeps only its hash. Caller holds the lock."""
+  path = _group_dir(app, gid) / "icon.json"
+  if icon is None:
+    path.unlink(missing_ok=True)
+    meta.pop("icon_hash", None)
+    return
+  digest = _icon_hash(icon["data_b64"])
+  if meta.get("icon_hash") != digest or not path.is_file():
+    atomic_write(path, json.dumps({**icon, "hash": digest}))
+  meta["icon_hash"] = digest
 
 
 # ── outbound delivery ───────────────────────────────────────────────────────
@@ -411,6 +583,8 @@ def _added_envelope(identity: dict, group: dict, member: str) -> dict:
     "invitation_version": invitation_version,
     "group_name": group["name"],
     "members": _members_snapshot(group),
+    "roster_revision": _roster_revision(group),
+    "group_icon": _icon_wire(group.get("icon")),
     "sent_at": time.time(),
   }, identity)
 
@@ -532,7 +706,7 @@ async def group_inbox(request: Request, db: object = Depends(get_db)):
   if envelope.get("type") not in (
     "group_added", "group_deleted", "group_post", "group_message",
     "group_accept", "group_decline", "group_react", "group_reaction",
-    "group_edit", "group_edited",
+    "group_manage", "group_removed", "group_edit", "group_edited",
   ):
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   app = _common_app(db)
@@ -566,6 +740,7 @@ async def _accept_group_envelope(
         return {"status": "accepted"}
       if envelope.get("invitation_id") != member.get("invitation_id"):
         raise HTTPException(status_code=409, detail="This invitation has been replaced.")
+      published = _members_snapshot(group)
       if kind == "group_accept":
         if status == "active":
           return {"status": "accepted"}
@@ -576,25 +751,45 @@ async def _accept_group_envelope(
           handle=str(actor.get("handle") or member.get("handle") or "")[:MAX_NAME_CHARS],
           joined_at=time.time(),
         )
-        atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
-        members = _members_snapshot(group)
       else:
         if status == "declined":
           return {"status": "declined"}
         if status == "active":
           raise HTTPException(status_code=409, detail="An active member cannot decline an invitation.")
         member["status"] = "declined"
-        atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
-        members = _members_snapshot(group)
+      members = _members_snapshot(group)
+      # A changed roster (a decline, or an acceptance that brings a new
+      # handle) gets a newer revision, so a delayed older refresh can't undo it.
+      roster_changed = members != published
+      if roster_changed:
+        group["roster_revision"] = _roster_revision(group) + 1
+      atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
       # Keep the local UI snapshot in the same authoritative transaction. A
       # later membership transition must not be overwritten by this older
       # roster after it has already committed.
-      await _store_group_meta(app, gid, {"members": members})
+      await _store_group_meta(app, gid, {
+        "members": members, "roster_revision": _roster_revision(group),
+      })
+      refreshes: dict[str, dict] = {}
+      if roster_changed:
+        # Everyone else learns the new roster now. The sender is waiting on
+        # this reply, so it gets no refresh it would have to accept meanwhile.
+        identity = _load_identity()
+        refreshes = {
+          host: _added_envelope(identity, group, host)
+          for host, entry in group["members"].items()
+          if host not in (_own_host(), sender) and entry.get("status") not in _GONE_STATES
+        }
+    if refreshes:
+      await _fan_out({}, refreshes)
     if kind == "group_accept":
       return {"status": "accepted"}
     return {"status": "declined"}
 
-  if kind in ("group_added", "group_deleted"):
+  if kind == "group_manage":
+    return await _host_accept_manage(app, gid, envelope)
+
+  if kind in ("group_added", "group_deleted", "group_removed"):
     meta = _load_group_meta(app, gid)
     hosted = _load_host_group(gid)
     known_host = hosted.get("host") if hosted else meta.get("host") if meta else None
@@ -610,20 +805,26 @@ async def _accept_group_envelope(
         app, gid, sender, kind, {"name": name},
       )
       return {"status": status}
+    if kind == "group_removed":
+      removed_version = envelope.get("invitation_version", 1)
+      if (
+        not isinstance(removed_version, int) or isinstance(removed_version, bool)
+        or removed_version < 1
+      ):
+        raise HTTPException(status_code=400, detail="Invitation version is invalid.")
+      status = await _apply_member_group_lifecycle(
+        app, gid, sender, kind, {"name": name}, invitation_version=removed_version,
+      )
+      if status == "removed":
+        await notify(
+          f"You were removed from {name}", "Your earlier messages are still in Social.",
+          f"group:{gid}",
+        )
+      return {"status": status}
     invitation_id = envelope.get("id")
     if not isinstance(invitation_id, str) or not _GID_RE.fullmatch(invitation_id):
       raise HTTPException(status_code=400, detail="Invitation id is invalid.")
-    members = envelope.get("members")
-    if not isinstance(members, list) or len(members) > MAX_GROUP_MEMBERS:
-      raise HTTPException(status_code=400, detail="Member list is invalid.")
-    roster = {}
-    for member in members:
-      if not isinstance(member, dict) or not _valid_host(member.get("host") or ""):
-        raise HTTPException(status_code=400, detail="Member list is invalid.")
-      roster[member["host"]] = {
-        "host": member["host"],
-        "handle": str(member.get("handle") or "")[:MAX_NAME_CHARS],
-      }
+    roster = _parse_roster(envelope.get("members"))
     invitation_version = envelope.get("invitation_version", 1)
     if (
       not isinstance(invitation_version, int)
@@ -632,13 +833,24 @@ async def _accept_group_envelope(
     ):
       raise HTTPException(status_code=400, detail="Invitation version is invalid.")
     prior = _load_group_meta(app, gid) or {}
-    status = await _apply_member_group_lifecycle(app, gid, sender, kind, {
+    updates = {
       "gid": gid, "name": name, "host": sender,
-      "members": list(roster.values()),
+      "members": roster,
       "invited_by_handle": str(actor.get("handle") or "")[:MAX_NAME_CHARS],
       "invitation_id": invitation_id,
       "invitation_version": invitation_version,
-    }, invitation_id=invitation_id, invitation_version=invitation_version)
+    }
+    roster_revision = envelope.get("roster_revision")
+    if isinstance(roster_revision, int) and not isinstance(roster_revision, bool):
+      if roster_revision < 0:
+        raise HTTPException(status_code=400, detail="Roster revision is invalid.")
+      updates["roster_revision"] = roster_revision
+    if "group_icon" in envelope:
+      updates["icon"] = _received_icon(envelope["group_icon"])
+    status = await _apply_member_group_lifecycle(
+      app, gid, sender, kind, updates,
+      invitation_id=invitation_id, invitation_version=invitation_version,
+    )
     # Roster refreshes re-deliver the same pending invitation; notify once.
     if status == "pending" and (
       prior.get("invitation_id") != invitation_id
@@ -1737,6 +1949,383 @@ async def send_group_message(
   }
 
 
+# ── management: creator and admins ──────────────────────────────────────────
+
+_MANAGE_ACTIONS = ("add", "remove", "rename", "set_admin", "set_icon")
+_UNSET = object()
+_MANAGE_ID_MEMORY = 200
+_HOST_UPDATE_NEEDED = (
+  "The group creator's Social needs an update before admins can manage this group."
+)
+
+
+class RenameGroup(BaseModel):
+  name: str
+
+
+class SetAdmin(BaseModel):
+  host: str
+  admin: bool
+
+
+class SetIcon(BaseModel):
+  icon: dict | None = None
+
+
+def _clean_group_name(value: Any) -> str:
+  name = str(value or "").strip()[:MAX_NAME_CHARS]
+  if not name:
+    raise HTTPException(status_code=400, detail="Give the group a name.")
+  return name
+
+
+def _clean_member_host(value: Any) -> str:
+  host = str(value or "").strip().lower()
+  if not _valid_host(host):
+    raise HTTPException(status_code=400, detail="Invalid member address.")
+  return host
+
+
+async def _discover_handle(host: str, fallback: str = "") -> str:
+  try:
+    actor = await _fetch_actor(host)
+    return str(actor.get("handle") or fallback)[:MAX_NAME_CHARS]
+  except HTTPException:
+    return fallback[:MAX_NAME_CHARS]  # unreachable now; metadata heals later
+
+
+def _require_manager(group: dict, actor: str) -> str:
+  """The actor's current role, if it may manage (and so see) this group now."""
+  role = _member_role(group, actor)
+  if role == "creator":
+    return role
+  if role != "admin" or not _host_member_active(group["members"][actor]):
+    raise HTTPException(
+      status_code=403,
+      detail="Only the group's creator or an admin can manage this group.",
+    )
+  return role
+
+
+def _active_member_count(group: dict) -> int:
+  # Removed and declined entries stay as lifecycle history but hold no place.
+  return sum(
+    1 for entry in group["members"].values() if entry.get("status") not in _GONE_STATES
+  )
+
+
+def _authorize_manage(group: dict, actor: str, action: str, target: str | None) -> None:
+  """The creator manages everything; an admin manages ordinary members."""
+  if _require_manager(group, actor) == "creator":
+    if target == group["host"] and action in ("remove", "set_admin"):
+      raise HTTPException(
+        status_code=409, detail="The creator's place in the group can't be changed.",
+      )
+    return
+  if action == "set_admin":
+    raise HTTPException(status_code=403, detail="Only the group's creator can choose admins.")
+  if action == "remove" and target is not None and _member_role(group, target) in (
+    "creator", "admin",
+  ):
+    raise HTTPException(status_code=403, detail="Only the group's creator can remove an admin.")
+
+
+def _apply_manage(group: dict, actor: str, action: str, *, target: str | None,
+                  handle: str, name: str | None, admin: bool | None,
+                  icon: Any = _UNSET) -> str:
+  """Mutate the authoritative record in place and return the outcome."""
+  members = group["members"]
+  if action == "add":
+    entry = members.get(target)
+    if (entry is None or entry.get("status") in _GONE_STATES) and (
+      _active_member_count(group) >= MAX_GROUP_MEMBERS
+    ):
+      raise HTTPException(status_code=400, detail="The group is full.")
+    if entry is None:
+      members[target] = {
+        "handle": handle, "invited_at": time.time(), "status": "invited",
+        "invitation_id": str(uuid.uuid4()), "invitation_version": 1,
+      }
+      return "added"
+    if entry.get("status") in _GONE_STATES:
+      entry.pop("removed_at", None)
+      entry.pop("removed_by", None)
+      entry.update(
+        status="invited", invited_at=time.time(),
+        handle=handle or entry.get("handle") or "",
+        invitation_id=str(uuid.uuid4()),
+        invitation_version=int(entry.get("invitation_version") or 1) + 1,
+      )
+      return "reinvited"
+    return "already_member"
+  if action == "remove":
+    entry = members.get(target)
+    if entry is not None and entry.get("status") == "removed":
+      return "already_removed"  # the caller re-sends the removal notice
+    if entry is None or entry.get("status") in _GONE_STATES:
+      return "not_member"
+    entry.pop("role", None)
+    entry.update(status="removed", removed_at=time.time(), removed_by=actor)
+    return "removed"
+  if action == "rename":
+    if name == group["name"]:
+      return "unchanged"
+    group["name"] = name
+    return "renamed"
+  if action == "set_icon":
+    current = _icon_wire(group.get("icon"))
+    if icon == current:
+      return "unchanged"
+    if icon is None:
+      group.pop("icon", None)
+      return "icon_removed"
+    group["icon"] = icon
+    return "icon_set"
+  # set_admin
+  entry = members.get(target)
+  if entry is None or not _host_member_active(entry):
+    raise HTTPException(
+      status_code=409, detail="Only someone who has joined the group can be an admin.",
+    )
+  if (entry.get("role") == "admin") == admin:
+    return "unchanged"
+  if admin:
+    entry["role"] = "admin"
+    return "admin_added"
+  entry.pop("role", None)
+  return "admin_removed"
+
+
+async def _host_manage(
+  app, gid: str, actor: str, action: str, *, target: str | None = None,
+  handle: str = "", name: str | None = None, admin: bool | None = None,
+  icon: Any = _UNSET, request_id: str | None = None, skip: str | None = None,
+) -> tuple[dict, dict[str, dict]]:
+  """Authorize and commit one change on the host; return (receipt, deliveries).
+
+  Callers hold the group lifecycle lock and deliver outside the transaction.
+  `skip` is the requesting admin, who receives the roster in the reply rather
+  than a refresh it would have to accept while still waiting on this host.
+
+  Repeating a request is how a caller retries deliveries that failed: every
+  request, including a duplicate or one that changes nothing, re-sends the
+  current roster (members keep only the newer revision), and repeating a
+  removal re-sends its notice without inviting the person again.
+  """
+  with _host_group_transaction(gid):
+    group = _load_host_group(gid)
+    if group is None:
+      raise HTTPException(status_code=404, detail="Unknown group.")
+    _require_open(group)
+    seen = group.get("manage_ids") or []
+    # Remembered per sender: one sender can never replay another's request id.
+    remembered = f"{actor} {request_id}" if request_id is not None else None
+    if remembered is not None and remembered in seen:
+      # Nothing changes twice, but the reply still shows the group, so the
+      # sender must be allowed to manage it now, not merely when first asked.
+      _require_manager(group, actor)
+      status = "duplicate"
+    else:
+      _authorize_manage(group, actor, action, target)
+      status = _apply_manage(
+        group, actor, action, target=target, handle=handle, name=name, admin=admin,
+        icon=icon,
+      )
+      changed = status not in ("already_member", "already_removed", "not_member", "unchanged")
+      if changed:
+        group["roster_revision"] = _roster_revision(group) + 1
+      if remembered is not None:
+        group["manage_ids"] = (seen + [remembered])[-_MANAGE_ID_MEMORY:]
+      if changed or remembered is not None:
+        atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
+    view = _roster_view(group)
+    await _store_group_meta(app, gid, view)
+    identity = _load_identity()
+    deliveries: dict[str, dict] = {}
+    for member, entry in group["members"].items():
+      if member in (_own_host(), skip) or entry.get("status") in _GONE_STATES:
+        continue
+      deliveries[member] = _added_envelope(identity, group, member)
+    removed_entry = group["members"].get(target) if action == "remove" else None
+    if removed_entry is not None and removed_entry.get("status") == "removed":
+      deliveries[target] = _signed({
+        "v": 0, "type": "group_removed", "id": str(uuid.uuid4()),
+        "from": _own_host(), "to": target, "gid": gid,
+        "group_name": group["name"],
+        "invitation_version": int(removed_entry.get("invitation_version") or 1),
+        "sent_at": time.time(),
+      }, identity)
+  icon_hash = _icon_hash(view["icon"]["data_b64"]) if view["icon"] else None
+  return {"status": status, **view, "icon_hash": icon_hash}, deliveries
+
+
+async def _host_accept_manage(app, gid: str, envelope: dict) -> dict:
+  """An admin's signed request; the host's own roster decides if it is allowed."""
+  request_id = envelope.get("id")
+  if not isinstance(request_id, str) or not _GID_RE.fullmatch(request_id):
+    raise HTTPException(status_code=400, detail="Request id is invalid.")
+  action = envelope.get("action")
+  if action not in _MANAGE_ACTIONS:
+    raise HTTPException(status_code=400, detail="Unsupported group change.")
+  fields: dict[str, Any] = {}
+  if action in ("add", "remove", "set_admin"):
+    fields["target"] = _clean_member_host(envelope.get("member"))
+  if action == "rename":
+    fields["name"] = _clean_group_name(envelope.get("name"))
+  if action == "set_icon":
+    # Re-encode on the host too: a member's bytes never reach others unchecked.
+    fields["icon"] = _render_group_icon(envelope.get("icon"))
+  if action == "set_admin":
+    if not isinstance(envelope.get("admin"), bool):
+      raise HTTPException(status_code=400, detail="Admin choice is invalid.")
+    fields["admin"] = envelope["admin"]
+  if action == "add":
+    fields["handle"] = await _discover_handle(
+      fields["target"], str(envelope.get("handle") or ""),
+    )
+  sender = envelope["from"]
+  receipt, deliveries = await _host_manage(
+    app, gid, sender, action, request_id=request_id, skip=sender, **fields,
+  )
+  delivered = await _fan_out({}, deliveries)
+  return {**receipt, "delivered": delivered}
+
+
+def _parse_roster(members: Any) -> list[dict]:
+  if not isinstance(members, list) or len(members) > MAX_GROUP_MEMBERS:
+    raise HTTPException(status_code=400, detail="Member list is invalid.")
+  roster = {}
+  for member in members:
+    if not isinstance(member, dict) or not _valid_host(member.get("host") or ""):
+      raise HTTPException(status_code=400, detail="Member list is invalid.")
+    entry = {
+      "host": member["host"],
+      "handle": str(member.get("handle") or "")[:MAX_NAME_CHARS],
+    }
+    if member.get("role") in ("creator", "admin"):
+      entry["role"] = member["role"]
+    roster[member["host"]] = entry
+  return list(roster.values())
+
+
+async def _store_host_roster(app, gid: str, host: str, reply: dict) -> bool:
+  """Save the host's reply to an admin unless a newer roster already arrived."""
+  try:
+    members = _parse_roster(reply.get("members"))
+    name = _clean_group_name(reply.get("name"))
+  except HTTPException:
+    return False
+  revision = _roster_revision(reply)
+  async with fs_locks.app_storage_lock(app.id):
+    path = _group_dir(app, gid) / "meta.json"
+    if not path.is_file():
+      return False
+    meta = json.loads(path.read_text())
+    if meta.get("host") != host or revision < _roster_revision(meta):
+      return False
+    meta.update(members=members, name=name, roster_revision=revision)
+    if "icon" in reply:
+      _write_member_icon(app, gid, meta, _received_icon(reply["icon"]))
+    atomic_write(path, json.dumps(meta))
+    _bump_version(app)
+    return True
+
+
+def _own_role(meta: dict) -> str:
+  for member in meta.get("members") or []:
+    if isinstance(member, dict) and member.get("host") == _own_host():
+      return member.get("role") or "member"
+  return "none"
+
+
+async def _request_manage(app, gid: str, action: str, **fields) -> dict:
+  """Ask the remote host to apply an admin's change, then save its roster."""
+  meta = _load_group_meta(app, gid)
+  if meta is None:
+    raise HTTPException(status_code=404, detail="Group not found.")
+  _require_open(meta)
+  _require_accepted_group(meta)
+  host = meta.get("host")
+  if not _valid_host(host or "") or host == _own_host():
+    raise HTTPException(status_code=409, detail="Group host is invalid.")
+  if action == "set_admin":
+    raise HTTPException(status_code=403, detail="Only the group's creator can choose admins.")
+  if _own_role(meta) != "admin":
+    raise HTTPException(
+      status_code=403,
+      detail="Only the group's creator or an admin can manage this group.",
+    )
+  body = {
+    "v": 0, "type": "group_manage", "id": str(uuid.uuid4()),
+    "from": _own_host(), "to": host, "gid": gid, "action": action,
+    "sent_at": time.time(),
+  }
+  if fields.get("target") is not None:
+    body["member"] = fields["target"]
+  if fields.get("handle"):
+    body["handle"] = fields["handle"]
+  if fields.get("name") is not None:
+    body["name"] = fields["name"]
+  if "icon" in fields:
+    body["icon"] = fields["icon"]
+  envelope = _signed(body, _load_identity())
+  try:
+    response = await _post_signed_envelope(
+      _peer_service_url(host, "groups/inbox"), envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+    )
+    response.raise_for_status()
+  except httpx.HTTPStatusError as exc:
+    code = exc.response.status_code
+    try:
+      detail = str(exc.response.json().get("detail") or "")
+    except Exception:
+      detail = ""
+    if code == 400 and detail in ("Unsupported envelope type.", "Unsupported group change."):
+      raise HTTPException(status_code=409, detail=_HOST_UPDATE_NEEDED) from exc
+    if 400 <= code < 500 and code not in (408, 429):
+      raise HTTPException(
+        status_code=code, detail=detail or "The group's creator refused this change.",
+      ) from exc
+    raise HTTPException(
+      status_code=502,
+      detail="The group's creator couldn't confirm this change. Check the members and try again.",
+    ) from exc
+  except Exception as exc:
+    raise HTTPException(
+      status_code=502,
+      detail="The group's creator couldn't be reached. Check the members and try again.",
+    ) from exc
+  try:
+    reply = response.json()
+  except Exception:
+    reply = {}
+  if not isinstance(reply, dict):
+    reply = {}
+  await _store_host_roster(app, gid, host, reply)
+  saved = _load_group_meta(app, gid) or meta
+  return {
+    "status": reply.get("status") or "updated",
+    "name": saved.get("name"), "members": saved.get("members") or [],
+    "icon_hash": saved.get("icon_hash"),
+    "roster_revision": _roster_revision(saved),
+    "delivered": reply.get("delivered") if isinstance(reply.get("delivered"), dict) else {},
+  }
+
+
+async def _manage(app, gid: str, action: str, **fields) -> dict:
+  """Apply locally when this instance hosts the group, otherwise ask its host."""
+  _validate_gid(gid)
+  if _load_host_group(gid) is not None:
+    async with _group_lock(gid):
+      receipt, deliveries = await _host_manage(app, gid, _own_host(), action, **fields)
+    delivered = await _fan_out({}, deliveries)
+    return {**receipt, "delivered": delivered}
+  # Never hold the lifecycle lock across a call to the host, which may be
+  # delivering a roster refresh to this instance at the same moment.
+  return await _request_manage(app, gid, action, **fields)
+
+
 @router.post("/{gid}/members")
 async def add_group_member(
   gid: str,
@@ -1747,61 +2336,62 @@ async def add_group_member(
   """Add one deployment, or retry its current roster delivery, without history."""
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
-  _validate_gid(gid)
-  host = body.host.strip().lower()
-  if not _valid_host(host):
-    raise HTTPException(status_code=400, detail="Invalid member address.")
-  discovered_handle = (body.handle or "")[:MAX_NAME_CHARS]
-  try:
-    actor = await _fetch_actor(host)
-    discovered_handle = str(
-      actor.get("handle") or discovered_handle
-    )[:MAX_NAME_CHARS]
-  except HTTPException:
-    pass  # an unreachable member can still receive a deliberate retry
-  async with _group_lock(gid):
-    with _host_group_transaction(gid):
-      group = _load_host_group(gid)
-      if group is None:
-        raise HTTPException(status_code=404, detail="Only the group's host can add members.")
-      _require_open(group)
-      already_member = host in group["members"]
-      reinvited = False
-      if not already_member:
-        if len(group["members"]) >= MAX_GROUP_MEMBERS:
-          raise HTTPException(status_code=400, detail="The group is full.")
-        group["members"][host] = {
-          "handle": discovered_handle,
-          "invited_at": time.time(), "status": "invited",
-          "invitation_id": str(uuid.uuid4()),
-          "invitation_version": 1,
-        }
-        atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
-      elif group["members"][host].get("status") == "declined":
-        group["members"][host].update(
-          status="invited", invited_at=time.time(),
-          invitation_id=str(uuid.uuid4()),
-          invitation_version=int(
-            group["members"][host].get("invitation_version") or 1
-          ) + 1,
-        )
-        atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
-        reinvited = True
-      members = _members_snapshot(group)
-      await _store_group_meta(app, gid, {"members": members})
-      identity = _load_identity()
-      invitations = {
-        member: _added_envelope(identity, group, member)
-        for member, entry in group["members"].items()
-        if member != _own_host() and entry.get("status") != "declined"
-      }
-  delivered = await _fan_out(group, invitations)
-  return {
-    "status": (
-      "reinvited" if reinvited else "already_member" if already_member else "added"
-    ),
-    "members": members, "delivered": delivered,
-  }
+  host = _clean_member_host(body.host)
+  handle = await _discover_handle(host, body.handle or "")
+  return await _manage(app, gid, "add", target=host, handle=handle)
+
+
+@router.delete("/{gid}/members/{member}")
+async def remove_group_member(
+  gid: str,
+  member: str,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Remove someone from future messages; their copy of the history stays theirs."""
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  return await _manage(app, gid, "remove", target=_clean_member_host(member))
+
+
+@router.patch("/{gid}")
+async def rename_group(
+  gid: str,
+  body: RenameGroup,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  return await _manage(app, gid, "rename", name=_clean_group_name(body.name))
+
+
+@router.put("/{gid}/icon")
+async def set_group_icon(
+  gid: str,
+  body: SetIcon,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Set or clear the group's picture; members get it with the next roster refresh."""
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  return await _manage(app, gid, "set_icon", icon=_render_group_icon(body.icon))
+
+
+@router.post("/{gid}/admins")
+async def set_group_admin(
+  gid: str,
+  body: SetAdmin,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """The creator appoints or demotes an admin."""
+  require_nondelegated_owner_control(principal)
+  app = _require_member(db, principal)
+  return await _manage(
+    app, gid, "set_admin", target=_clean_member_host(body.host), admin=body.admin,
+  )
 
 
 @router.delete("/{gid}")

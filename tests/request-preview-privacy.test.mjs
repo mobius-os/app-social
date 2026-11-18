@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 const read = name => readFileSync(new URL(`../ui/${name}.jsx`, import.meta.url), 'utf8')
 
 test('pending request rows cannot supply a remote avatar host', () => {
-  assert.match(read('Messages'), /<Avatar name=\{item.peer_handle\} host=\{showingRequests \? undefined : item.peer\}/)
+  assert.match(read('Messages'), /<Avatar name=\{item.peer_handle\} host=\{isRequest \? undefined : item.peer\}/)
 })
 
 test('pending DM previews gate actor discovery and every peer avatar until acceptance', () => {
@@ -36,15 +36,15 @@ test('an avatar without a host stops before remote cache lookup', () => {
 test('pending group details keep all member avatars local and cannot open invitation search', () => {
   const source = read('GroupDetails')
   assert.match(source, /const accepted = requestStatus\(group\) === 'accepted'/)
-  assert.match(source, /const canManage = accepted && group.host/)
-  assert.match(source, /if \(!canManage \|\| mode !== 'invite'\) return/)
-  const avatars = source.match(/<Avatar[^>]+>/g)
+  assert.match(source, /const canManage = accepted && canManageGroup\(group, me\)/)
+  assert.match(source, /if \(!canManage\) return undefined\s*const controller = new AbortController\(\)\s*setDirectoryError\(false\)\s*searchPeople\(/)
+  const avatars = source.match(/<Avatar\s[^>]+>/g)
   assert.equal(avatars.length, 2)
   for (const avatar of avatars) {
     assert.match(avatar, /host=\{accepted \? (member|person).host : undefined\}/)
     assert.match(avatar, /\bremote\b/)
   }
-  assert.match(read('GroupThread'), /<GroupDetails group=\{currentGroup\}/)
+  assert.match(read('GroupThread'), /<GroupSettings group=\{currentGroup\}/)
 })
 
 test('public board reply avatars stay remote without duplicating identity in the composer', () => {

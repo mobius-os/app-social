@@ -9,6 +9,10 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
+// Open modals, newest last. Only the topmost one handles Escape and Tab, so a
+// dialog opened over another (Add people over group settings) closes alone.
+const openStack = []
+
 // Shared modal behavior for sheets, panels, and in-place confirmations.
 export function useModalFocus(open, onClose, shouldRestoreFocus = true) {
   const dialogRef = useRef(null)
@@ -25,7 +29,10 @@ export function useModalFocus(open, onClose, shouldRestoreFocus = true) {
       .filter(element => element.getAttribute('aria-hidden') !== 'true')
 
     ;(focusable()[0] || dialog)?.focus()
+    const entry = {}
+    openStack.push(entry)
     const onKeyDown = event => {
+      if (openStack[openStack.length - 1] !== entry) return
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
@@ -49,6 +56,7 @@ export function useModalFocus(open, onClose, shouldRestoreFocus = true) {
     }
     document.addEventListener('keydown', onKeyDown, true)
     return () => {
+      openStack.splice(openStack.indexOf(entry), 1)
       document.removeEventListener('keydown', onKeyDown, true)
       const restore = typeof restoreRef.current === 'function'
         ? restoreRef.current()

@@ -202,6 +202,9 @@ export const searchPeople = (q, signal, { background = false } = {}) =>
       noteAvatarDigests(result?.users)
       return result
     })
+// The Community owner promotes, demotes, or hands over ownership.
+export const setCommunityRole = (host, role) =>
+  call('community/role', { method: 'POST', body: JSON.stringify({ host, role }) })
 export const getPeer = (host, signal, { background = false } = {}) =>
   call(`peer/${encodeURIComponent(host)}`, { signal, background })
 export async function getAppIcon(appId) {
@@ -364,6 +367,14 @@ export const addGroupMember = (gid, host) =>
   call(`groups/${encodeURIComponent(gid)}/members`, { method: 'POST', body: JSON.stringify({ host }) })
 export const deleteGroup = (gid) =>
   call(`groups/${encodeURIComponent(gid)}`, { method: 'DELETE' })
+export const removeGroupMember = (gid, host) =>
+  call(`groups/${encodeURIComponent(gid)}/members/${encodeURIComponent(host)}`, { method: 'DELETE' })
+export const renameGroup = (gid, name) =>
+  call(`groups/${encodeURIComponent(gid)}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+export const setGroupIcon = (gid, icon) =>
+  call(`groups/${encodeURIComponent(gid)}/icon`, { method: 'PUT', timeoutMs: 60_000, body: JSON.stringify({ icon }) })
+export const setGroupAdmin = (gid, host, admin) =>
+  call(`groups/${encodeURIComponent(gid)}/admins`, { method: 'POST', body: JSON.stringify({ host, admin }) })
 export const sendGroupMessage = (id, gid, text, attachment, replyTo) =>
   call(`groups/${encodeURIComponent(gid)}/send`, {
     method: 'POST',
@@ -452,6 +463,25 @@ export function timeAgo(ts) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
   const date = new Date(ts * 1000)
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+// Chat list stamp: "14:05" today, "Yesterday", then "Nov 11, 14:05"
+// (with the year once it is not the current one).
+export function chatListTime(ts) {
+  if (!ts) return ''
+  const date = new Date(ts * 1000)
+  const time = clockTime(ts)
+  const startOfToday = new Date()
+  startOfToday.setHours(0, 0, 0, 0)
+  const startOfYesterday = new Date(startOfToday)
+  startOfYesterday.setDate(startOfYesterday.getDate() - 1)
+  if (date >= startOfToday) return time
+  if (date >= startOfYesterday) return 'Yesterday'
+  const day = date.toLocaleDateString(undefined, {
+    day: 'numeric', month: 'short',
+    ...(date.getFullYear() === startOfToday.getFullYear() ? {} : { year: 'numeric' }),
+  })
+  return `${day}, ${time}`
 }
 
 export function postDateTime(ts) {

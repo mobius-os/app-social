@@ -172,11 +172,22 @@ Messages lists saved groups and direct conversations. Creating a group opens
 that exact conversation; if opening fails after creation, **Open group** retries
 without creating another group. Loading and delivery failures stay visible.
 
-Open a group's **Details** to see its members. The creator can add someone from
-the directory or invite an explicit Möbius deployment address. Existing members
-can be reinvited to retry delivery; new members receive future messages, not the
-earlier conversation history. Group invitations currently target deployments,
-not every deployment linked to an account.
+Open a group's **Details** to see its members and their roles. The creator and
+any **admins** can add someone from the directory or invite an explicit Möbius
+deployment address. Existing members can be reinvited to retry delivery; new
+members receive future messages, not the earlier conversation history. Group
+invitations currently target deployments, not every deployment linked to an
+account.
+
+**Roles.** The creator chooses admins (**Manage › Make admin**) and is the only one
+who can delete the group or remove an admin. Admins can add people, remove
+ordinary members and rename the group. An admin's change is a signed request to
+the group's host (the creator's Möbius), which checks the role against its own
+record, so nobody can grant themselves authority. While the creator's Möbius is
+offline, admins can't make changes. A removed member keeps the messages they
+already have, receives no new ones and can be invited again later. Roster
+refreshes carry a revision, so a delayed refresh never undoes a newer change.
+If the creator's Social predates roles, admins see that it needs an update.
 
 **Delete group** requires typing the group name. The host stops accepting new
 messages and hides the group from the creator's Messages; other members retain

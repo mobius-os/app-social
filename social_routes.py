@@ -2782,6 +2782,11 @@ class DeletePost(BaseModel):
   post_id: str
 
 
+class CommunityRole(BaseModel):
+  host: str
+  role: str
+
+
 class DeleteReply(BaseModel):
   post_id: str
   reply_id: str
@@ -2804,6 +2809,8 @@ def _checked_board_id(value: str | None, label: str) -> str:
 _BOARD_AUTHOR_REASONS = {
   "Text cannot be empty.": "Text can’t be empty.",
   "Text is invalid.": "That’s too long.",
+  "That person isn’t a community member.": "That person hasn’t joined the Community.",
+  "The owner can’t change their own role.": "Hand ownership to someone else instead.",
 }
 
 
@@ -2853,6 +2860,26 @@ async def _send_board_author_action(
     raise HTTPException(
       status_code=502, detail="Community host could not be reached."
     ) from exc
+
+
+@router.post("/community/role")
+async def change_community_role(
+  body: CommunityRole,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """As the Community owner, make someone admin, remove their role, or hand over."""
+  require_nondelegated_owner_control(principal)
+  _require_member(db, principal)
+  host = body.host.strip().lower()
+  if not host or len(host) > 253 or body.role not in ("admin", "owner", "none"):
+    raise HTTPException(status_code=400, detail="That role change isn’t valid.")
+  return await _send_board_author_action(
+    "board/role", {"v": 0, "type": "community_role", "target": host, "role": body.role},
+    unsupported="This community server doesn’t support roles yet.",
+    forbidden="Only the Community owner can change roles.",
+    failed="The role couldn’t be changed.",
+  )
 
 
 @router.post("/delete")

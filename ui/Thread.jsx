@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Lock } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronLeft, Lock } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptMessageRequest, blockMessageRequest, clearUnread, clockTime,
   declineMessageRequest, editMessage, getPeer, listMessages, reactToMessage, retryMessage, sendMessage,
@@ -168,10 +168,12 @@ export default function Thread({
 
   return (
     <div className="cn-thread">
-      <div className="cn-thread-bar">
-        <button className="cn-btn cn-btn-ghost cn-btn-icon" onClick={onBack} aria-label="Back">
-          <ArrowLeft />
+      <div className="cn-thread-back-row">
+        <button type="button" className="cn-back-link" onClick={onBack} aria-label="Back to Chats">
+          <ChevronLeft aria-hidden="true" /><span>Chats</span>
         </button>
+      </div>
+      <div className="cn-thread-bar">
         <Avatar name={displayName} host={requestPending ? undefined : peer} size="small" remote />
         <span className="cn-thread-person">
           <span className="cn-thread-name">

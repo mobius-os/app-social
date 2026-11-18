@@ -73,6 +73,33 @@ class DirectDeliveryTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(saved["status"], "failed")
     self.assertEqual(saved["attempts"], 1)
 
+  async def test_sending_again_after_a_lost_reply_delivers_one_message(self):
+    message_id = "33333333-3333-4333-8333-333333333333"
+    request = httpx.Request("POST", "https://peer.example/inbox")
+    envelopes = []
+
+    async def deliver(_url, envelope, **_kwargs):
+      envelopes.append(dict(envelope))
+      return httpx.Response(200, json={"status": "accepted"}, request=request)
+
+    send = social_routes.SendMessage(id=message_id, to="peer.example", text="Only once")
+    with (
+      patch.object(social_routes, "APP", self.app),
+      patch.object(social_routes, "_fetch_actor", new=AsyncMock(return_value={})),
+      patch.object(social_routes, "_load_identity", return_value={"private_key_b64": "unused", "joined_at": 1, "directory_synced": {"handle": "owner"}}),
+      patch.object(social_routes, "_sign", return_value="signature"),
+      patch.object(social_routes, "_post_signed_envelope", new=deliver),
+    ):
+      # The first reply never reaches the app; it sends again with the same id.
+      first = await social_routes.send_message(send, db=None, principal=Principal("owner", None, None))
+      again = await social_routes.send_message(send, db=None, principal=Principal("owner", None, None))
+
+    self.assertEqual((first["status"], again["status"]), ("delivered", "delivered"))
+    self.assertEqual(len(envelopes), 1)
+    saved = list(social_routes._conversation_dir(self.app, "peer.example").glob("**/*.json"))
+    messages = [p for p in saved if social_routes.json.loads(p.read_text()).get("id") == message_id]
+    self.assertEqual(len(messages), 1)
+
   async def test_retry_renews_transport_time_but_reuses_message_identity(self):
     message_id = "22222222-2222-4222-8222-222222222222"
     record = {

@@ -127,9 +127,20 @@ export default function App({ appId, token }) {
     setBoardTarget(null)
   }, [])
 
-  function selectTab(next) {
+  function showTab(next) {
     if (next !== 'board') finishBoardTarget()
     setTab(next)
+  }
+  // Each tab switch is a real browser history step, so browser Back and the
+  // phone back gesture move between tabs.
+  function selectTab(next) {
+    if (next === tab) return
+    const previous = tab
+    showTab(next)
+    window.mobius?.nav?.open?.('social-tab', {
+      onBack: () => showTab(previous),
+      onForward: () => showTab(next),
+    })
   }
   const [conversations, setConversations] = useState([])
   const [groups, setGroups] = useState([])
@@ -519,12 +530,12 @@ export default function App({ appId, token }) {
         if (!target) showToast('This community notification couldn’t be opened.', 'error')
       }
     } else if (kind === 'dm') {
-      selectTab('messages')
+      showTab('messages')
       if (!meRef.current?.joined || meRef.current?.registration === 'missing') return
       const convo = (await api.listConversations()).find((item) => item.peer === id)
       openThread(id, convo?.peer_handle, api.requestStatus(convo) === 'pending')
     } else if (kind === 'group') {
-      selectTab('messages')
+      showTab('messages')
       if (!meRef.current?.joined || meRef.current?.registration === 'missing') return
       openGroup(await api.getGroup(id))
     }
@@ -532,7 +543,7 @@ export default function App({ appId, token }) {
   useEffect(() => {
     const listener = (event) => {
       if (event.source !== window.parent || !event.data) return
-      onShellMessage.current(event.data).catch(() => selectTab('messages'))
+      onShellMessage.current(event.data).catch(() => showTab('messages'))
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
@@ -540,12 +551,12 @@ export default function App({ appId, token }) {
 
   // ── thread navigation with a real shell back target ───────────────────────
   function openAnyThread(next) {
-    selectTab('messages')
+    showTab('messages')
     navHandle.current?.close()
     let handle = null
     handle = window.mobius?.nav?.open?.('common-thread', {
       onBack: () => { navHandle.current = null; setThread(null); loadConversations() },
-      onForward: () => { selectTab('messages'); navHandle.current = handle; setThread(next) },
+      onForward: () => { showTab('messages'); navHandle.current = handle; setThread(next) },
     })
     navHandle.current = handle || null
     setThread(next)
@@ -653,11 +664,52 @@ export default function App({ appId, token }) {
     activeConversations.reduce((sum, c) => sum + (c.unread || 0), 0) +
     activeGroups.reduce((sum, g) => sum + (g.unread || 0), 0)
   const canParticipate = participationStep(me) === 'ready' && me?.registration !== 'missing'
+  const communityRoles = feedCapabilities.roles && typeof feedCapabilities.roles === 'object' ? feedCapabilities.roles : {}
 
   // ── render ────────────────────────────────────────────────────────────────
+  // The Social header and tabs stay on screen while a chat is open; a chat
+  // counts as the Chats tab, and choosing any tab leaves the chat.
+  const renderHeader = (activeTab, onSelect) => (
+    <>
+      <header className="cn-header">
+        <div className="cn-brand">
+          {appIconUrl
+            ? <img className="cn-app-icon" src={appIconUrl} alt="" draggable="false" />
+            : <span className="cn-mark" aria-hidden="true"><span className="cn-mark-orbit" /></span>}
+          <h1 className="cn-title">Social</h1>
+        </div>
+        <MainNavigation className="cn-nav-wide" tab={activeTab} unread={unread}
+                        boardActivity={boardActivity} onSelect={onSelect} />
+        <MainNavigation className="cn-nav-mobile" tab={activeTab} unread={unread}
+                        boardActivity={boardActivity} onSelect={onSelect} />
+        {meState === 'loading' ? (
+          <div className="cn-header-chip is-loading" aria-hidden="true">
+            <span className="cn-header-chip-avatar-skeleton" />
+            <span className="cn-header-chip-line-skeleton" />
+          </div>
+        ) : me?.handle ? (
+          <div className="cn-header-chip">
+            <Avatar name={me.handle} host={me?.host} size="small" remote />
+            <span>{`@${me.handle}`}</span>
+          </div>
+        ) : null}
+      </header>
+      {!canParticipate && meState !== 'loading' && (
+        <div className="cn-header-extra">
+          <p className="cn-header-note">Community is open to read. Join to message and open Chats and People.</p>
+        </div>
+      )}
+    </>
+  )
+  function leaveThreadFor(next) {
+    closeThread()
+    if (next !== tab) selectTab(next)
+  }
+
   if (thread && canParticipate) {
     return (
       <div className="cn-root"><style>{CSS}</style>
+        {renderHeader('messages', leaveThreadFor)}
         {thread.kind === 'group' ? (
           <GroupThread
             key={thread.group.gid}
@@ -668,6 +720,8 @@ export default function App({ appId, token }) {
             onBack={closeThread}
             showToast={showToast}
             onOpenImage={openLightbox}
+            onOpenPerson={(host) => { closeThread(); setProfileRequest(host); selectTab('people') }}
+            onMessageUser={(host, name) => openThread(host, name)}
           />
         ) : (
           <Thread
@@ -692,29 +746,7 @@ export default function App({ appId, token }) {
   return (
     <div className="cn-root">
       <style>{CSS}</style>
-      <header className="cn-header">
-        <div className="cn-brand">
-          {appIconUrl
-            ? <img className="cn-app-icon" src={appIconUrl} alt="" draggable="false" />
-            : <span className="cn-mark" aria-hidden="true"><span className="cn-mark-orbit" /></span>}
-          <h1 className="cn-title">Social</h1>
-        </div>
-        <MainNavigation className="cn-nav-wide" tab={tab} unread={unread}
-                        boardActivity={boardActivity} onSelect={selectTab} />
-        <MainNavigation className="cn-nav-mobile" tab={tab} unread={unread}
-                        boardActivity={boardActivity} onSelect={selectTab} />
-        {meState === 'loading' ? (
-          <div className="cn-header-chip is-loading" aria-hidden="true">
-            <span className="cn-header-chip-avatar-skeleton" />
-            <span className="cn-header-chip-line-skeleton" />
-          </div>
-        ) : me?.handle ? (
-          <div className="cn-header-chip">
-            <Avatar name={me.handle} host={me?.host} size="small" remote />
-            <span>{`@${me.handle}`}</span>
-          </div>
-        ) : null}
-      </header>
+      {renderHeader(tab, selectTab)}
 
       <div ref={boardScrollRef} className={`cn-scroll${tab === 'board' ? ' is-board' : ''}`}>
         {tab === 'board' && <div className="cn-content">
@@ -745,6 +777,7 @@ export default function App({ appId, token }) {
                  replyReactions={Boolean(feedCapabilities.reply_reactions)}
                  reactionChoices={offeredReactions(feedCapabilities)}
                  authorEdits={Boolean(feedCapabilities.author_edits)}
+                 communityRoles={communityRoles}
                  replyAttachments={Boolean(feedCapabilities.reply_attachments)}
                  boardTarget={boardTarget} onTargetHandled={finishBoardTarget}
                  composerMount={composerMount} scrollRef={boardScrollRef}
@@ -763,10 +796,9 @@ export default function App({ appId, token }) {
                       messageRequests={pendingConversations} groupRequests={pendingGroups}
                       loadState={messagesState} onRetry={loadConversations}
                       creating={creatingGroup} setCreating={setCreatingGroup}
-                      onOpenThread={(peer) => openThread(peer)}
+                      onOpenThread={(peer, name) => openThread(peer, name)}
                       onOpenMessageRequest={(peer, name) => openThread(peer, name, true)}
                       onOpenGroup={openGroup}
-                      onFindPeople={() => selectTab('people')}
                       onGroupsChanged={openCreatedGroup}
                       showToast={showToast} />
           ) : (
@@ -776,6 +808,8 @@ export default function App({ appId, token }) {
         )}
         {tab === 'people' && (
           canParticipate ? <People me={me} canMessage={canParticipate}
+                  communityRoles={communityRoles}
+                  onRolesChanged={() => loadFeed()}
                   onMessage={(host, name) => openThread(host, name)} showToast={showToast}
                   requestedProfile={profileRequest}
                   onProfileRequestHandled={() => setProfileRequest(null)} />
