@@ -932,6 +932,9 @@ async def _accept_group_envelope(
     raise HTTPException(
       status_code=403, detail="Original message signature is invalid."
     ) from exc
+  # The host only forwards; refuse a banned author's content even from an
+  # unbanned (or older) host.
+  await _refuse_banned_messaging(original["from"])
   text = original.get("text")
   attachment = _validate_attachment(original.get("attachment"))
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
@@ -1172,6 +1175,7 @@ async def _member_accept_reaction(app, gid: str, envelope: dict) -> dict:
     original_actor = await _verify_peer_envelope(original)
   except HTTPException as exc:
     raise HTTPException(status_code=403, detail="Original reaction signature is invalid.") from exc
+  await _refuse_banned_messaging(original["from"])
   message_id, emoji, on, at = _reaction_fields(original)
   applied, record = await _store_group_reaction(app, gid, message_id, original["from"], emoji, on, at)
   if record is None:
@@ -1273,6 +1277,7 @@ async def _member_accept_edit(app, gid: str, envelope: dict) -> dict:
     await _verify_peer_envelope(original)
   except HTTPException as exc:
     raise HTTPException(status_code=403, detail="Original edit signature is invalid.") from exc
+  await _refuse_banned_messaging(original["from"])
   message_id, text, at = _edit_fields(original)
   _applied, record = await _store_group_edit(app, gid, message_id, original["from"], text, at)
   if record is None:
