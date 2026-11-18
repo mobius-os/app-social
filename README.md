@@ -70,7 +70,8 @@ these actions report that the server does not support them yet.
 ### Bans
 
 The Community's owner and admins can ban an ordinary member from **People**,
-with **Ban** on a hovered row or in the member's profile (**Unban** reverses it).
+with **Ban** on the member's row, shown on hover or always on touch screens
+(**Unban** reverses it).
 Owners and admins can't be banned. A ban locks the member out of everything:
 
 - The host refuses their posts, replies, edits and reactions, gives their

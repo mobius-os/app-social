@@ -211,7 +211,7 @@ export default function People({
 
       <div className="cn-people-list">
         {sortByRole(results || [], communityRoles).map((user) => {
-          // Owners and admins get a quick Ban on hover; the profile keeps it for touch.
+          // Owners and admins ban from the row: on hover with a pointer, always shown on touch.
           const quickBan = canModerate && !roleOf(user.host) && user.host !== me?.host
           const who = user.handle ? `@${user.handle}` : 'this member'
           return (
@@ -311,7 +311,7 @@ export default function People({
                   </Composer>
                 )}
                 <GifPicker open={gifChoice.picking} onClose={gifChoice.close} onPick={gifChoice.pick} />
-                {canModerate && profile.host !== me?.host && (
+                {isOwner && profile.host !== me?.host && (
                   <section className="cn-role-manage" aria-label="Manage member">
                     <h4>Manage member</h4>
                     {confirmHandover ? (
@@ -336,16 +336,6 @@ export default function People({
                                     onClick={() => changeRole(profile, 'admin')}>Make admin</button>)}
                         {isOwner && <button className="cn-btn cn-btn-ghost" disabled={roleBusy}
                                             onClick={() => setConfirmHandover(true)}>Make owner…</button>}
-                        {!roleOf(profile.host) && (
-                          <button type="button" className={`cn-ban-btn${isBanned(profile.host) ? ' is-unban' : ''}`}
-                                  disabled={roleBusy}
-                                  aria-label={isBanned(profile.host)
-                                    ? `Unban ${profile.handle ? `@${profile.handle}` : 'this member'}`
-                                    : `Ban ${profile.handle ? `@${profile.handle}` : 'this member'}`}
-                                  onClick={() => changeBan(profile, !isBanned(profile.host))}>
-                            {isBanned(profile.host) ? 'Unban' : 'Ban'}
-                          </button>
-                        )}
                       </div>
                     )}
                   </section>

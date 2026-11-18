@@ -460,7 +460,7 @@ export const CSS = `
 .cn-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .cn-row:active { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .cn-row-copy { min-width: 0; flex: 1; }
-/* People rows: owners and admins see Ban on the right while hovering or focusing a row. */
+/* People rows: owners and admins see Ban on the right while hovering or focusing a row (always on touch). */
 .cn-people-item { position: relative; }
 .cn-quick-ban {
   position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
@@ -468,7 +468,7 @@ export const CSS = `
 }
 .cn-people-item:hover .cn-quick-ban, .cn-people-item:focus-within .cn-quick-ban { opacity: 1; pointer-events: auto; }
 .cn-people-item.has-quick-ban:hover > .cn-row, .cn-people-item.has-quick-ban:focus-within > .cn-row { padding-right: 104px; }
-@media (hover: none) { .cn-quick-ban { display: none; } .cn-people-item.has-quick-ban > .cn-row { padding-right: 8px !important; } }
+@media (hover: none) { .cn-quick-ban { opacity: 1; pointer-events: auto; } .cn-people-item.has-quick-ban > .cn-row { padding-right: 104px; } }
 @media (prefers-reduced-motion: reduce) { .cn-quick-ban { transition: none; } }
 .cn-row-name { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; min-width: 0; }
 .cn-row-name strong { overflow: hidden; text-overflow: ellipsis; }

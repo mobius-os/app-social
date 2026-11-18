@@ -48,7 +48,7 @@ test('members sort owner first, then admins, then everyone else by handle', asyn
   assert.equal(roleOf(roles, 'toString'), null)
 })
 
-test('owners and admins ban ordinary members from People, on hover or from a profile', async () => {
+test('owners and admins ban ordinary members from their People row, not the profile', async () => {
   const people = read('ui/People.jsx')
   const app = read('index.jsx')
   assert.match(app, /const bannedHosts = Array\.isArray\(feedCapabilities\.banned\) \? feedCapabilities\.banned : \[\]/)
@@ -56,9 +56,10 @@ test('owners and admins ban ordinary members from People, on hover or from a pro
   assert.match(people, /const canModerate = myRole === 'owner' \|\| myRole === 'admin'/)
   // Never a moderator, and never yourself.
   assert.match(people, /const quickBan = canModerate && !roleOf\(user\.host\) && user\.host !== me\?\.host/)
-  assert.match(people, /\{canModerate && profile\.host !== me\?\.host && \(/)
-  assert.match(people, /\{!roleOf\(profile\.host\) && \(\s*<button type="button" className=\{`cn-ban-btn/)
-  assert.match(people, /onClick=\{\(\) => changeBan\(profile, !isBanned\(profile\.host\)\)\}/)
+  assert.match(people, /onClick=\{\(\) => changeBan\(user, !isBanned\(user\.host\)\)\}/)
+  // The profile only manages roles, so only the owner sees that section.
+  assert.match(people, /\{isOwner && profile\.host !== me\?\.host && \(/)
+  assert.doesNotMatch(people, /changeBan\(profile/)
   assert.match(people, /isBanned\(user\.host\) && <span className="cn-role-label is-banned">Banned/)
   assert.match(read('api.js'), /call\('community\/ban'/)
   const { banChangedMessage } = await import('../ui/communityRoles.js')
@@ -74,8 +75,8 @@ test('a banned member is locked out of the whole app', () => {
   assert.ok(app.indexOf('if (bannedFromCommunity) {') < app.indexOf('if (thread && canParticipate) {'))
 })
 
-test('the hover Ban stays out of touch layouts, where the profile has it', () => {
+test('the row Ban shows on hover with a pointer and always on touch', () => {
   const theme = read('theme.js')
   assert.match(theme, /\.cn-people-item:hover \.cn-quick-ban, \.cn-people-item:focus-within \.cn-quick-ban \{ opacity: 1; pointer-events: auto; \}/)
-  assert.match(theme, /@media \(hover: none\) \{ \.cn-quick-ban \{ display: none; \}/)
+  assert.match(theme, /@media \(hover: none\) \{ \.cn-quick-ban \{ opacity: 1; pointer-events: auto; \}/)
 })
