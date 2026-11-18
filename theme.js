@@ -82,7 +82,7 @@ export const CSS = `
 .cn-header-note { margin: -2px 2px 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
 .cn-header-chip {
   display: inline-flex; align-items: center; gap: 8px;
-  min-height: 44px; max-width: 55%; padding: 4px 12px 4px 5px; border-radius: 21px;
+  min-height: 44px; max-width: 55%; padding: 4px 12px 4px 6px; border-radius: 22px;
   background: color-mix(in srgb, var(--surface) 82%, transparent);
   border: 1px solid var(--border); font-size: 12.5px; font-weight: 650;
   color: var(--muted);
