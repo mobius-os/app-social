@@ -392,6 +392,53 @@ class CommonPublicStore:
       ))
       return {"roles": dict(sorted(roles.items()))}
 
+  def bans_path(self) -> Path:
+    return self.common_dir() / "bans.json"
+
+  def banned_members(self) -> set[str]:
+    """Members an owner or admin has banned from the Community."""
+    banned = self._load_object(self.bans_path()).get("banned")
+    return {host for host in banned if isinstance(host, str)} if isinstance(banned, dict) else set()
+
+  def set_member_ban(
+    self, actor: str, target: str, banned: bool, sent_at: float, roles: dict[str, str],
+  ) -> dict:
+    """Let an owner or admin ban an ordinary member, or lift the ban.
+
+    Owners and admins can't be banned: the owner removes an admin's role first,
+    so a ban never becomes a way for admins to silence each other.
+
+    ``sent_at`` is the request's signed time. Changes for one member apply only
+    in signing order, so a replayed or late-delivered older ban can never undo
+    a newer unban (or the reverse), whichever moderator sent either one.
+    """
+    if not isinstance(banned, bool):
+      raise HTTPException(status_code=400, detail="Ban change is invalid.")
+    if roles.get(actor) not in MODERATOR_ROLES:
+      raise HTTPException(status_code=403, detail="Only the owner or an admin can ban members.")
+    if target == actor:
+      raise HTTPException(status_code=400, detail="You can’t ban yourself.")
+    if roles.get(target) in MODERATOR_ROLES:
+      raise HTTPException(status_code=400, detail="Owners and admins can’t be banned.")
+    with self._mutation_lock(self._directory_lock, "directory"):
+      if not isinstance(self._load_object(self.directory_path()).get(target), dict):
+        raise HTTPException(status_code=400, detail="That person isn’t a community member.")
+      saved = self._load_object(self.bans_path())
+      entries = saved.get("banned") if isinstance(saved.get("banned"), dict) else {}
+      changed = saved.get("changed_at") if isinstance(saved.get("changed_at"), dict) else {}
+      last = changed.get(target)
+      if isinstance(last, (int, float)) and sent_at <= last:
+        raise HTTPException(status_code=409, detail="A newer ban change has already been made.")
+      if banned:
+        entries[target] = {"by": actor, "at": sent_at}
+      else:
+        entries.pop(target, None)
+      changed[target] = sent_at
+      atomic_write(self.bans_path(), json.dumps(
+        {"banned": entries, "changed_at": changed, "updated_at": time.time()}, indent=2,
+      ))
+      return {"banned": sorted(entries)}
+
   def board_dir(self) -> Path:
     path = self.common_dir() / "board"
     path.mkdir(parents=True, exist_ok=True)
@@ -1620,11 +1667,16 @@ async def refresh_member_profile(
 
 # Community roles a deployment may assign; anyone unlisted is a member.
 MODERATOR_ROLES = frozenset({"owner", "admin"})
+# The host's refusal for a banned member; Social shows it to that member as-is.
+BANNED_FROM_POSTING = "You’ve been banned from posting in this Community."
+# A ban locks the member out of everything: the board, People, and messages.
+BANNED_FROM_COMMUNITY = "You’ve been banned from this Community."
 
 
 def read_board_page(
   store: CommonPublicStore, limit: int, before: str | None,
   viewer: str | None = None, roles: dict[str, str] | None = None,
+  banned: set[str] | None = None,
 ) -> dict:
   """Return one stable page shared by public and owner-facing Board routes."""
   try:
@@ -1652,7 +1704,7 @@ def read_board_page(
     if position is not None:
       next_cursor = _encode_board_cursor(*position)
   return {
-    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True, "reactions": list(BOARD_REACTION_EMOJIS), "roles": dict(sorted((roles or {}).items()))},
+    "capabilities": {"emoji_reactions": True, "reply_reactions": True, "author_edits": True, "image_thumbnails": True, "reply_attachments": True, "gif_attachments": True, "reactions": list(BOARD_REACTION_EMOJIS), "roles": dict(sorted((roles or {}).items())), "banned": sorted(banned or ())},
     "media_limits": {
       "gif_bytes": MAX_ATTACHMENT_BYTES,
       "static_bytes": MAX_STATIC_ATTACHMENT_BYTES,
@@ -1801,6 +1853,13 @@ def create_public_router(
   changes one (``board/role``), after which the saved list wins. Both
   roles may delete any post or reply; every other member is an ordinary
   member. The board lists the roles so each member's Social can label them.
+  Either role may also ban an ordinary member (``board/ban``). A ban locks
+  them out: the host refuses their posts, replies, edits and reactions, gives
+  their Social an empty board, and shows them no one else in People (only
+  their own entry, so their Social still knows it is registered). Ordinary
+  members no longer find banned people in People; moderators still do, to
+  unban them. The board lists banned members, and each member's Social uses
+  that list to refuse messages and group traffic to or from them.
   """
   admission = _PublicEnvelopeAdmission()
   content_paths = {f"{prefix}/board", f"{prefix}/board/reply"}
@@ -1810,6 +1869,15 @@ def create_public_router(
 
   def moderates(host: str) -> bool:
     return roles_now().get(host) in MODERATOR_ROLES
+
+  def banned_now() -> set[str]:
+    # A banned member later made admin is no longer banned.
+    roles = roles_now()
+    return {host for host in store.banned_members() if roles.get(host) not in MODERATOR_ROLES}
+
+  def refuse_if_banned(host: str) -> None:
+    if host in banned_now():
+      raise HTTPException(status_code=403, detail=BANNED_FROM_POSTING)
 
   class AdmittedEnvelopeRoute(APIRoute):
     async def handle(self, scope, receive, send):
@@ -1855,9 +1923,17 @@ def create_public_router(
     if not isinstance(q, str) or len(q) > MAX_NAME_CHARS:
       raise HTTPException(status_code=400, detail="Directory search is invalid.")
     await verifier.verify_envelope(envelope)
-    if not store.is_member(envelope["from"]):
+    searcher = envelope["from"]
+    if not store.is_member(searcher):
       raise HTTPException(status_code=403, detail="Join Social to see People.")
-    return store.search_directory(q)
+    banned = banned_now()
+    if searcher in banned:
+      own = [user for user in store.search_directory(searcher)["users"] if user["host"] == searcher]
+      return {"users": own, "viewer_banned": True}
+    found = store.search_directory(q)
+    if not moderates(searcher):
+      found["users"] = [user for user in found["users"] if user["host"] not in banned]
+    return found
 
   @router.post("/board/role")
   async def change_community_role(request: Request):
@@ -1875,6 +1951,24 @@ def create_public_router(
       envelope["from"], target.strip().lower(), envelope.get("role"),
       float(envelope["sent_at"]), community_roles() if community_roles is not None else {},
     )
+
+  @router.post("/board/ban")
+  async def change_member_ban(request: Request):
+    """The owner or an admin bans a member, or lifts the ban."""
+    envelope = await read_envelope(request)
+    if envelope.get("v") != 0 or envelope.get("type") != "community_ban":
+      raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+    target = envelope.get("target")
+    if not isinstance(target, str) or not target or len(target) > 253:
+      raise HTTPException(status_code=400, detail="Member is invalid.")
+    await verifier.verify_envelope(envelope)
+    if not store.is_member(envelope["from"]):
+      raise HTTPException(status_code=403, detail="Join Social first.")
+    store.set_member_ban(
+      envelope["from"], target.strip().lower(), envelope.get("banned"),
+      float(envelope["sent_at"]), roles_now(),
+    )
+    return {"banned": sorted(banned_now())}
 
   @router.post("/gifs/key")
   async def read_gif_key_for_member(request: Request):
@@ -1943,7 +2037,12 @@ def create_public_router(
   ):
     if viewer is not None and not valid_host(viewer):
       viewer = None
-    return read_board_page(store, limit, before, viewer, roles_now())
+    banned = banned_now()
+    page = read_board_page(store, limit, before, viewer, roles_now(), banned)
+    if viewer in banned:
+      # A banned member's Social gets the board's settings but no posts.
+      page.update(posts=[], next_cursor=None, viewer_banned=True)
+    return page
 
   # Each image route also answers with the file type appended to its last
   # segment (see split_image_name).
@@ -2036,6 +2135,7 @@ def create_public_router(
     if reply_id is not None and not valid_id(reply_id):
       raise HTTPException(status_code=400, detail="Reply id is invalid.")
     actor = await verify_named_member(store, verifier, envelope)
+    refuse_if_banned(envelope["from"])
     replay_token = hashlib.sha256(canonical(envelope)).hexdigest()
     emoji = envelope.get("emoji")
     result = (
@@ -2069,6 +2169,7 @@ def create_public_router(
       raise HTTPException(status_code=400, detail="Reply id is invalid.")
     validate_attachment_envelope_size(envelope)
     actor = await verify_named_member(store, verifier, envelope)
+    refuse_if_banned(envelope["from"])
     text = envelope.get("text")
     attachment = validate_attachment(envelope.get("attachment"))
     thumbnail = validate_attachment(envelope.get("thumbnail"), thumbnail=True)
@@ -2136,6 +2237,7 @@ def create_public_router(
     await verifier.verify_envelope(envelope)
     if not store.is_member(envelope["from"]):
       raise HTTPException(status_code=403, detail="Join Social first.")
+    refuse_if_banned(envelope["from"])
     return store.edit_text(post_id, reply_id, envelope["from"], text, envelope["sent_at"])
 
   @router.post("/board")
@@ -2147,6 +2249,7 @@ def create_public_router(
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
     actor = await verify_named_member(store, verifier, envelope)
+    refuse_if_banned(envelope["from"])
     first_wire, gallery = envelope.get("attachment"), envelope.get("attachments")
     if first_wire is not None and isinstance(gallery, list) and gallery and first_wire == gallery[0]:
       # The legacy first-image copy repeats the gallery's first wire; decode
@@ -2183,5 +2286,5 @@ def create_public_router(
 __all__ = [
   "BOARD_LIKE_LIMIT", "BOARD_PAGE_LIMIT", "BOARD_POST_LIMIT", "BOARD_REPLY_LIMIT",
   "CommonPublicStore", "DIRECTORY_LIMIT", "REACTION_REPLAY_LIMIT",
-  "REACTION_REPLAY_TTL_S", "create_public_router", "read_board_page",
+  "BANNED_FROM_POSTING", "REACTION_REPLAY_TTL_S", "create_public_router", "read_board_page",
 ]

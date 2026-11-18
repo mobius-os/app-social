@@ -94,7 +94,7 @@ from common_protocol import (
   wire_json_size as _wire_json_size,
 )
 from common_public import (
-  AVATAR_DIGEST, BOARD_REACTION_EMOJIS, BOARD_REACTION_NAMES, CommonPublicStore,
+  AVATAR_DIGEST, BANNED_FROM_COMMUNITY, BANNED_FROM_POSTING, BOARD_REACTION_EMOJIS, BOARD_REACTION_NAMES, CommonPublicStore,
   image_thumbnail_bytes,
 )
 from common_transport import DEFAULT_MAX_RESPONSE_BYTES, FederationTransportError, federation_request
@@ -168,6 +168,63 @@ _actor_verifier = ActorVerifier(_data_dir)
 _find_image = CommonPublicStore.find_image
 _fetch_actor = _actor_verifier.fetch_actor
 _verify_peer_envelope = _actor_verifier.verify_envelope
+
+
+# ── community bans ───────────────────────────────────────────────────────────
+# A ban locks a member out of everything, messages included. Messages travel
+# straight between instances, so each instance enforces it from the
+# Community's ban list, saved whenever the board is read and refreshed at most
+# every few minutes on demand.
+COMMUNITY_BANS_TTL_S = 300
+COMMUNITY_BANS_REFRESH_TIMEOUT_S = 3.0
+BANNED_PERSON = "This person is banned from the Community."
+
+
+def _community_bans_path() -> Path:
+  return _common_dir() / "community-bans.json"
+
+
+def _saved_community_bans() -> dict:
+  try:
+    saved = json.loads(_community_bans_path().read_text())
+  except (OSError, ValueError):
+    return {}
+  return saved if isinstance(saved, dict) else {}
+
+
+def _remember_community_bans(board: dict) -> None:
+  banned = (board.get("capabilities") or {}).get("banned")
+  if not isinstance(banned, list):
+    return
+  atomic_write(_community_bans_path(), json.dumps({
+    "banned": sorted({host for host in banned if isinstance(host, str)}),
+    "fetched_at": time.time(),
+  }))
+
+
+async def _community_bans() -> set[str]:
+  """The Community's banned hosts, refreshed when the saved copy is stale."""
+  saved = _saved_community_bans()
+  if time.time() - float(saved.get("fetched_at") or 0) > COMMUNITY_BANS_TTL_S:
+    try:
+      await _fetch_board(1, None, timeout_seconds=COMMUNITY_BANS_REFRESH_TIMEOUT_S)
+    except Exception:
+      # Keep the last known list; try again on the next message, not forever.
+      atomic_write(_community_bans_path(), json.dumps({
+        "banned": saved.get("banned") or [], "fetched_at": time.time(),
+      }))
+    saved = _saved_community_bans()
+  banned = saved.get("banned")
+  return {host for host in banned if isinstance(host, str)} if isinstance(banned, list) else set()
+
+
+async def _refuse_banned_messaging(*peers: str) -> None:
+  """Refuse messaging when this owner, or any named peer, is banned."""
+  banned = await _community_bans()
+  if _own_host() in banned:
+    raise HTTPException(status_code=403, detail=BANNED_FROM_COMMUNITY)
+  if any(peer in banned for peer in peers):
+    raise HTTPException(status_code=403, detail=BANNED_PERSON)
 
 
 def _serve_image(found):
@@ -1241,6 +1298,7 @@ async def receive_message(request: Request, db=Depends(get_db)):
   if not isinstance(message_id, str) or not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   actor = await _verify_peer_envelope(envelope)
+  await _refuse_banned_messaging(envelope["from"])
   encrypted = "enc" in envelope
   if encrypted:
     payload = _open_dm(
@@ -1332,6 +1390,7 @@ async def _receive_message_edit(envelope: dict, db) -> dict:
   if not isinstance(event_id, str) or not _valid_id(event_id):
     raise HTTPException(status_code=400, detail="Edit id is invalid.")
   await _verify_peer_envelope(envelope)
+  await _refuse_banned_messaging(envelope["from"])
   sealed = "enc" in envelope
   if sealed:
     payload = _open_payload(
@@ -1378,6 +1437,7 @@ async def _receive_message_reaction(envelope: dict, db) -> dict:
   if not isinstance(event_id, str) or not _valid_id(event_id):
     raise HTTPException(status_code=400, detail="Reaction id is invalid.")
   actor = await _verify_peer_envelope(envelope)
+  await _refuse_banned_messaging(envelope["from"])
   if "enc" in envelope:
     payload = _open_payload(
       event_id, envelope.get("enc"), _load_identity()["enc_private_key_b64"],
@@ -1851,6 +1911,8 @@ def _require_username(identity: dict) -> None:
 def _community_write_error(exc: Exception, action: str) -> str:
   """Describe a reached host separately from a transport failure."""
   if isinstance(exc, httpx.HTTPStatusError):
+    if exc.response.status_code == 403 and _host_error_detail(exc) == BANNED_FROM_POSTING:
+      return BANNED_FROM_POSTING
     if exc.response.status_code == 403:
       return "The community host could not verify this Social identity. Try again."
     return f"The community host rejected the {action}. Try again."
@@ -1970,6 +2032,7 @@ async def send_message(
   text = message.text.strip()
   if not _valid_host(to_host):
     raise HTTPException(status_code=400, detail="Invalid recipient.")
+  await _refuse_banned_messaging(to_host)
   attachment = _validate_attachment(message.attachment)
   reply_to = _validate_reply_to(message.reply_to)
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
@@ -2014,6 +2077,7 @@ async def retry_direct_message(
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
   peer = _request_peer(peer_host)
+  await _refuse_banned_messaging(peer)
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   record = await _attempt_direct_delivery(app, peer, message_id)
@@ -2078,6 +2142,7 @@ async def react_to_direct_message(
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
   peer = _request_peer(peer_host)
+  await _refuse_banned_messaging(peer)
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   update_id = body.id or str(uuid.uuid4())
@@ -2189,6 +2254,7 @@ async def edit_direct_message(
   require_nondelegated_owner_control(principal)
   app = _require_member(db, principal)
   peer = _request_peer(peer_host)
+  await _refuse_banned_messaging(peer)
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   edit_id = body.id or str(uuid.uuid4())
@@ -2587,24 +2653,33 @@ async def _feed_payload(
   principal: Principal = None,
 ) -> dict:
   _require_owner_or_common_app(db, principal)
-  host = COMMUNITY_HOST
   try:
-    response = await federation_request(
-      "GET", _peer_service_url(host, "board"),
-      params={
-        "limit": limit, "viewer": _own_host(),
-        **({"before": before} if before else {}),
-      },
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
-    )
-    response.raise_for_status()
-    return {"host": host, **response.json()}
+    return await _fetch_board(limit, before)
   except HTTPException:
     raise
   except Exception as exc:
     raise HTTPException(
       status_code=502, detail="Community host could not be reached."
     ) from exc
+
+
+async def _fetch_board(
+  limit: int, before: str | None, *, timeout_seconds: float = OUTBOUND_TIMEOUT_S,
+) -> dict:
+  """Read one board page as this instance and remember the Community's bans."""
+  host = COMMUNITY_HOST
+  response = await federation_request(
+    "GET", _peer_service_url(host, "board"),
+    params={
+      "limit": limit, "viewer": _own_host(),
+      **({"before": before} if before else {}),
+    },
+    timeout_seconds=timeout_seconds,
+  )
+  response.raise_for_status()
+  board = response.json()
+  _remember_community_bans(board)
+  return {"host": host, **board}
 
 
 @router.get("/feed")
@@ -2787,6 +2862,11 @@ class CommunityRole(BaseModel):
   role: str
 
 
+class CommunityBan(BaseModel):
+  host: str
+  banned: bool
+
+
 class DeleteReply(BaseModel):
   post_id: str
   reply_id: str
@@ -2811,6 +2891,8 @@ _BOARD_AUTHOR_REASONS = {
   "Text is invalid.": "That’s too long.",
   "That person isn’t a community member.": "That person hasn’t joined the Community.",
   "The owner can’t change their own role.": "Hand ownership to someone else instead.",
+  "Owners and admins can’t be banned.": "Owners and admins can’t be banned. Remove their admin role first.",
+  "You can’t ban yourself.": "You can’t ban yourself.",
 }
 
 
@@ -2852,7 +2934,8 @@ async def _send_board_author_action(
     if code in (404, 405) or (code == 400 and detail == "Unsupported envelope type."):
       raise HTTPException(status_code=501, detail=unsupported) from exc
     if code == 403:
-      raise HTTPException(status_code=403, detail=forbidden) from exc
+      banned = detail == BANNED_FROM_POSTING
+      raise HTTPException(status_code=403, detail=detail if banned else forbidden) from exc
     if code == 400 and detail in _BOARD_AUTHOR_REASONS:
       raise HTTPException(status_code=400, detail=_BOARD_AUTHOR_REASONS[detail]) from exc
     raise HTTPException(status_code=502, detail=failed) from exc
@@ -2879,6 +2962,26 @@ async def change_community_role(
     unsupported="This community server doesn’t support roles yet.",
     forbidden="Only the Community owner can change roles.",
     failed="The role couldn’t be changed.",
+  )
+
+
+@router.post("/community/ban")
+async def change_member_ban(
+  body: CommunityBan,
+  db: object = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """As the Community owner or an admin, ban a member or lift their ban."""
+  require_nondelegated_owner_control(principal)
+  _require_member(db, principal)
+  host = body.host.strip().lower()
+  if not host or len(host) > 253:
+    raise HTTPException(status_code=400, detail="That ban change isn’t valid.")
+  return await _send_board_author_action(
+    "board/ban", {"v": 0, "type": "community_ban", "target": host, "banned": body.banned},
+    unsupported="This community server doesn’t support bans yet.",
+    forbidden="Only the owner or an admin can ban members.",
+    failed="The ban couldn’t be changed.",
   )
 
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search, Telescope } from '@openai/apps-sdk-ui/components/Icon'
-import { searchPeople, sendMessage, setCommunityRole } from '../api.js'
+import { searchPeople, sendMessage, setCommunityRole, setMemberBan } from '../api.js'
 import { TEXT_LIMITS } from '../text_limits.js'
 import Composer from './Composer.jsx'
 import { GifButton, GifPicker, SelectedGifStrip, useGifChoice } from './Gifs.jsx'
@@ -9,13 +9,13 @@ import { noteAvatarDigests } from '../avatarHints.js'
 import { Avatar, RoleLabel, useProfile } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
 import { focusProfileReturnTarget, membershipDuration, profileSendIdentity } from '../profile.js'
-import { roleChangedMessage, roleOf as roleIn, sortByRole } from './communityRoles.js'
+import { banChangedMessage, roleChangedMessage, roleOf as roleIn, sortByRole } from './communityRoles.js'
 
 const DIRECTORY_CACHE_MAX_AGE_MS = 60_000
 
 export default function People({
   me, canMessage, onMessage, showToast, requestedProfile, onProfileRequestHandled,
-  communityRoles = {}, onRolesChanged,
+  communityRoles = {}, bannedHosts = [], onRolesChanged,
 }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState(null)
@@ -110,7 +110,12 @@ export default function People({
 
   const profileTenure = profileState === 'ready' && profile ? membershipDuration(profile) : ''
   const roleOf = (host) => roleIn(communityRoles, host)
-  const isOwner = Boolean(canMessage && me?.host && roleOf(me.host) === 'owner')
+  const myRole = canMessage && me?.host ? roleOf(me.host) : null
+  const isOwner = myRole === 'owner'
+  // Owners and admins may ban ordinary members (never a moderator or themselves).
+  const canModerate = myRole === 'owner' || myRole === 'admin'
+  const banned = new Set(bannedHosts)
+  const isBanned = (host) => !roleOf(host) && banned.has(host)
   const [roleBusy, setRoleBusy] = useState(false)
   const [confirmHandover, setConfirmHandover] = useState(false)
   useEffect(() => { setConfirmHandover(false) }, [selectedHost])
@@ -167,6 +172,19 @@ export default function People({
     }
   }
 
+  async function changeBan(target, ban) {
+    setRoleBusy(true)
+    try {
+      await setMemberBan(target.host, ban)
+      showToast(banChangedMessage(target, ban), 'success')
+      await onRolesChanged?.()
+    } catch (error) {
+      showToast(error.message || 'The ban couldn’t be changed.', 'error')
+    } finally {
+      setRoleBusy(false)
+    }
+  }
+
   return (
     <div className={`cn-content cn-screen${selectedHost ? ' has-dialog' : ''}`}>
       <div className="cn-search">
@@ -192,8 +210,13 @@ export default function People({
       )}
 
       <div className="cn-people-list">
-        {sortByRole(results || [], communityRoles).map((user) => (
-          <button className="cn-row" key={user.host}
+        {sortByRole(results || [], communityRoles).map((user) => {
+          // Owners and admins ban from the row: on hover with a pointer, always shown on touch.
+          const quickBan = canModerate && !roleOf(user.host) && user.host !== me?.host
+          const who = user.handle ? `@${user.handle}` : 'this member'
+          return (
+          <div className={`cn-people-item${quickBan ? ' has-quick-ban' : ''}`} key={user.host}>
+          <button className="cn-row"
                   onClick={(event) => {
                     profileReturnFocus.current = event.currentTarget
                     setSelectedHost(user.host)
@@ -205,12 +228,23 @@ export default function People({
                 <span className="cn-row-name">
                   <strong>{user.handle ? `@${user.handle}` : 'Social member'}{user.host === me?.host ? ' (you)' : ''}</strong>
                   <RoleLabel role={roleOf(user.host)} />
+                  {isBanned(user.host) && <span className="cn-role-label is-banned">Banned</span>}
                 </span>
               </span>
               {user.bio ? <span className="cn-preview">{user.bio}</span> : null}
             </span>
           </button>
-        ))}
+          {quickBan && (
+            <button type="button" className={`cn-ban-btn cn-quick-ban${isBanned(user.host) ? ' is-unban' : ''}`}
+                    disabled={roleBusy}
+                    aria-label={isBanned(user.host) ? `Unban ${who}` : `Ban ${who}`}
+                    onClick={() => changeBan(user, !isBanned(user.host))}>
+              {isBanned(user.host) ? 'Unban' : 'Ban'}
+            </button>
+          )}
+          </div>
+          )
+        })}
         {state === 'ready' && (results || []).length === 0 && (
           <div className="cn-empty">
             <div className="cn-empty-mark" aria-hidden="true"><Telescope /></div>
@@ -257,7 +291,8 @@ export default function People({
                   <Avatar name={profile.handle} host={profile.host} size="large" remote />
                   <div className="cn-profile-copy">
                     <h3 className="cn-profile-name">{profile.handle ? `@${profile.handle}` : 'Social member'}
-                      <RoleLabel role={roleOf(profile.host)} /></h3>
+                      <RoleLabel role={roleOf(profile.host)} />
+                      {isBanned(profile.host) && <span className="cn-role-label is-banned">Banned</span>}</h3>
                     {profileTenure && <p className="cn-profile-tenure">{profileTenure}</p>}
                   </div>
                 </div>
@@ -277,8 +312,8 @@ export default function People({
                 )}
                 <GifPicker open={gifChoice.picking} onClose={gifChoice.close} onPick={gifChoice.pick} />
                 {isOwner && profile.host !== me?.host && (
-                  <section className="cn-role-manage" aria-label="Community role">
-                    <h4>Community role</h4>
+                  <section className="cn-role-manage" aria-label="Manage member">
+                    <h4>Manage member</h4>
                     {confirmHandover ? (
                       <>
                         <p className="cn-sheet-body">
@@ -294,13 +329,13 @@ export default function People({
                       </>
                     ) : (
                       <div className="cn-sheet-actions">
-                        {roleOf(profile.host) === 'admin'
+                        {isOwner && (roleOf(profile.host) === 'admin'
                           ? <button className="cn-btn cn-btn-secondary" disabled={roleBusy}
                                     onClick={() => changeRole(profile, 'none')}>Remove admin</button>
                           : <button className="cn-btn cn-btn-secondary" disabled={roleBusy}
-                                    onClick={() => changeRole(profile, 'admin')}>Make admin</button>}
-                        <button className="cn-btn cn-btn-ghost" disabled={roleBusy}
-                                onClick={() => setConfirmHandover(true)}>Make owner…</button>
+                                    onClick={() => changeRole(profile, 'admin')}>Make admin</button>)}
+                        {isOwner && <button className="cn-btn cn-btn-ghost" disabled={roleBusy}
+                                            onClick={() => setConfirmHandover(true)}>Make owner…</button>}
                       </div>
                     )}
                   </section>

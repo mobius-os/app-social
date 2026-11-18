@@ -205,6 +205,8 @@ export const searchPeople = (q, signal, { background = false } = {}) =>
 // The Community owner promotes, demotes, or hands over ownership.
 export const setCommunityRole = (host, role) =>
   call('community/role', { method: 'POST', body: JSON.stringify({ host, role }) })
+export const setMemberBan = (host, banned) =>
+  call('community/ban', { method: 'POST', body: JSON.stringify({ host, banned }) })
 export const getPeer = (host, signal, { background = false } = {}) =>
   call(`peer/${encodeURIComponent(host)}`, { signal, background })
 export async function getAppIcon(appId) {

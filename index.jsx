@@ -665,6 +665,10 @@ export default function App({ appId, token }) {
     activeGroups.reduce((sum, g) => sum + (g.unread || 0), 0)
   const canParticipate = participationStep(me) === 'ready' && me?.registration !== 'missing'
   const communityRoles = feedCapabilities.roles && typeof feedCapabilities.roles === 'object' ? feedCapabilities.roles : {}
+  // Members an owner or admin has banned; the host and every member's Social enforce it.
+  const bannedHosts = Array.isArray(feedCapabilities.banned) ? feedCapabilities.banned : []
+  // A ban locks this member out of everything: the board, Chats and People.
+  const bannedFromCommunity = Boolean(me?.host && bannedHosts.includes(me.host))
 
   // ── render ────────────────────────────────────────────────────────────────
   // The Social header and tabs stay on screen while a chat is open; a chat
@@ -704,6 +708,25 @@ export default function App({ appId, token }) {
   function leaveThreadFor(next) {
     closeThread()
     if (next !== tab) selectTab(next)
+  }
+
+  if (bannedFromCommunity) {
+    return (
+      <div className="cn-root"><style>{CSS}</style>
+        <header className="cn-header">
+          <div className="cn-brand">
+            {appIconUrl
+              ? <img className="cn-app-icon" src={appIconUrl} alt="" draggable="false" />
+              : <span className="cn-mark" aria-hidden="true"><span className="cn-mark-orbit" /></span>}
+            <h1 className="cn-title">Social</h1>
+          </div>
+        </header>
+        <section className="cn-banned-screen" role="alert" aria-labelledby="cn-banned-title">
+          <h2 id="cn-banned-title">You’ve been banned from this Community</h2>
+          <p>An owner or admin has banned you. You can’t read or post on the Community, find people, or send messages.</p>
+        </section>
+      </div>
+    )
   }
 
   if (thread && canParticipate) {
@@ -808,7 +831,7 @@ export default function App({ appId, token }) {
         )}
         {tab === 'people' && (
           canParticipate ? <People me={me} canMessage={canParticipate}
-                  communityRoles={communityRoles}
+                  communityRoles={communityRoles} bannedHosts={bannedHosts}
                   onRolesChanged={() => loadFeed()}
                   onMessage={(host, name) => openThread(host, name)} showToast={showToast}
                   requestedProfile={profileRequest}

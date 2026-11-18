@@ -67,6 +67,27 @@ deleted reply ids so a delayed retry cannot restore them, and an older or
 replayed edit never overwrites a newer one. Until the Community host is updated,
 these actions report that the server does not support them yet.
 
+### Bans
+
+The Community's owner and admins can ban an ordinary member from **People**,
+with **Ban** on the member's row, shown on hover or always on touch screens
+(**Unban** reverses it).
+Owners and admins can't be banned. A ban locks the member out of everything:
+
+- The host refuses their posts, replies, edits and reactions, gives their
+  Social an empty board, and shows them no one else in People. Other members no
+  longer find them in People; moderators still do, so they can unban.
+- Messages travel directly between instances, so each Social enforces the ban
+  itself. It saves the Community's ban list whenever it reads the board,
+  refreshes it at most every five minutes, and refuses direct messages,
+  reactions, edits and group traffic to or from a banned member. Leaving or
+  being removed from a group still works.
+- The banned member's own Social shows only a notice that they were banned.
+
+Ban changes apply in signing order, so a replayed older ban can't undo a newer
+unban. Members whose Social predates bans don't refuse a banned person's
+messages until they update.
+
 ### Photos and captions
 
 Direct messages, group messages, and Community posts send photo attachments
